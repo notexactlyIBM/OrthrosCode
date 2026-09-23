@@ -1,0 +1,26 @@
+# Made on each machine by SETUP.bat and Orthros -- not part of the project.
+
+# The two live agents. Each keeps its own git history (the undo button for
+# the other agent's edits), so they cannot live inside this repository.
+# Their code is published through agent\, refreshed by `orthros.py --export`.
+OrthrosCode A/
+OrthrosCode B/
+JanusCoder A/
+JanusCoder B/
+
+# ~800 MB of packages, rebuilt from agent/requirements.txt.
+shared-venv/
+venv/
+
+# Orthros's runtime state, settings and logs.
+logs/
+.orthros-state.json
+orthros.json
+orthros.log
+.janus-state.json
+janus.json
+janus.log
+
+__pycache__/
+*.pyc
+*.tmp

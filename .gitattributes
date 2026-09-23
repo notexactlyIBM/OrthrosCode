@@ -1,0 +1,5 @@
+# Normalise text files, but keep Windows batch files in CRLF: cmd.exe
+# mishandles labels and GOTO in a batch file with Unix line endings.
+* text=auto
+*.bat text eol=crlf
+*.cmd text eol=crlf

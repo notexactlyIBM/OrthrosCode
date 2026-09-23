@@ -1,0 +1,11 @@
+# OrthrosCode agent dependencies.
+# Installed into this folder's venv by SETUP.bat.
+
+aider-chat>=0.86.2
+streamlit>=1.30
+openai>=1.30
+requests>=2.31
+# The in-round linter (flake8's F rules) and the research tool.
+flake8>=7.0
+httpx>=0.27
+beautifulsoup4>=4.12

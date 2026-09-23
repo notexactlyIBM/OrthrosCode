@@ -1,0 +1,1 @@
+import os, site, sys; d = os.path.normpath(os.path.join(sys.prefix, os.pardir, os.pardir, 'shared-venv')); c = os.path.join(d, 'pyvenv.cfg'); v = [l.split('=', 1)[1].strip() for l in open(c) if l.startswith('version')] if os.path.isfile(c) else []; v and v[0].startswith('%d.%d.' % sys.version_info[:2]) and site.addsitedir(os.path.join(d, 'Lib', 'site-packages'))

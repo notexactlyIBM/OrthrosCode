@@ -1,0 +1,21 @@
+# A OrthrosCode agent. What stays out of this folder's history.
+
+# The Python environment SETUP.bat builds. Recreated from requirements.txt.
+venv/
+__pycache__/
+*.pyc
+*.tmp
+
+# Written at runtime -- by this agent's own launcher, or by the other agent
+# while it works on this folder: status, logs, the round prompt, aider's
+# chat history, the dashboard's preferences. Includes .localcoder-managed,
+# the marker that lets the other agent commit and roll back here; ignored so
+# that a rollback can never remove it.
+.localcoder*
+.aider*
+.localcoder-round.md
+.localcoder-ralph.log
+.localcoder-aider.log
+.localcoder-status.json
+.localcoder-stop
+.localcoder-aider.log.1

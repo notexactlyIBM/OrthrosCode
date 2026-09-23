@@ -1,0 +1,39 @@
+# Skills: how common changes are done in this codebase
+
+**Add a setting.** In config.cmd add `set "LC_NAME=value"` under a `REM ---`
+heading that says what it does and why. Read it where it is used:
+`env_int("LC_NAME", default)` in supervisor_env.py, or
+`_env_int("LC_NAME", default)` in ralph_common.py. Nothing else reads config.cmd.
+
+**Add a tool a round can ask for.** In ralph_tools.py add a regex like
+`FIND_ASK`, handle it in `handle_tool_requests` by writing the answer into
+FOUND.md and replacing the request line with a note. Then add one line
+describing it to RALPH_PROMPT.md under "How to work".
+
+**Grow a module past ~9,000 tokens? Split it.** Make a new module holding
+the function and the imports it needs, import it back where it was used,
+and keep the name. Never merge modules back together.
+
+**Add a new ralph_ module.** Create `ralph_<name>.py` with the function and
+the imports it needs. Import it back where it was used (usually
+`ralph_session.py` or another `ralph_` module) and keep the name. Then add
+`test_ralph_<name>.py` at the top level: `class Test...(unittest.TestCase)`,
+using `tempfile` for any files, no network, no LM Studio, no sleeping.
+The whole suite must still finish in seconds.
+
+**Add a test.** A `test_<module>.py` at the top level, with
+`class Test...(unittest.TestCase)`. Use `tempfile` for any files. No network,
+no LM Studio, no sleeping: the whole suite runs after every edit and must
+take seconds. Never delete or weaken a test to make a change pass.
+
+**Change what the model is told.** Prompts that LocalCoder writes are
+constants in ralph_prompts.py. The standing prompt for a folder is its
+RALPH_PROMPT.md; the task list header is read every round.
+
+**Record something the next session should know.** `record_lesson(workspace,
+text)` in ralph_tools.py appends to LESSONS.md, whose newest lines go in
+front of every round.
+
+**Find where something is used.** Write `FIND: name` in the task list and
+stop; the matches are in FOUND.md next round. `DOCS: module` does the same
+with an installed library's own documentation.

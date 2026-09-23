@@ -72,6 +72,8 @@ commands the model suggests.
 
 ### The Ralph loop -- why a round is a whole process
 
+![Ralph Loop](https://i.imgur.com/jfU6x3U.jpeg)
+
 The loop around aider is the "Ralph" technique: rather than one long
 conversation, run the *same* prompt again in a fresh process, and keep
 progress in files and git instead of in the model's memory. Each round starts

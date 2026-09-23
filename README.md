@@ -15,7 +15,7 @@ where every step is a git commit you can read.
 
 ---
 
-![Image](https://i.imgur.com/DUmINED.jpeg)
+![Image](https://i.imgur.com/zQBjZMC.jpeg)
 
 
 ## Why it is interesting

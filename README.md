@@ -82,13 +82,70 @@ enough to work on a codebase that does not fit in it.
 ## How it works
 
 ```mermaid
-flowchart LR
-    A["OrthrosCode A"] -- "edits" --> BS["B's source"]
-    BS -- "runs as" --> B["OrthrosCode B"]
-    B -- "edits" --> AS["A's source"]
-    AS -- "runs as" --> A
-    J{{"Orthros, the referee"}} -. "one turn at a time,<br/>hands over the GPU" .-> A
-    J -.-> B
+flowchart TD
+    %% Define Styles
+    classDef referee fill:#f9f2f4,stroke:#d0a0b0,stroke-width:2px,color:#333
+    classDef agent fill:#eef6fc,stroke:#8ab4f8,stroke-width:2px,color:#333
+    classDef tool fill:#e8f5e9,stroke:#81c995,stroke-width:2px,color:#333
+    classDef storage fill:#fff3e0,stroke:#ffb74d,stroke-width:2px,color:#333
+
+    subgraph Referee ["Orthros Referee (orthros.py)"]
+        direction TB
+        JStart["1. Preflight Checks<br/>(Python Imports & Unittests)"] --> JLoad["2. Load Model<br/>(via LM Studio CLI 'lms')"]
+    end
+    class Referee referee
+
+    JLoad --> AgentTurn
+
+    subgraph AgentTurn ["Agent Turn (e.g. OrthrosCode A modifying B)"]
+        direction TB
+        subgraph RalphLoop ["The Ralph Loop (Fresh Process per Round)"]
+            direction TB
+            DiskRead[("Read State from Disk<br/>(orthros_tasks.md, PLAN.md,<br/>RALPH_PROMPT.md, SKILLS.md)")]
+            
+            AiderExec{{"Aider (Non-interactive)<br/>AI Pair Programmer"}}
+            
+            LocalModel(("LM Studio API<br/>(127.0.0.1 on local GPU)"))
+            
+            CodeEdit["Write Code to Target Folder"]
+            LintTest{"Run flake8 Linter<br/>& Unittests"}
+            Reviewer{"Reviewer Request<br/>(Cold evaluation of diff)"}
+            GitCommit[("Git Commit<br/>(Checkpoint)")]
+            UndoRollback["Undo Edit & Log to LESSONS.md"]
+            ToolExec["Execute Tools<br/>(FIND, DOCS, RESEARCH)"]
+
+            DiskRead --> AiderExec
+            AiderExec <--> LocalModel
+            AiderExec --> CodeEdit
+            CodeEdit --> LintTest
+            LintTest -- "Failures" --> AiderExec
+            LintTest -- "Passes" --> Reviewer
+            Reviewer -- "Kept" --> GitCommit
+            Reviewer -- "Rejected" --> UndoRollback
+            GitCommit --> ToolExec
+            ToolExec --> DiskRead
+        end
+    end
+    class AgentTurn agent
+    class DiskRead,GitCommit storage
+    class AiderExec,LocalModel tool
+
+    RalphLoop --> Handover["3. Handover<br/>(Unload model, kill server)"]
+
+    subgraph Judgement ["Judgement & Cross-Pollination"]
+        direction TB
+        Handover --> StartupTest{"Test Agent Startup<br/>& Work"}
+        StartupTest -- "Fails" --> RevertTarget["Revert to Last Proven Git Tag<br/>(Rollback)"]
+        StartupTest -- "Succeeds" --> MarkProven["Mark Version Proven"]
+        MarkProven --> SyncTwin["Copy Changes Back to Twin Agent<br/>(Cross-Pollination)"]
+    end
+    class Judgement referee
+
+    RevertTarget --> FieldReport
+    SyncTwin --> FieldReport["4. Field Report<br/>(Write PROGRESS.md & FIELD_REPORT.md)"]
+    
+    FieldReport --> SwapTurn["Switch Turn to Other Agent"]
+    SwapTurn --> Referee
 ```
 
 Each agent is a complete autonomous coder -- aider, the Ralph loop and the

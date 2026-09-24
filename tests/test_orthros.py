@@ -257,6 +257,22 @@ class TestApplyPatch(Sandbox):
             self.assertEqual(state["agents"][n]["goods"][-1], orthros.head(folder))
         self.assertIn("now proven", out.getvalue())
 
+    def test_tests_without_their_code_put_everything_back_and_say_why(self):
+        patch = ("diff --git a/agent.py b/agent.py\n--- a/agent.py\n+++ b/agent.py\n"
+                 "@@ -1,2 +1,2 @@\n def f():\n-    return 99\n+    return 7\n"
+                 "diff --git a/test_agent.py b/test_agent.py\nnew file mode 100644\n"
+                 "--- /dev/null\n+++ b/test_agent.py\n@@ -0,0 +1,5 @@\n+import unittest\n"
+                 "+import agent\n+class T(unittest.TestCase):\n+    def test_f(self):\n"
+                 "+        self.assertEqual(agent.f(), 7)\n")
+        self.write(self.root, "half.patch", patch)
+        before = orthros.head(self.o.folders["A"])
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(orthros.apply_patch(self.root, os.path.join(self.root, "half.patch")),
+                             1)
+        self.assertIn("did not fit A's code: agent.py", out.getvalue())
+        self.assertFalse(os.path.exists(os.path.join(self.o.folders["A"], "test_agent.py")))
+        self.assertEqual(orthros.git(self.o.folders["A"], "diff", "--quiet", before)[0], True)
+
     def test_a_crlf_file_takes_an_lf_patch(self):
         for n in orthros.NAMES:
             folder = self.o.folders[n]

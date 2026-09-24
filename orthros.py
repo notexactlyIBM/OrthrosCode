@@ -2097,13 +2097,20 @@ def apply_patch(root, patch_path):
         before = commit_all(folder, "Orthros: before the operator's patch")
         applied, missed = [], []
         for rel, part in parts:
-            fd, tmp = tempfile.mkstemp(suffix=".patch")
-            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-                handle.write(match_line_endings(part, os.path.join(folder, rel)))
-            ok, out = git(folder, "apply", "--whitespace=nowarn", tmp)
-            if not ok:
-                ok, out = git(folder, "apply", "--3way", "--whitespace=nowarn", tmp)
-            os.remove(tmp)
+            ok, out = False, ""
+            # Exact first, in the file's own line endings; then forgiving of
+            # whitespace (a file an editor left with mixed endings); then a
+            # three-way merge, which needs the patch's base in the history.
+            for text, how in ((match_line_endings(part, os.path.join(folder, rel)), []),
+                              (part, ["--ignore-whitespace"]), (part, ["--3way"])):
+                fd, tmp = tempfile.mkstemp(suffix=".patch")
+                with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+                    handle.write(text)
+                ok, out = git(folder, "apply", "--whitespace=nowarn", *how, tmp)
+                os.remove(tmp)
+                if ok:
+                    break
+                git(folder, "checkout", "-q", "--", ".")   # a failed 3-way leaves markers
             if ok:
                 applied.append(rel)
                 continue
@@ -2124,8 +2131,13 @@ def apply_patch(root, patch_path):
         if problems:
             git(folder, "reset", "--hard", "-q", before)
             git(folder, "clean", "-fdq")
-            print("%s: the patched version fails its checks, so it was put back: %s"
-                  % (n, "; ".join(problems)[:300]))
+            print("%s: the patched version fails its checks, so it was put back as it was: %s"
+                  % (n, "; ".join(problems)[:600]))
+            if missed:
+                print("   Left out because they did not fit %s's code: %s"
+                      % (n, "; ".join(m.split(" (")[0] for m in missed)))
+                print("   Most likely %s's code has moved on from the version this patch was "
+                      "made against, so tests arrived without the code they test." % n)
             status = 1
             continue
         sha = commit_all(folder, "Orthros: operator patch %s" % os.path.basename(patch_path))

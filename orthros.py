@@ -96,7 +96,7 @@ GUARD_REFUSED = "Orthros guard: prompt too big"
 # rollback of the code keeps them, and they are never carried across.
 MEMORY_FILES = ("orthros_tasks.md", "janus_tasks.md", "PLAN.md", "PROGRESS.md", "PROGRESS.old.md", "DONE.md",
                 "BRIEF.md", "CONVENTIONS.md", "RALPH_PROMPT.md", "RESEARCH.md",
-                "LESSONS.md", "FOUND.md", "FIELD_REPORT.md", "ROLLBACK.md")
+                "LESSONS.md", "FOUND.md", "FIELD_REPORT.md", "ROLLBACK.md", "GISTS.md")
 FIELD_REPORT = "FIELD_REPORT.md"
 ROLLBACK_NOTE = "ROLLBACK.md"
 DIFF_NOTE_CHARS = 8000               # of the undone diff written into ROLLBACK.md
@@ -210,7 +210,7 @@ STATUS_FILE = ".localcoder-status.json"
 STOP_FILE = ".localcoder-stop"
 MANAGED_MARKER = ".localcoder-managed"
 LAUNCHED = {"ready", "planning", "researching", "working", "checking", "reviewing",
-            "engine down", "finished"}
+            "engine down", "finished", "locating", "summarising"}
 
 CREATE_NO_WINDOW = 0x08000000
 CREATE_NEW_PROCESS_GROUP = 0x00000200

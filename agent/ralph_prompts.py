@@ -39,6 +39,11 @@ stop -- the answer will be in RESEARCH.md next round:
 
     RESEARCH: <what you need to know>
 
+A file too big to be sent to you -- a long log, a big module -- can be read
+in parts, and the answer is in FOUND.md next round:
+
+    DIGEST: <file> -- <what you need to know from it>
+
 Never touch the global Python install. Use the project's own venv if it has one.
 Keep the change small. Another round follows this one.
 

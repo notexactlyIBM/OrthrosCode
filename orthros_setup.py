@@ -63,6 +63,9 @@ stop; the answer comes with the next round:
     RESEARCH: <question>   a web search and page fetch        -> RESEARCH.md
     FIND: <text>           every line in this project with it  -> FOUND.md
     DOCS: <module>         an installed library's documentation -> FOUND.md
+    DIGEST: <file> -- <question>   a file too big to send, read in parts -> FOUND.md
+
+GISTS.md, sent to planning rounds, sums up every module in a few lines.
 
 The tests (`test_*.py`, unittest) run after every edit and before every
 launch; a change that leaves them failing is rolled back. Never delete or

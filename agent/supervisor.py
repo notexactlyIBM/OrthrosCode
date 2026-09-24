@@ -51,7 +51,7 @@ from supervisor_engine import (SHUTTING_DOWN, check_gpu_is_free, describe_entry,
 from supervisor_git import (commit_everything, discard_uncommitted, ensure_git_repo,
     is_managed, snapshot_workspace, workspace_file_count,
     workspace_is_usable_git_repo)
-from supervisor_aider import (build_aider_command, grow_round_output, review_change,
+from supervisor_aider import (ask_model, build_aider_command, grow_round_output, review_change,
     set_temperature, shrink_round_output, write_model_metadata,
     write_nobrowser)
 
@@ -477,6 +477,9 @@ def main():
                 temps=(TEMP_CODE, TEMP_BRAINSTORM),
                 # The worker should not be the one who decides its work is done.
                 review=review_change if REVIEW else None,
+                # The loop's own small questions: which files an item needs,
+                # a gist of each module, a long file read in parts.
+                ask=ask_model,
                 # Re-read after each kept round, so a module the model creates
                 # is sent and checked like the rest.
                 list_files=ralph_edit_files,

@@ -1,0 +1,858 @@
+diff --git a/README.md b/README.md
+index 3063115..759326f 100644
+--- a/README.md
++++ b/README.md
+@@ -56,6 +56,9 @@ into items, and checks earlier work -- until the clock runs out.
+ | `ralph_session.py` | the loop itself, with `ralph_setup`, `ralph_refill`, `ralph_outcome`, `ralph_report` |
+ | `ralph_rounds.py` | one aider round, research, the diff the reviewer sees |
+ | `ralph_send.py` | what one round is sent: its files, its reading, the numbers it came back with |
++| `ralph_locate.py` | asks which files an item needs when it names none (after Agentless) |
++| `ralph_gists.py` | GISTS.md: every module in a few lines, for planning (after ReadAgent) |
++| `ralph_digest.py` | `DIGEST:` reads a file too big for a round in parts (after Chain-of-Agents) |
+ | `ralph_prompts.py` | everything the model is told |
+ | `ralph_tasks.py` | task list, plan (`PLAN.md`), progress ledger (`PROGRESS.md`) |
+ | `ralph_checks.py` | parse, import, start, and keep files small enough for a round |
+diff --git a/SKILLS.md b/SKILLS.md
+index 928d4fc..0d3add8 100644
+--- a/SKILLS.md
++++ b/SKILLS.md
+@@ -38,6 +38,11 @@ front of every round.
+ stop; the matches are in FOUND.md next round. `DOCS: module` does the same
+ with an installed library's own documentation.
+ 
++**Read something too big to be sent.** `DIGEST: <file> -- <question>` reads
++the file in parts, carrying notes from part to part, and puts the answer in
++FOUND.md (ralph_digest.py). Slow -- one request a part -- but nothing is too
++long. `.localcoder-aider.log` is last session's full transcript.
++
+ **Add a way for a session to stop -- or better, not to.** An early stop
+ throws away the rest of the turn, so first try to recover: park the item
+ (`park_task`), move to the next brief, or send less next round. When a stop
+diff --git a/config.cmd b/config.cmd
+index be65759..541c91b 100644
+--- a/config.cmd
++++ b/config.cmd
+@@ -86,6 +86,13 @@ REM  It is still 1.8x the largest prompt ever measured here, and it leaves
+ REM  about 1GB more headroom than 49152 for the decode-time allocations
+ REM  that are what actually fail.  Do not raise it to buy context that is
+ REM  not being used -- peak measured use is 18.5k of it.
++REM
++REM  Twice the context for the same memory: in LM Studio, open the model's
++REM  default settings (My Models, the gear) and set Flash Attention on and
++REM  K and V cache quantization to Q8_0.  `lms load` cannot set those, but
++REM  it uses the model's defaults.  The cache then takes half the room, so
++REM  65536 here costs about what 32768 cost before.  Try it with SELFTEST,
++REM  watch the first turn, and come back to 32768 on any "bad allocation".
+ set "LC_CONTEXT=32768"
+ 
+ REM --- How many requests it can answer at once. -------------
+@@ -240,6 +247,21 @@ REM  time per round.  Same model, so the same blind spots -- but a cold
+ REM  read of a diff catches what the author talked itself past.
+ set "LC_RALPH_REVIEW=1"
+ 
++REM --- Trading time for results. ------------------------------
++REM  Tries an item gets before it is parked.  Each try runs warmer than
++REM  the one before, so the tries differ, and the tests and the reviewer
++REM  keep the one that holds -- more tries, better odds, more time.
++set "LC_RALPH_ATTEMPTS=3"
++REM  An item that names no file it can be matched to: first ask the model
++REM  which files, from an outline of every module.  One short request.
++set "LC_RALPH_LOCATE=1"
++REM  Modules summed up in GISTS.md by the model per refill, for the planner.
++REM  0 = keep only the docstring summaries, which cost nothing.
++set "LC_RALPH_GISTS_PER_REFILL=6"
++REM  Most parts a DIGEST: request reads a file in.  About 5,000 tokens a
++REM  part and one request each, so 12 is roughly 60,000 tokens of file.
++set "LC_RALPH_DIGEST_PARTS=12"
++
+ REM --- Start even when the card is shared? (1/0) -----------
+ REM  LEAVE THIS AT 0.  An unattended run refuses to start if something
+ REM  else is already on the graphics card -- a second LM Studio, an
+diff --git a/ralph.py b/ralph.py
+index 63c04b9..d84233d 100644
+--- a/ralph.py
++++ b/ralph.py
+@@ -53,6 +53,6 @@ def run_loop(base_cmd, workspace, child_env, minutes, single_shot, **options):
+ 
+     Options are Session's keyword arguments: notes_hint, edit_files,
+     iteration_timeout, commit, revive, rollback, entry_hint, run_seconds,
+-    shrink_output, grow_output, gpu_probe, set_temperature, temps, review.
++    shrink_output, grow_output, gpu_probe, set_temperature, temps, review, ask.
+     """
+     return Session(base_cmd, workspace, child_env, minutes, single_shot, **options).run()
+diff --git a/ralph_common.py b/ralph_common.py
+index da1a008..5e61142 100644
+--- a/ralph_common.py
++++ b/ralph_common.py
+@@ -75,8 +75,6 @@ SEED_HEADINGS = (
+     "features", "bug hunt", "design review", "polish", "improvements",
+ )
+ 
+-ROUNDS_IF_SMALL = 2
+-ROUNDS_IF_BIG = 5
+ 
+ 
+ def _env_int(name, default, floor=1):
+@@ -91,6 +89,14 @@ def _env_flag(name, default=False):
+     return default if not value else value == "1"
+ 
+ 
++# Attempts an item gets before it is parked. Each retry runs warmer than the
++# one before (ralph_send.attempt_temperature): repeated sampling only helps
++# when the samples differ, and the tests and the reviewer pick the one that
++# holds. Brown et al., "Large Language Monkeys" (2024). See config.cmd.
++ROUNDS_IF_SMALL = _env_int("LC_RALPH_ATTEMPTS", 3)
++ROUNDS_IF_BIG = max(ROUNDS_IF_SMALL, 5)
++
++
+ # How many times a session may go back and look for more work once the list is
+ # empty. Zero means as often as the clock allows, which is the point: a run
+ # asked for ninety minutes should spend ninety minutes. Four used to be the
+@@ -142,6 +148,13 @@ RESEARCH_AUTO = os.environ.get("LC_RALPH_RESEARCH", "1").strip() != "0"
+ TEMP_CODE = 0.2
+ TEMP_BRAINSTORM = 0.85
+ 
++# The loop's own small jobs for the model, each a plain request (see config.cmd):
++# find the files an item needs when it names none, keep a short summary of
++# every module for planning, and read files too big for one window in parts.
++LOCATE = os.environ.get("LC_RALPH_LOCATE", "1").strip() != "0"
++GISTS_PER_REFILL = _env_int("LC_RALPH_GISTS_PER_REFILL", 6, floor=0)
++DIGEST_PARTS = _env_int("LC_RALPH_DIGEST_PARTS", 12)
++
+ # Split a source file once it passes this many tokens. See config.cmd.
+ FILE_TOKEN_CAP = _env_int("LC_RALPH_MAX_FILE_TOKENS", 9000)
+ 
+diff --git a/ralph_digest.py b/ralph_digest.py
+new file mode 100644
+index 0000000..ebed575
+--- /dev/null
++++ b/ralph_digest.py
+@@ -0,0 +1,96 @@
++"""Read a file too big for one window, in parts: `DIGEST: <file> -- <question>`.
++
++Chain-of-Agents (Zhang et al., Google, 2024): workers read a long input one
++chunk at a time, each passing its notes to the next, and a manager answers
++from the last notes. One request at a time, so it suits one card; slow, but
++nothing is too long to read. Used for transcripts, logs, big modules --
++anything a round needs to know about and cannot be sent whole.
++
++Recursive Language Models (Zhang, Kraska and Khattab, 2025) go further, having
++the model write code to search the text; that means running code the model
++wrote, which the unattended loop does not do.
++"""
++
++import os
++import re
++
++from ralph_common import read_text
++
++DIGEST_ASK = re.compile(r"^\s*DIGEST:\s*(.+?)\s*$", re.MULTILINE)
++PART_CHARS = 20000           # about 5,000 tokens a part, with room for the notes
++MAX_PART_CHARS = 28000
++
++WORKER = """You are reading a long file in parts to answer a question.
++
++Question: %s
++
++Notes so far, from the parts before this one:
++%s
++
++Part %d of %d of %s:
++----
++%s
++----
++
++Rewrite the notes: keep what helps answer the question, add what this part
++adds, drop the rest. Quote exact names, numbers and error messages. At most
++250 words. Reply with the notes only."""
++
++MANAGER = """Question: %s
++
++Notes taken while reading all of %s, part by part:
++%s
++
++Answer the question from the notes in at most 200 words. If the notes do not
++hold the answer, say so plainly."""
++
++
++def parse_request(text):
++    """('file', 'question') from 'file -- question' or 'file | question'."""
++    for sep in (" -- ", " | "):
++        if sep in text:
++            name, question = text.split(sep, 1)
++            return name.strip().strip("`\"'"), question.strip()
++    return text.strip().strip("`\"'"), "What does this contain that matters here?"
++
++
++def inside(workspace, name):
++    """The file's path if it is inside the workspace, else ''."""
++    root = os.path.realpath(workspace)
++    path = os.path.realpath(os.path.join(root, name))
++    return path if path.startswith(root + os.sep) and os.path.isfile(path) else ""
++
++
++def split_parts(text, most, size=PART_CHARS):
++    """Whole lines, in parts of about `size` characters -- fewer, larger ones
++    if there would be more than `most`. Returns (parts, whether it all fitted)."""
++    size = min(MAX_PART_CHARS, max(size, len(text) // max(1, most) + 1))
++    parts, current = [], []
++    length = 0
++    for line in text.splitlines(True):
++        if current and length + len(line) > size:
++            parts.append("".join(current))
++            current, length = [], 0
++        current.append(line[:size])
++        length += len(current[-1])
++    if current:
++        parts.append("".join(current))
++    return parts[:most], len(parts) <= most
++
++
++def digest(path, question, ask, most=12):
++    """(answer, parts read, whether the whole file was read)."""
++    parts, whole = split_parts(read_text(path), most)
++    name = os.path.basename(path)
++    notes = "(none yet)"
++    for number, part in enumerate(parts, 1):
++        try:
++            notes = (ask(WORKER % (question, notes, number, len(parts), name, part))
++                     or notes).strip()
++        except Exception:
++            continue
++    try:
++        answer = (ask(MANAGER % (question, name, notes)) or "").strip()
++    except Exception:
++        answer = ""
++    return answer or notes, len(parts), whole
+diff --git a/ralph_gists.py b/ralph_gists.py
+new file mode 100644
+index 0000000..90b9508
+--- /dev/null
++++ b/ralph_gists.py
+@@ -0,0 +1,100 @@
++"""A short summary of every module, kept current: the planner's view of the whole.
++
++ReadAgent (Lee et al., Google DeepMind, 2024) reads a long text page by page,
++keeps a short gist of each page, and works from the gists -- opening a page in
++full only when it needs the detail. Here a page is a module. A planning round
++used to be sent whatever source fitted in 8,000 tokens, which on a project of
++thirty modules is a few of them; now it also gets GISTS.md, a few lines on
++every module, about 2,000 tokens for the lot.
++
++Gists are written by the model, a few per refill (each is a request, and a
++refill is already the slowest part of a session). Until a module's turn comes
++its gist is the first paragraph of its docstring, marked provisional. A gist
++is redone whenever its module changes.
++"""
++
++import ast
++import hashlib
++import os
++import re
++
++from ralph_common import read_text, write_text
++
++GISTS_FILE = "GISTS.md"
++MAX_CHARS = 24000            # of a module sent for its gist, about 6,000 tokens
++
++GIST_PROMPT = """Below is one module of a Python project. In at most three short
++lines, say what it is for, its main functions or classes, and what it works
++with. Plain words. No preamble, no code.
++
++File: %s
++
++%s
++"""
++
++ENTRY = re.compile(r"^## (\S+)  (~?)([0-9a-f]{12})\n(.*?)(?=^## |\Z)", re.MULTILINE | re.DOTALL)
++
++
++def fingerprint(path):
++    return hashlib.sha1(read_text(path).encode("utf-8", "replace")).hexdigest()[:12]
++
++
++def read_gists(path):
++    """{module: (fingerprint, provisional, text)}"""
++    return {m.group(1): (m.group(3), bool(m.group(2)), m.group(4).strip())
++            for m in ENTRY.finditer(read_text(path))}
++
++
++def docstring_gist(path):
++    """The module docstring's first paragraph: a gist that costs no request."""
++    try:
++        doc = ast.get_docstring(ast.parse(read_text(path))) or ""
++    except (SyntaxError, ValueError):
++        doc = ""
++    first = doc.strip().split("\n\n")[0]
++    return " ".join(first.split())[:300] or "(no summary yet)"
++
++
++def refresh_gists(workspace, files, ask=None, limit=6):
++    """Bring GISTS.md up to date. Returns (written by the model, still provisional)."""
++    path = os.path.join(workspace, GISTS_FILE)
++    gists = read_gists(path)
++    names = {os.path.basename(f): f for f in files if f.endswith(".py")}
++    changed = False
++    asked = 0
++    for name in sorted(names):
++        source = names[name]
++        fp = fingerprint(source)
++        old = gists.get(name)
++        if old and old[0] == fp and not old[1]:
++            continue
++        text = ""
++        if ask and asked < limit:
++            body = read_text(source)
++            if len(body) > MAX_CHARS:
++                body = body[:MAX_CHARS] + "\n[... the rest of the module is not shown ...]"
++            try:
++                text = ask(GIST_PROMPT % (name, body)) or ""
++            except Exception:
++                text = ""
++            asked += 1
++        lines = [" ".join(l.split()) for l in text.strip().splitlines() if l.strip()][:3]
++        if lines:
++            gists[name] = (fp, False, "\n".join(lines))
++            changed = True
++        elif not old or old[0] != fp:
++            gists[name] = (fp, True, docstring_gist(source))
++            changed = True
++    for name in [n for n in gists if n not in names]:
++        del gists[name]
++        changed = True
++    if changed:
++        body = ["# Gists: every module in a few lines", "",
++                "Kept by the loop, for planning. `~` marks one not yet written by the "
++                "model. Open the module itself for the detail.", ""]
++        for name in sorted(gists):
++            fp, provisional, text = gists[name]
++            body += ["## %s  %s%s" % (name, "~" if provisional else "", fp), text, ""]
++        write_text(path, "\n".join(body))
++    written = sum(1 for n in names if n in gists and not gists[n][1])
++    return written, len(names) - written
+diff --git a/ralph_locate.py b/ralph_locate.py
+new file mode 100644
+index 0000000..5da4c0f
+--- /dev/null
++++ b/ralph_locate.py
+@@ -0,0 +1,67 @@
++"""Find the files an item is about when it does not say.
++
++Agentless (Xia et al., 2024) localizes before it repairs: file, then function,
++then line, each step a small prompt. A round here is sent the files its item
++names in backticks. An item that names nothing findable in a project bigger
++than the window used to be sent no source at all, and the model guessed.
++Now one short request first: the item and an outline of every module --
++names only, a few thousand tokens -- and the model says which files to open.
++"""
++
++import os
++import re
++
++from ralph_common import read_text
++
++LOCATE_PROMPT = """Choose the source files a small change needs.
++
++The change:
++
++    %s
++
++The project's modules, each with the functions and classes it defines:
++
++%s
++
++Reply with the file names to open, most important first, one per line, at
++most %d. Nothing else."""
++
++DEFINES = re.compile(r"^[ \t]*(?:async[ \t]+)?(?:def|class)[ \t]+(\w+)", re.MULTILINE)
++FILE_NAME = re.compile(r"[\w.-]+\.py\b")
++
++
++def outline(files, per_file=40):
++    """One line per module: its name and the names it defines."""
++    lines = []
++    for path in files:
++        names = DEFINES.findall(read_text(path))
++        more = " ..." if len(names) > per_file else ""
++        lines.append("%s: %s%s" % (os.path.basename(path), ", ".join(names[:per_file]), more))
++    return "\n".join(lines)
++
++
++def locate(task, files, ask, most=3, budget=12000):
++    """The files `ask` picks for `task`, within `budget` tokens. [] if it cannot say."""
++    if not ask or len(files) < 2:
++        return []
++    try:
++        reply = ask(LOCATE_PROMPT % (task, outline(files), most)) or ""
++    except Exception:
++        return []
++    by_name = {os.path.basename(f).lower(): f for f in files}
++    picked = []
++    for word in FILE_NAME.findall(reply):
++        path = by_name.get(word.lower())
++        if path and path not in picked:
++            picked.append(path)
++    out, spent = [], 0
++    for path in picked[:most]:
++        try:
++            cost = os.path.getsize(path) // 4
++        except OSError:
++            continue
++        if out and spent + cost > budget:
++            continue
++        out.append(path)
++        spent += cost
++    return out
+diff --git a/ralph_prompts.py b/ralph_prompts.py
+index e619778..65d16ce 100644
+--- a/ralph_prompts.py
++++ b/ralph_prompts.py
+@@ -39,6 +39,11 @@ stop -- the answer will be in RESEARCH.md next round:
+ 
+     RESEARCH: <what you need to know>
+ 
++A file too big to be sent to you -- a long log, a big module -- can be read
++in parts, and the answer is in FOUND.md next round:
++
++    DIGEST: <file> -- <what you need to know from it>
++
+ Never touch the global Python install. Use the project's own venv if it has one.
+ Keep the change small. Another round follows this one.
+ 
+diff --git a/ralph_refill.py b/ralph_refill.py
+index 140d82a..7004d55 100644
+--- a/ralph_refill.py
++++ b/ralph_refill.py
+@@ -5,7 +5,9 @@ with its own failure modes -- a refill round sends the largest prompt of any
+ session, so it is where the engine dies and where the reply runs out of room.
+ """
+ 
+-from ralph_common import (BRAINSTORM_ROUNDS, BRAINSTORM_UNTIL, MAX_REFILLS, more_refills, say)
++from ralph_common import (BRAINSTORM_ROUNDS, BRAINSTORM_UNTIL, GISTS_PER_REFILL, MAX_REFILLS,
++    more_refills, say)
++from ralph_gists import refresh_gists
+ from ralph_prompts import compose_refill_prompt
+ from ralph_rounds import refill_list
+ from ralph_tasks import (drop_reparked, mark_decomposed, milestones, normalize_checkboxes,
+@@ -49,6 +51,15 @@ class RefillMixin:
+                      "%d of %d" % (self.refills, MAX_REFILLS) if MAX_REFILLS
+                      else "round %d" % self.refills))
+         say("-" * 62)
++        # The planner's view of every module, a few more written by the model
++        # each time. Slow on purpose: this is where time buys understanding.
++        if GISTS_PER_REFILL:
++            status.phase("summarising", "keeping GISTS.md current")
++            ask = getattr(self, "ask", None)
++            written, left = refresh_gists(self.workspace, self.edit_files, ask, GISTS_PER_REFILL)
++            if ask:
++                self.note("  gists: %d module(s) summed up by the model, %d still to do"
++                          % (written, left))
+         before = len(open_tasks(self.notes_path))
+         # Warm for inventing work: at the temperature that writes good diffs
+         # it returns the same four safe ideas every time. Cold for checking.
+diff --git a/ralph_rounds.py b/ralph_rounds.py
+index c6f4791..60d7337 100644
+--- a/ralph_rounds.py
++++ b/ralph_rounds.py
+@@ -143,7 +143,11 @@ def refill_list(base_cmd, workspace, child_env, notes_path, edit_files, timeout,
+     # list are what the review actually checks against the code. Both files
+     # stay readable; neither is worth a token on every refill.
+     # A budgeted slice of the source, not all of it -- see files_for_refill.
+-    reads = files_for_refill("%s %s" % (milestone or "", source), edit_files)
++    # With GISTS.md the planner already has every module in outline, so less
++    # of the source itself needs to come along.
++    gists = os.path.join(workspace, "GISTS.md")
++    budget = REFILL_SOURCE_BUDGET // 2 if os.path.isfile(gists) else REFILL_SOURCE_BUDGET
++    reads = files_for_refill("%s %s" % (milestone or "", source), edit_files, budget)
+     if mode == "plan":
+         # The planner needs to see what is already on the list so it does not
+         # propose ground the current batch already covers.
+@@ -160,7 +164,8 @@ def refill_list(base_cmd, workspace, child_env, notes_path, edit_files, timeout,
+             reads.append(os.path.join(workspace, RESEARCH_FILE))
+     # How the agent being worked on actually did in its last turns, and the
+     # mistakes rounds keep making: the evidence a plan should start from.
+-    reads += [os.path.join(workspace, name) for name in (FIELD_REPORT_FILE, LESSONS_FILE, "KNOWLEDGE.md")]
++    reads += [os.path.join(workspace, name) for name in (FIELD_REPORT_FILE, LESSONS_FILE, "KNOWLEDGE.md",
++                                                         "GISTS.md")]
+     for extra in reads:
+         if extra and os.path.isfile(extra):
+             cmd += ["--read", extra]          # readable, not writable
+diff --git a/ralph_send.py b/ralph_send.py
+index 3041e1b..85c5b1f 100644
+--- a/ralph_send.py
++++ b/ralph_send.py
+@@ -10,7 +10,8 @@ import re
+ import time
+ 
+ import status
+-from ralph_common import say
++from ralph_common import LOCATE, say
++from ralph_locate import locate
+ from ralph_prompts import compose_round_prompt, design_guide
+ from ralph_rounds import build_round_command, files_for_task, run_round
+ from ralph_tools import FOUND_FILE, SKILLS_FILE
+@@ -28,6 +29,17 @@ def recently_written(path, minutes=ANSWER_MINUTES):
+         return False
+ 
+ 
++def attempt_temperature(attempt, code, brainstorm, step=0.25):
++    """Warmer with each try at the same item, up to the brainstorm setting.
++
++    Repeated sampling with a verifier -- the tests and the reviewer here --
++    beats one careful attempt by a wide margin (Brown et al., "Large Language
++    Monkeys", 2024), but only if the attempts differ. At one temperature a
++    retry mostly writes the same rejected change again.
++    """
++    return round(min(max(code, brainstorm), code + step * max(0, attempt - 1)), 2)
++
++
+ class SendMixin:
+ 
+     def send_round(self, task):
+@@ -36,7 +48,18 @@ class SendMixin:
+                                             cut_off=self.was_cut_off, task=task)
+         # Only the files this item names, so a multi-module project does not
+         # pay for all of itself on every round.
++        self.set_temperature(attempt_temperature(self.rounds_on_task, self.temp_code,
++                                                 self.temp_brainstorm))
+         round_files = files_for_task(task, self.edit_files)
++        if not round_files and LOCATE and self.ask and len(self.edit_files) > 1:
++            # It names nothing that can be found. Ask which files, once per item.
++            if task not in self.located:
++                status.phase("locating", task)
++                self.located[task] = locate(task, self.edit_files, self.ask)
++                if self.located[task]:
++                    self.note("  located: %s" % ", ".join(
++                        os.path.basename(f) for f in self.located[task]))
++            round_files = list(self.located[task])
+         if len(round_files) < len(self.edit_files):
+             approx_tokens = 0
+             for path in round_files:
+diff --git a/ralph_session.py b/ralph_session.py
+index b9fdce1..7d57316 100644
+--- a/ralph_session.py
++++ b/ralph_session.py
+@@ -39,7 +39,7 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin):
+                  notes_hint="", edit_files=(), iteration_timeout=420,
+                  commit=None, revive=None, rollback=None, entry_hint="", run_seconds=6,
+                  shrink_output=None, grow_output=None, gpu_probe=None,
+-                 set_temperature=None, temps=None, review=None, list_files=None):
++                 set_temperature=None, temps=None, review=None, list_files=None, ask=None):
+         self.base_cmd = list(base_cmd)
+         self.workspace = workspace
+         self.child_env = child_env
+@@ -61,6 +61,8 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin):
+                                                          common.TEMP_BRAINSTORM)
+         self.review = review
+         self.list_files = list_files   # re-reads the file globs, to see new modules
++        self.ask = ask                 # a plain request to the model: prompt -> text
++        self.located = {}              # item -> the files a locate request chose
+ 
+         self.log_handle = None
+         self.broken = []
+@@ -385,7 +387,7 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin):
+             self.commit("LocalCoder ralph: round %d" % self.rounds)
+             self.refresh_files()
+ 
+-        handle_tool_requests(ws, notes_path, find_project_python(ws))
++        handle_tool_requests(ws, notes_path, find_project_python(ws), ask=self.ask)
+         status.update(ticked=done_count(notes_path) - self.started_done,
+                       accepted=self.accepted, rejected=self.rejected,
+                       items_open=len(open_tasks(notes_path)),
+diff --git a/ralph_tools.py b/ralph_tools.py
+index c0ca5ac..eed0956 100644
+--- a/ralph_tools.py
++++ b/ralph_tools.py
+@@ -10,6 +10,7 @@ next round is sent:
+     DEF: <name>            the line where a name is defined -> FOUND.md
+     OUTLINE: <file>        every class and def line in one file -> FOUND.md
+     DOCS: <module or name> the installed library's own help -> FOUND.md
++    DIGEST: <file> -- <question>  a file too big for a round, read in parts -> FOUND.md
+ 
+ LESSONS.md is the other half: one dated line each time a round is rolled
+ back, rejected or parked, and the newest few are put in front of every
+@@ -21,7 +22,8 @@ import re
+ import subprocess
+ import time
+ 
+-from ralph_common import RESEARCH_ASK, RESEARCH_FILE, read_text, say, write_text
++from ralph_common import DIGEST_PARTS, RESEARCH_ASK, RESEARCH_FILE, read_text, say, write_text
++from ralph_digest import DIGEST_ASK, digest, inside, parse_request
+ 
+ FIND_ASK = re.compile(r"^\s*FIND:\s*(.+?)\s*$", re.MULTILINE)
+ CALLERS_ASK = re.compile(r"^\s*CALLERS:\s*([A-Za-z_][\w.]*)\s*$", re.MULTILINE)
+@@ -139,7 +141,7 @@ def library_docs(workspace, name, python, lines=DOCS_LINES):
+     return "\n".join(kept) or "no documentation found for %s" % name
+ 
+ 
+-def handle_tool_requests(workspace, notes_path, python):
++def handle_tool_requests(workspace, notes_path, python, ask=None):
+     """Answer every RESEARCH:, FIND:, CALLERS:, DEF:, OUTLINE: and DOCS: line.
+ 
+     Each request is replaced in the task list by a note saying where its
+@@ -192,6 +194,20 @@ def handle_tool_requests(workspace, notes_path, python):
+         body = body.replace(match.group(0), "  - *Looked up*: %s (see %s)" % (name, FOUND_FILE), 1)
+         say("    docs: %s" % name)
+         handled.append("DOCS")
++    for match in list(DIGEST_ASK.finditer(body)):
++        name, question = parse_request(match.group(1))
++        path = inside(workspace, name)
++        if not path:
++            answer, note = "(no such file in this folder)", "not found"
++        elif not ask:
++            answer, note = "(reading in parts needs the model, which is not available here)", "skipped"
++        else:
++            say("    reading %s in parts: %s" % (name, question[:50]))
++            answer, parts, whole = digest(path, question, ask, DIGEST_PARTS)
++            note = "%d part(s)%s" % (parts, "" if whole else ", only the start of it")
++        sections.append("## DIGEST: %s -- %s\n\n%s\n\n    read %s\n" % (name, question, answer, note))
++        body = body.replace(match.group(0), "  - *Digested*: %s (see %s)" % (name, FOUND_FILE), 1)
++        handled.append("DIGEST")
+     if sections:
+         write_text(notes_path, body)
+         write_text(os.path.join(workspace, FOUND_FILE),
+diff --git a/supervisor.py b/supervisor.py
+index 4708c57..8f35034 100644
+--- a/supervisor.py
++++ b/supervisor.py
+@@ -51,7 +51,7 @@ from supervisor_engine import (SHUTTING_DOWN, check_gpu_is_free, describe_entry,
+ from supervisor_git import (commit_everything, discard_uncommitted, ensure_git_repo,
+     is_managed, snapshot_workspace, workspace_file_count,
+     workspace_is_usable_git_repo)
+-from supervisor_aider import (build_aider_command, grow_round_output, review_change,
++from supervisor_aider import (ask_model, build_aider_command, grow_round_output, review_change,
+     set_temperature, shrink_round_output, write_model_metadata,
+     write_nobrowser)
+ 
+@@ -477,6 +477,9 @@ def main():
+                 temps=(TEMP_CODE, TEMP_BRAINSTORM),
+                 # The worker should not be the one who decides its work is done.
+                 review=review_change if REVIEW else None,
++                # The loop's own small questions: which files an item needs,
++                # a gist of each module, a long file read in parts.
++                ask=ask_model,
+                 # Re-read after each kept round, so a module the model creates
+                 # is sent and checked like the rest.
+                 list_files=ralph_edit_files,
+diff --git a/supervisor_aider.py b/supervisor_aider.py
+index dadb835..09f4ff8 100644
+--- a/supervisor_aider.py
++++ b/supervisor_aider.py
+@@ -256,6 +256,37 @@ def review_change(task, diff, timeout=300):
+     return "", reason
+ 
+ 
++THINKING = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
++
++
++def ask_model(prompt, max_tokens=2500, temperature=0.2, timeout=300):
++    """One plain request to the loaded model, for the loop's own small jobs.
++
++    Finding the files an item needs, a module's gist, a part of a long file:
++    each is a question with a short answer, not a round of editing. Returns
++    the answer text, or '' -- the callers all have a way on without it. A
++    prompt the window cannot hold is not sent at all.
++    """
++    if len(prompt) // 4 > CONTEXT * 0.8:
++        return ""
++    body = json.dumps({
++        "model": IDENTIFIER,
++        "messages": [{"role": "user", "content": prompt}],
++        "max_tokens": max_tokens,
++        "temperature": temperature,
++    }).encode("utf-8")
++    req = urllib.request.Request(BASE_URL + "/chat/completions", data=body,
++                                 headers={"Content-Type": "application/json",
++                                          "Authorization": "Bearer lm-studio"})
++    try:
++        with urllib.request.urlopen(req, timeout=timeout) as resp:
++            data = json.loads(resp.read().decode("utf-8", "replace"))
++    except Exception:
++        return ""
++    message = ((data.get("choices") or [{}])[0].get("message") or {})
++    return THINKING.sub("", message.get("content") or "").strip()
++
++
+ def find_test_cmd():
+     """A command that runs the project's tests, if it has any. Else ''.
+ 
+diff --git a/test_loop.py b/test_loop.py
+index 2ee3e3f..a857bb7 100644
+--- a/test_loop.py
++++ b/test_loop.py
+@@ -155,13 +155,41 @@ class TestLoopWithGit(unittest.TestCase):
+         # Before: every rejection emptied the list, and the session ended on
+         # "the item could not be parked" because the item had been undone too.
+         self.assertNotIn("could not be", s.stop_reason)
+-        self.assertIn("Parked after 2 rounds: In `add`", log)
+-        self.assertIn("Parked after 2 rounds: In `sub`", log)
++        notes = read_text(self.notes)
++        self.assertIn("- [!] In `add`", notes)       # both refilled items survived to be
++        self.assertIn("- [!] In `sub`", notes)       # tried and parked, not wiped by undo
+         # The same two ideas again are not new work: dropped, then it stops.
+         self.assertIn("repeat ones already parked", log)
+         self.assertEqual(read_text(self.notes).count("- [!] In `add`"), 1)
+ 
+ 
++class TestLocateInALoop(TestLoop):
++    def test_an_item_naming_no_file_asks_which_files(self):
++        import ralph_rounds
++        other = os.path.join(self.ws, "other.py")
++        write_text(other, "def unrelated():\n    pass\n")
++        write_text(self.notes, "# Tasks\n\n- [ ] Make adding safe when given nothing\n")
++        asked = []
++
++        def ask(prompt):
++            asked.append(prompt)
++            return "calc.py"
++        old = ralph_rounds.FALLBACK_TOKENS
++        ralph_rounds.FALLBACK_TOKENS = 1          # too big to send whole: must locate
++        try:
++            s = Session([sys.executable, self.fake, "--edit-format", "diff"], self.ws, self.env,
++                        minutes=3, single_shot=True, edit_files=[self.code, other],
++                        entry_hint="none", iteration_timeout=30, ask=ask)
++            with contextlib.redirect_stdout(io.StringIO()):
++                s.run()
++        finally:
++            ralph_rounds.FALLBACK_TOKENS = old
++        self.assertIn("located: calc.py", read_text(os.path.join(self.ws, ".localcoder-ralph.log")))
++        self.assertIn("# touched", read_text(self.code))
++        self.assertNotIn("# touched", read_text(other))
++        self.assertEqual(len(asked), 1)
++
++
+ class TestRefillTemperature(unittest.TestCase):
+     def test_checking_is_cold_inventing_is_warm(self):
+         self.assertEqual(refill_temperature("verify", 0.2, 0.8), 0.2)
+diff --git a/test_ralph_longctx.py b/test_ralph_longctx.py
+new file mode 100644
+index 0000000..01d5999
+--- /dev/null
++++ b/test_ralph_longctx.py
+@@ -0,0 +1,126 @@
++"""Tests for trading time for reach: locate, gists, digest, warming retries.
++
++A fake `ask` stands in for the model: no network, no LM Studio, no sleeping.
++"""
++
++import os
++import shutil
++import tempfile
++import unittest
++
++from ralph_common import read_text, write_text
++from ralph_digest import digest, inside, parse_request, split_parts
++from ralph_gists import GISTS_FILE, read_gists, refresh_gists
++from ralph_locate import locate, outline
++from ralph_send import attempt_temperature
++from ralph_tools import FOUND_FILE, handle_tool_requests
++
++
++class Temp(unittest.TestCase):
++    def setUp(self):
++        self.dir = tempfile.mkdtemp()
++        self.a = self.file("alpha.py", '"""Parses things."""\n\n\ndef parse():\n    pass\n')
++        self.b = self.file("beta.py", '"""Writes things."""\n\n\nclass Writer:\n    pass\n')
++
++    def tearDown(self):
++        shutil.rmtree(self.dir, ignore_errors=True)
++
++    def file(self, name, body):
++        path = os.path.join(self.dir, name)
++        write_text(path, body)
++        return path
++
++
++class TestLocate(Temp):
++    def test_outline_names_what_each_module_defines(self):
++        text = outline([self.a, self.b])
++        self.assertIn("alpha.py: parse", text)
++        self.assertIn("beta.py: Writer", text)
++
++    def test_the_files_the_model_names_are_used(self):
++        asked = []
++
++        def ask(prompt):
++            asked.append(prompt)
++            return "beta.py\nnot_a_file.py\nalpha.py"
++        self.assertEqual(locate("make writing safer", [self.a, self.b], ask), [self.b, self.a])
++        self.assertIn("make writing safer", asked[0])
++
++    def test_no_model_no_guess(self):
++        self.assertEqual(locate("x", [self.a, self.b], None), [])
++        self.assertEqual(locate("x", [self.a, self.b], lambda p: "no idea"), [])
++
++
++class TestGists(Temp):
++    def test_the_model_writes_gists_up_to_the_limit_and_the_rest_wait(self):
++        calls = []
++
++        def ask(prompt):
++            calls.append(prompt)
++            return "It does a thing.\nMain: one function."
++        written, left = refresh_gists(self.dir, [self.a, self.b], ask, limit=1)
++        self.assertEqual((written, left, len(calls)), (1, 1, 1))
++        gists = read_gists(os.path.join(self.dir, GISTS_FILE))
++        self.assertEqual(sorted(gists), ["alpha.py", "beta.py"])
++        self.assertTrue(gists["beta.py"][1])                 # provisional
++        self.assertEqual(gists["beta.py"][2], "Writes things.")
++        written, left = refresh_gists(self.dir, [self.a, self.b], ask, limit=1)
++        self.assertEqual((written, left), (2, 0))
++
++    def test_a_changed_module_is_summed_up_again(self):
++        ask = lambda prompt: "Gist."                          # noqa: E731
++        refresh_gists(self.dir, [self.a, self.b], ask, limit=5)
++        write_text(self.a, read_text(self.a) + "\n\ndef more():\n    pass\n")
++        calls = []
++        refresh_gists(self.dir, [self.a, self.b], lambda p: calls.append(p) or "New.", limit=5)
++        self.assertEqual(len(calls), 1)
++        self.assertIn("File: alpha.py", calls[0])
++
++    def test_without_a_model_the_docstrings_serve(self):
++        self.assertEqual(refresh_gists(self.dir, [self.a, self.b], None), (0, 2))
++        self.assertIn("Parses things.", read_text(os.path.join(self.dir, GISTS_FILE)))
++
++
++class TestDigest(Temp):
++    def test_parts_are_read_in_order_with_notes_carried(self):
++        big = self.file("big.log", "".join("line %d\n" % i for i in range(3000)))
++        seen = []
++
++        def ask(prompt):
++            seen.append(prompt)
++            if prompt.startswith("Question:"):
++                return "The answer."
++            return "notes after part %d" % len(seen)
++        answer, parts, whole = digest(big, "what happened?", ask, most=12)
++        self.assertEqual((answer, whole), ("The answer.", True))
++        self.assertGreater(parts, 0)
++        self.assertEqual(len(seen), parts + 1)
++        if parts > 1:
++            self.assertIn("notes after part 1", seen[1])
++
++    def test_a_huge_file_is_cut_to_the_most_parts(self):
++        parts, whole = split_parts("x" * 100 + "\n" * 1 + ("y" * 60 + "\n") * 20000, most=3)
++        self.assertEqual((len(parts), whole), (3, False))
++
++    def test_request_forms_and_folder_bounds(self):
++        self.assertEqual(parse_request("big.log -- why?"), ("big.log", "why?"))
++        self.assertEqual(parse_request("`big.log` | why?"), ("big.log", "why?"))
++        self.assertEqual(inside(self.dir, "alpha.py"), os.path.realpath(self.a))
++        self.assertEqual(inside(self.dir, "../../etc/passwd"), "")
++
++    def test_the_tool_request_is_answered_in_found(self):
++        notes = self.file("tasks.md", "- [ ] x\nDIGEST: alpha.py -- what does it parse?\n")
++        handled = handle_tool_requests(self.dir, notes, "python", ask=lambda p: "It parses.")
++        self.assertIn("DIGEST", handled)
++        self.assertIn("It parses.", read_text(os.path.join(self.dir, FOUND_FILE)))
++        self.assertIn("*Digested*: alpha.py", read_text(notes))
++
++
++class TestWarmingRetries(unittest.TestCase):
++    def test_each_try_is_warmer_up_to_the_brainstorm_setting(self):
++        temps = [attempt_temperature(n, 0.2, 0.85) for n in (1, 2, 3, 4, 5)]
++        self.assertEqual(temps, [0.2, 0.45, 0.7, 0.85, 0.85])
++
++
++if __name__ == "__main__":
++    unittest.main()

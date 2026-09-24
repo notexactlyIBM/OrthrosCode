@@ -94,6 +94,26 @@ Borrowed from the wider Ralph community, beyond the loop itself:
 - **Backpressure** -- tests and linters that reject invalid work -- was
   already here: a test suite after every edit, round and launch.
 
+And from the long-context research, each trading time for reach on a small
+window:
+
+- **Repeated sampling with a verifier** (Brown et al., *Large Language
+  Monkeys*, 2024): several tries per item, each warmer than the last, the
+  tests and the reviewer keeping the one that holds.
+- **Localize before repairing** (Xia et al., *Agentless*, 2024): an item that
+  names no file first asks which files, from an outline of every module.
+- **Gist memory** (Lee et al., *ReadAgent*, Google DeepMind, 2024): a few
+  lines per module in GISTS.md, so a planning round sees the whole project.
+- **Chain of agents** (Zhang et al., *Chain of Agents*, Google, 2024):
+  `DIGEST:` reads a file of any length in parts, carrying notes forward.
+- Not used: *Recursive Language Models* (Zhang, Kraska and Khattab, 2025),
+  which has the model write and run code over the text -- running model-written
+  code is what the unattended loop never does.
+
+Double the window on the same card by setting Flash Attention on and the K/V
+cache to Q8_0 in the model's LM Studio defaults -- see `LC_CONTEXT` in
+`config.cmd`.
+
 ## How it works
 
 ```mermaid
@@ -342,6 +362,10 @@ your own with `git diff <from> --relative=agent -- agent/ > my.patch`.
 | `RESEARCH: question` | a web search and page fetch, answered in `RESEARCH.md` next round |
 | `FIND: text` | every line in the project containing it, in `FOUND.md` |
 | `DOCS: module` | an installed library's own documentation, offline, in `FOUND.md` |
+| `DIGEST: file -- question` | a file too big for a round, read in parts with notes carried from part to part (Chain-of-Agents), answer in `FOUND.md` |
+| **Locate** | an item that names no file gets one short request first: which files, from an outline of every module (Agentless) |
+| **Gists** | `GISTS.md`, every module in a few lines, kept current a few modules per refill and sent to planning rounds (ReadAgent) |
+| **Warming retries** | each try at an item runs warmer than the last, so the tries differ; tests and the reviewer keep the one that holds (repeated sampling) |
 | **Lessons** | every rollback, rejection and parked item becomes a line in `LESSONS.md`; the newest go in front of every round |
 | **Skills** | `SKILLS.md`, how common changes are done in this codebase, sent with every round |
 | **Field reports** | written by Orthros after each turn, read when planning |

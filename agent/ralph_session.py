@@ -39,7 +39,7 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin):
                  notes_hint="", edit_files=(), iteration_timeout=420,
                  commit=None, revive=None, rollback=None, entry_hint="", run_seconds=6,
                  shrink_output=None, grow_output=None, gpu_probe=None,
-                 set_temperature=None, temps=None, review=None, list_files=None):
+                 set_temperature=None, temps=None, review=None, list_files=None, ask=None):
         self.base_cmd = list(base_cmd)
         self.workspace = workspace
         self.child_env = child_env
@@ -61,6 +61,8 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin):
                                                          common.TEMP_BRAINSTORM)
         self.review = review
         self.list_files = list_files   # re-reads the file globs, to see new modules
+        self.ask = ask                 # a plain request to the model: prompt -> text
+        self.located = {}              # item -> the files a locate request chose
 
         self.log_handle = None
         self.broken = []
@@ -385,7 +387,7 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin):
             self.commit("LocalCoder ralph: round %d" % self.rounds)
             self.refresh_files()
 
-        handle_tool_requests(ws, notes_path, find_project_python(ws))
+        handle_tool_requests(ws, notes_path, find_project_python(ws), ask=self.ask)
         status.update(ticked=done_count(notes_path) - self.started_done,
                       accepted=self.accepted, rejected=self.rejected,
                       items_open=len(open_tasks(notes_path)),

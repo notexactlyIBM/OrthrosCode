@@ -10,7 +10,8 @@ import re
 import time
 
 import status
-from ralph_common import say
+from ralph_common import LOCATE, say
+from ralph_locate import locate
 from ralph_prompts import compose_round_prompt, design_guide
 from ralph_rounds import build_round_command, files_for_task, run_round
 from ralph_tools import FOUND_FILE, SKILLS_FILE
@@ -28,6 +29,17 @@ def recently_written(path, minutes=ANSWER_MINUTES):
         return False
 
 
+def attempt_temperature(attempt, code, brainstorm, step=0.25):
+    """Warmer with each try at the same item, up to the brainstorm setting.
+
+    Repeated sampling with a verifier -- the tests and the reviewer here --
+    beats one careful attempt by a wide margin (Brown et al., "Large Language
+    Monkeys", 2024), but only if the attempts differ. At one temperature a
+    retry mostly writes the same rejected change again.
+    """
+    return round(min(max(code, brainstorm), code + step * max(0, attempt - 1)), 2)
+
+
 class SendMixin:
 
     def send_round(self, task):
@@ -36,7 +48,18 @@ class SendMixin:
                                             cut_off=self.was_cut_off, task=task)
         # Only the files this item names, so a multi-module project does not
         # pay for all of itself on every round.
+        self.set_temperature(attempt_temperature(self.rounds_on_task, self.temp_code,
+                                                 self.temp_brainstorm))
         round_files = files_for_task(task, self.edit_files)
+        if not round_files and LOCATE and self.ask and len(self.edit_files) > 1:
+            # It names nothing that can be found. Ask which files, once per item.
+            if task not in self.located:
+                status.phase("locating", task)
+                self.located[task] = locate(task, self.edit_files, self.ask)
+                if self.located[task]:
+                    self.note("  located: %s" % ", ".join(
+                        os.path.basename(f) for f in self.located[task]))
+            round_files = list(self.located[task])
         if len(round_files) < len(self.edit_files):
             approx_tokens = 0
             for path in round_files:

@@ -256,6 +256,37 @@ def review_change(task, diff, timeout=300):
     return "", reason
 
 
+THINKING = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+
+
+def ask_model(prompt, max_tokens=2500, temperature=0.2, timeout=300):
+    """One plain request to the loaded model, for the loop's own small jobs.
+
+    Finding the files an item needs, a module's gist, a part of a long file:
+    each is a question with a short answer, not a round of editing. Returns
+    the answer text, or '' -- the callers all have a way on without it. A
+    prompt the window cannot hold is not sent at all.
+    """
+    if len(prompt) // 4 > CONTEXT * 0.8:
+        return ""
+    body = json.dumps({
+        "model": IDENTIFIER,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }).encode("utf-8")
+    req = urllib.request.Request(BASE_URL + "/chat/completions", data=body,
+                                 headers={"Content-Type": "application/json",
+                                          "Authorization": "Bearer lm-studio"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+    except Exception:
+        return ""
+    message = ((data.get("choices") or [{}])[0].get("message") or {})
+    return THINKING.sub("", message.get("content") or "").strip()
+
+
 def find_test_cmd():
     """A command that runs the project's tests, if it has any. Else ''.
 

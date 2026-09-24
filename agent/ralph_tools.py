@@ -10,6 +10,7 @@ next round is sent:
     DEF: <name>            the line where a name is defined -> FOUND.md
     OUTLINE: <file>        every class and def line in one file -> FOUND.md
     DOCS: <module or name> the installed library's own help -> FOUND.md
+    DIGEST: <file> -- <question>  a file too big for a round, read in parts -> FOUND.md
 
 LESSONS.md is the other half: one dated line each time a round is rolled
 back, rejected or parked, and the newest few are put in front of every
@@ -21,7 +22,8 @@ import re
 import subprocess
 import time
 
-from ralph_common import RESEARCH_ASK, RESEARCH_FILE, read_text, say, write_text
+from ralph_common import DIGEST_PARTS, RESEARCH_ASK, RESEARCH_FILE, read_text, say, write_text
+from ralph_digest import DIGEST_ASK, digest, inside, parse_request
 
 FIND_ASK = re.compile(r"^\s*FIND:\s*(.+?)\s*$", re.MULTILINE)
 CALLERS_ASK = re.compile(r"^\s*CALLERS:\s*([A-Za-z_][\w.]*)\s*$", re.MULTILINE)
@@ -139,7 +141,7 @@ def library_docs(workspace, name, python, lines=DOCS_LINES):
     return "\n".join(kept) or "no documentation found for %s" % name
 
 
-def handle_tool_requests(workspace, notes_path, python):
+def handle_tool_requests(workspace, notes_path, python, ask=None):
     """Answer every RESEARCH:, FIND:, CALLERS:, DEF:, OUTLINE: and DOCS: line.
 
     Each request is replaced in the task list by a note saying where its
@@ -192,6 +194,20 @@ def handle_tool_requests(workspace, notes_path, python):
         body = body.replace(match.group(0), "  - *Looked up*: %s (see %s)" % (name, FOUND_FILE), 1)
         say("    docs: %s" % name)
         handled.append("DOCS")
+    for match in list(DIGEST_ASK.finditer(body)):
+        name, question = parse_request(match.group(1))
+        path = inside(workspace, name)
+        if not path:
+            answer, note = "(no such file in this folder)", "not found"
+        elif not ask:
+            answer, note = "(reading in parts needs the model, which is not available here)", "skipped"
+        else:
+            say("    reading %s in parts: %s" % (name, question[:50]))
+            answer, parts, whole = digest(path, question, ask, DIGEST_PARTS)
+            note = "%d part(s)%s" % (parts, "" if whole else ", only the start of it")
+        sections.append("## DIGEST: %s -- %s\n\n%s\n\n    read %s\n" % (name, question, answer, note))
+        body = body.replace(match.group(0), "  - *Digested*: %s (see %s)" % (name, FOUND_FILE), 1)
+        handled.append("DIGEST")
     if sections:
         write_text(notes_path, body)
         write_text(os.path.join(workspace, FOUND_FILE),

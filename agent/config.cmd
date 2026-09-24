@@ -86,6 +86,13 @@ REM  It is still 1.8x the largest prompt ever measured here, and it leaves
 REM  about 1GB more headroom than 49152 for the decode-time allocations
 REM  that are what actually fail.  Do not raise it to buy context that is
 REM  not being used -- peak measured use is 18.5k of it.
+REM
+REM  Twice the context for the same memory: in LM Studio, open the model's
+REM  default settings (My Models, the gear) and set Flash Attention on and
+REM  K and V cache quantization to Q8_0.  `lms load` cannot set those, but
+REM  it uses the model's defaults.  The cache then takes half the room, so
+REM  65536 here costs about what 32768 cost before.  Try it with SELFTEST,
+REM  watch the first turn, and come back to 32768 on any "bad allocation".
 set "LC_CONTEXT=32768"
 
 REM --- How many requests it can answer at once. -------------
@@ -239,6 +246,21 @@ REM  the worker answered that about its own work.  Roughly doubles the
 REM  time per round.  Same model, so the same blind spots -- but a cold
 REM  read of a diff catches what the author talked itself past.
 set "LC_RALPH_REVIEW=1"
+
+REM --- Trading time for results. ------------------------------
+REM  Tries an item gets before it is parked.  Each try runs warmer than
+REM  the one before, so the tries differ, and the tests and the reviewer
+REM  keep the one that holds -- more tries, better odds, more time.
+set "LC_RALPH_ATTEMPTS=3"
+REM  An item that names no file it can be matched to: first ask the model
+REM  which files, from an outline of every module.  One short request.
+set "LC_RALPH_LOCATE=1"
+REM  Modules summed up in GISTS.md by the model per refill, for the planner.
+REM  0 = keep only the docstring summaries, which cost nothing.
+set "LC_RALPH_GISTS_PER_REFILL=6"
+REM  Most parts a DIGEST: request reads a file in.  About 5,000 tokens a
+REM  part and one request each, so 12 is roughly 60,000 tokens of file.
+set "LC_RALPH_DIGEST_PARTS=12"
 
 REM --- Start even when the card is shared? (1/0) -----------
 REM  LEAVE THIS AT 0.  An unattended run refuses to start if something

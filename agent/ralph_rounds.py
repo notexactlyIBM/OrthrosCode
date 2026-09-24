@@ -143,7 +143,11 @@ def refill_list(base_cmd, workspace, child_env, notes_path, edit_files, timeout,
     # list are what the review actually checks against the code. Both files
     # stay readable; neither is worth a token on every refill.
     # A budgeted slice of the source, not all of it -- see files_for_refill.
-    reads = files_for_refill("%s %s" % (milestone or "", source), edit_files)
+    # With GISTS.md the planner already has every module in outline, so less
+    # of the source itself needs to come along.
+    gists = os.path.join(workspace, "GISTS.md")
+    budget = REFILL_SOURCE_BUDGET // 2 if os.path.isfile(gists) else REFILL_SOURCE_BUDGET
+    reads = files_for_refill("%s %s" % (milestone or "", source), edit_files, budget)
     if mode == "plan":
         # The planner needs to see what is already on the list so it does not
         # propose ground the current batch already covers.
@@ -160,7 +164,8 @@ def refill_list(base_cmd, workspace, child_env, notes_path, edit_files, timeout,
             reads.append(os.path.join(workspace, RESEARCH_FILE))
     # How the agent being worked on actually did in its last turns, and the
     # mistakes rounds keep making: the evidence a plan should start from.
-    reads += [os.path.join(workspace, name) for name in (FIELD_REPORT_FILE, LESSONS_FILE, "KNOWLEDGE.md")]
+    reads += [os.path.join(workspace, name) for name in (FIELD_REPORT_FILE, LESSONS_FILE, "KNOWLEDGE.md",
+                                                         "GISTS.md")]
     for extra in reads:
         if extra and os.path.isfile(extra):
             cmd += ["--read", extra]          # readable, not writable

@@ -155,11 +155,39 @@ class TestLoopWithGit(unittest.TestCase):
         # Before: every rejection emptied the list, and the session ended on
         # "the item could not be parked" because the item had been undone too.
         self.assertNotIn("could not be", s.stop_reason)
-        self.assertIn("Parked after 2 rounds: In `add`", log)
-        self.assertIn("Parked after 2 rounds: In `sub`", log)
+        notes = read_text(self.notes)
+        self.assertIn("- [!] In `add`", notes)       # both refilled items survived to be
+        self.assertIn("- [!] In `sub`", notes)       # tried and parked, not wiped by undo
         # The same two ideas again are not new work: dropped, then it stops.
         self.assertIn("repeat ones already parked", log)
         self.assertEqual(read_text(self.notes).count("- [!] In `add`"), 1)
+
+
+class TestLocateInALoop(TestLoop):
+    def test_an_item_naming_no_file_asks_which_files(self):
+        import ralph_rounds
+        other = os.path.join(self.ws, "other.py")
+        write_text(other, "def unrelated():\n    pass\n")
+        write_text(self.notes, "# Tasks\n\n- [ ] Make adding safe when given nothing\n")
+        asked = []
+
+        def ask(prompt):
+            asked.append(prompt)
+            return "calc.py"
+        old = ralph_rounds.FALLBACK_TOKENS
+        ralph_rounds.FALLBACK_TOKENS = 1          # too big to send whole: must locate
+        try:
+            s = Session([sys.executable, self.fake, "--edit-format", "diff"], self.ws, self.env,
+                        minutes=3, single_shot=True, edit_files=[self.code, other],
+                        entry_hint="none", iteration_timeout=30, ask=ask)
+            with contextlib.redirect_stdout(io.StringIO()):
+                s.run()
+        finally:
+            ralph_rounds.FALLBACK_TOKENS = old
+        self.assertIn("located: calc.py", read_text(os.path.join(self.ws, ".localcoder-ralph.log")))
+        self.assertIn("# touched", read_text(self.code))
+        self.assertNotIn("# touched", read_text(other))
+        self.assertEqual(len(asked), 1)
 
 
 class TestRefillTemperature(unittest.TestCase):

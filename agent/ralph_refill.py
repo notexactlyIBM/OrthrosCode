@@ -5,7 +5,9 @@ with its own failure modes -- a refill round sends the largest prompt of any
 session, so it is where the engine dies and where the reply runs out of room.
 """
 
-from ralph_common import (BRAINSTORM_ROUNDS, BRAINSTORM_UNTIL, MAX_REFILLS, more_refills, say)
+from ralph_common import (BRAINSTORM_ROUNDS, BRAINSTORM_UNTIL, GISTS_PER_REFILL, MAX_REFILLS,
+    more_refills, say)
+from ralph_gists import refresh_gists
 from ralph_prompts import compose_refill_prompt
 from ralph_rounds import refill_list
 from ralph_tasks import (drop_reparked, mark_decomposed, milestones, normalize_checkboxes,
@@ -49,6 +51,15 @@ class RefillMixin:
                      "%d of %d" % (self.refills, MAX_REFILLS) if MAX_REFILLS
                      else "round %d" % self.refills))
         say("-" * 62)
+        # The planner's view of every module, a few more written by the model
+        # each time. Slow on purpose: this is where time buys understanding.
+        if GISTS_PER_REFILL:
+            status.phase("summarising", "keeping GISTS.md current")
+            ask = getattr(self, "ask", None)
+            written, left = refresh_gists(self.workspace, self.edit_files, ask, GISTS_PER_REFILL)
+            if ask:
+                self.note("  gists: %d module(s) summed up by the model, %d still to do"
+                          % (written, left))
         before = len(open_tasks(self.notes_path))
         # Warm for inventing work: at the temperature that writes good diffs
         # it returns the same four safe ideas every time. Cold for checking.

@@ -75,8 +75,6 @@ SEED_HEADINGS = (
     "features", "bug hunt", "design review", "polish", "improvements",
 )
 
-ROUNDS_IF_SMALL = 2
-ROUNDS_IF_BIG = 5
 
 
 def _env_int(name, default, floor=1):
@@ -89,6 +87,14 @@ def _env_int(name, default, floor=1):
 def _env_flag(name, default=False):
     value = os.environ.get(name, "").strip()
     return default if not value else value == "1"
+
+
+# Attempts an item gets before it is parked. Each retry runs warmer than the
+# one before (ralph_send.attempt_temperature): repeated sampling only helps
+# when the samples differ, and the tests and the reviewer pick the one that
+# holds. Brown et al., "Large Language Monkeys" (2024). See config.cmd.
+ROUNDS_IF_SMALL = _env_int("LC_RALPH_ATTEMPTS", 3)
+ROUNDS_IF_BIG = max(ROUNDS_IF_SMALL, 5)
 
 
 # How many times a session may go back and look for more work once the list is
@@ -141,6 +147,13 @@ RESEARCH_AUTO = os.environ.get("LC_RALPH_RESEARCH", "1").strip() != "0"
 # Temperature per round type, overridden by the supervisor when it wires in.
 TEMP_CODE = 0.2
 TEMP_BRAINSTORM = 0.85
+
+# The loop's own small jobs for the model, each a plain request (see config.cmd):
+# find the files an item needs when it names none, keep a short summary of
+# every module for planning, and read files too big for one window in parts.
+LOCATE = os.environ.get("LC_RALPH_LOCATE", "1").strip() != "0"
+GISTS_PER_REFILL = _env_int("LC_RALPH_GISTS_PER_REFILL", 6, floor=0)
+DIGEST_PARTS = _env_int("LC_RALPH_DIGEST_PARTS", 12)
 
 # Split a source file once it passes this many tokens. See config.cmd.
 FILE_TOKEN_CAP = _env_int("LC_RALPH_MAX_FILE_TOKENS", 9000)

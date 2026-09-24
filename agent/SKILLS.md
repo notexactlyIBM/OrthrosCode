@@ -38,6 +38,11 @@ front of every round.
 stop; the matches are in FOUND.md next round. `DOCS: module` does the same
 with an installed library's own documentation.
 
+**Read something too big to be sent.** `DIGEST: <file> -- <question>` reads
+the file in parts, carrying notes from part to part, and puts the answer in
+FOUND.md (ralph_digest.py). Slow -- one request a part -- but nothing is too
+long. `.localcoder-aider.log` is last session's full transcript.
+
 **Add a way for a session to stop -- or better, not to.** An early stop
 throws away the rest of the turn, so first try to recover: park the item
 (`park_task`), move to the next brief, or send less next round. When a stop

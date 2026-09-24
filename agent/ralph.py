@@ -53,6 +53,6 @@ def run_loop(base_cmd, workspace, child_env, minutes, single_shot, **options):
 
     Options are Session's keyword arguments: notes_hint, edit_files,
     iteration_timeout, commit, revive, rollback, entry_hint, run_seconds,
-    shrink_output, grow_output, gpu_probe, set_temperature, temps, review.
+    shrink_output, grow_output, gpu_probe, set_temperature, temps, review, ask.
     """
     return Session(base_cmd, workspace, child_env, minutes, single_shot, **options).run()

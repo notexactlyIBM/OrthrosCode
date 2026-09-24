@@ -50,6 +50,14 @@ is truly needed, return False straight after `self.stop("why")`, in a method
 whose docstring says "False to stop". test_stop_paths.py fails any stop that
 does not say why.
 
+**Get a change past the checks.** After every round the whole project is
+linted and every call to the project's own functions is checked against its
+signature -- so change a signature, change its callers in the same round.
+Write code out in full: a placeholder such as `# ... rest unchanged` where
+code used to be is undone at once. Never delete a test or take out an
+assertion. The reviewer then reads the diff, and a second read looks for the
+bug; say in the item's `Done when:` what the change must do.
+
 **Keep a round inside the context window.** A round sends the task list, the
 files `files_for_task` picks from the item's backticked names, SKILLS.md and
 any fresh answers (ralph_send.py). A reply that names another file can pull

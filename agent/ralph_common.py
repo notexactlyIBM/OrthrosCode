@@ -155,6 +155,10 @@ LOCATE = os.environ.get("LC_RALPH_LOCATE", "1").strip() != "0"
 GISTS_PER_REFILL = _env_int("LC_RALPH_GISTS_PER_REFILL", 6, floor=0)
 DIGEST_PARTS = _env_int("LC_RALPH_DIGEST_PARTS", 12)
 
+# Checks after every round that cost no tokens: lint and call signatures across
+# the whole project, placeholders, conflict markers, lost tests (ralph_scan.py).
+SCAN = _env_flag("LC_RALPH_SCAN", True)
+
 # Split a source file once it passes this many tokens. See config.cmd.
 FILE_TOKEN_CAP = _env_int("LC_RALPH_MAX_FILE_TOKENS", 9000)
 

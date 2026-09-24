@@ -1,0 +1,771 @@
+diff --git a/README.md b/README.md
+index 759326f..12e5c3a 100644
+--- a/README.md
++++ b/README.md
+@@ -58,6 +58,7 @@ into items, and checks earlier work -- until the clock runs out.
+ | `ralph_send.py` | what one round is sent: its files, its reading, the numbers it came back with |
+ | `ralph_locate.py` | asks which files an item needs when it names none (after Agentless) |
+ | `ralph_gists.py` | GISTS.md: every module in a few lines, for planning (after ReadAgent) |
++| `ralph_scan.py` | after each round, checks that cost no tokens: project-wide lint and call signatures, placeholders, conflict markers, lost tests |
+ | `ralph_digest.py` | `DIGEST:` reads a file too big for a round in parts (after Chain-of-Agents) |
+ | `ralph_prompts.py` | everything the model is told |
+ | `ralph_tasks.py` | task list, plan (`PLAN.md`), progress ledger (`PROGRESS.md`) |
+diff --git a/SKILLS.md b/SKILLS.md
+index 0d3add8..0914e36 100644
+--- a/SKILLS.md
++++ b/SKILLS.md
+@@ -50,6 +50,14 @@ is truly needed, return False straight after `self.stop("why")`, in a method
+ whose docstring says "False to stop". test_stop_paths.py fails any stop that
+ does not say why.
+ 
++**Get a change past the checks.** After every round the whole project is
++linted and every call to the project's own functions is checked against its
++signature -- so change a signature, change its callers in the same round.
++Write code out in full: a placeholder such as `# ... rest unchanged` where
++code used to be is undone at once. Never delete a test or take out an
++assertion. The reviewer then reads the diff, and a second read looks for the
++bug; say in the item's `Done when:` what the change must do.
++
+ **Keep a round inside the context window.** A round sends the task list, the
+ files `files_for_task` picks from the item's backticked names, SKILLS.md and
+ any fresh answers (ralph_send.py). A reply that names another file can pull
+diff --git a/config.cmd b/config.cmd
+index e4384d1..ed8dd59 100644
+--- a/config.cmd
++++ b/config.cmd
+@@ -263,6 +263,18 @@ REM  Most parts a DIGEST: request reads a file in.  About 5,000 tokens a
+ REM  part and one request each, so 12 is roughly 60,000 tokens of file.
+ set "LC_RALPH_DIGEST_PARTS=12"
+ 
++REM --- Catching bad edits. ------------------------------------
++REM  After every round, checks that cost no tokens: lint and call
++REM  signatures across the whole project (only what the round added
++REM  counts), placeholders like "rest of the code unchanged", conflict
++REM  markers, deleted tests.  A round they catch is undone.
++set "LC_RALPH_SCAN=1"
++REM  Reads of each change by the model.  2 = the review, then, if it
++REM  keeps the change, a second read that assumes there is a bug and
++REM  looks for it; a bug it names is checked by a third read before the
++REM  change is thrown away.  1 = the review only.
++set "LC_RALPH_REVIEWS=2"
++
+ REM --- Start even when the card is shared? (1/0) -----------
+ REM  LEAVE THIS AT 0.  An unattended run refuses to start if something
+ REM  else is already on the graphics card -- a second LM Studio, an
+diff --git a/ralph_common.py b/ralph_common.py
+index 5e61142..56c9f00 100644
+--- a/ralph_common.py
++++ b/ralph_common.py
+@@ -155,6 +155,10 @@ LOCATE = os.environ.get("LC_RALPH_LOCATE", "1").strip() != "0"
+ GISTS_PER_REFILL = _env_int("LC_RALPH_GISTS_PER_REFILL", 6, floor=0)
+ DIGEST_PARTS = _env_int("LC_RALPH_DIGEST_PARTS", 12)
+ 
++# Checks after every round that cost no tokens: lint and call signatures across
++# the whole project, placeholders, conflict markers, lost tests (ralph_scan.py).
++SCAN = _env_flag("LC_RALPH_SCAN", True)
++
+ # Split a source file once it passes this many tokens. See config.cmd.
+ FILE_TOKEN_CAP = _env_int("LC_RALPH_MAX_FILE_TOKENS", 9000)
+ 
+diff --git a/ralph_report.py b/ralph_report.py
+index b362ad4..3ab6a73 100644
+--- a/ralph_report.py
++++ b/ralph_report.py
+@@ -151,6 +151,8 @@ class ReportMixin:
+         if self.accepted or self.rejected:
+             note("  reviewed  : %d kept, %d sent back by the second agent"
+                  % (self.accepted, self.rejected))
++        if getattr(self, "caught", 0):
++            note("  caught    : %d bad edit(s) stopped by the automatic checks" % self.caught)
+         if self.hallucinations:
+             note("  invented  : %d attribute(s) read that nothing assigns"
+                  % self.hallucinations)
+diff --git a/ralph_scan.py b/ralph_scan.py
+new file mode 100644
+index 0000000..e448fa9
+--- /dev/null
++++ b/ralph_scan.py
+@@ -0,0 +1,206 @@
++"""Catch bad edits without asking the model: every check here costs no tokens.
++
++The reviewer is one careful reader with a small window and the same blind
++spots as the author. These checks are the other kind of reader -- exact,
++tireless and cheap -- run over the whole project after every round:
++
++    lint        pyflakes over every file, compared with before the round, so
++                a rename that breaks a caller in another module is caught
++    calls       calls to the project's own functions with arguments the
++                function does not take -- the usual break after a signature
++                change -- also compared with before the round
++    lazy edits  "rest of the code unchanged" and its cousins, where the model
++                wrote a placeholder instead of the code it was replacing
++    markers     merge-conflict lines left in a file
++    tests       tests deleted, or assertions taken out, in a test file
++    deletions   a file cut by more than half when the item said nothing of it
++
++Each finding is `(kind, message)`: kind "reject" undoes the round like a
++rejection by the reviewer, with the message written under the item; kind
++"warn" is passed to the reviewer as evidence. Every check prefers missing
++something to crying wolf: a false alarm costs a good round.
++"""
++
++import ast
++import os
++import re
++import subprocess
++import sys
++
++from ralph_common import read_text
++
++# pyflakes messages that mean the code is wrong, not merely untidy.
++SERIOUS = ("undefined name", "may be undefined", "referenced before assignment",
++           "redefinition of unused", "syntax error", "invalid syntax",
++           "import * used", "unexpected indent", "is not defined")
++
++LAZY = re.compile(r"^\+\s*(#|//)\s*(\.\.\.|…)?\s*(the\s+)?(rest|remainder|remaining|existing|other|"
++                  r"previous|unchanged|same as before|keep)\b.*\b(code|unchanged|as before|"
++                  r"implementation|methods|functions|lines|logic|here|same)\b", re.I)
++ELLIPSIS_ONLY = re.compile(r"^\+\s*(\.\.\.|…)\s*$")
++MARKER = re.compile(r"^(<{7}|>{7}|={7})( |$)", re.M)
++
++
++# ---------------------------------------------------------------- lint
++
++def lint(files, python=None):
++    """{'file: message'} from pyflakes, without line numbers so they compare
++    across edits. None when pyflakes is not available."""
++    py = [f for f in files if f.endswith(".py") and os.path.isfile(f)]
++    if not py:
++        return set()
++    try:
++        proc = subprocess.run([python or sys.executable, "-m", "pyflakes"] + py,
++                              capture_output=True, text=True, timeout=120,
++                              encoding="utf-8", errors="replace")
++    except (OSError, subprocess.TimeoutExpired):
++        return None
++    out = (proc.stdout or "") + (proc.stderr or "")
++    if "No module named pyflakes" in out:
++        return None
++    found = set()
++    for line in out.splitlines():
++        match = re.match(r"(.+?):\d+:(?:\d+:?)?\s*(.+)$", line.strip())
++        if match:
++            found.add("%s: %s" % (os.path.basename(match.group(1)), match.group(2).strip()))
++    return found
++
++
++# ---------------------------------------------------------------- calls
++
++def _signatures(trees):
++    """{function name: (min positional, max positional or None, keyword names or None)}
++    for module-level functions defined once in the project."""
++    seen, sigs = {}, {}
++    for tree in trees.values():
++        for node in tree.body:
++            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
++                seen[node.name] = seen.get(node.name, 0) + 1
++                args = node.args
++                positional = [a.arg for a in args.posonlyargs + args.args]
++                required = len(positional) - len(args.defaults)
++                most = None if args.vararg else len(positional)
++                names = None if args.kwarg else set(positional[len(args.posonlyargs):]
++                                                    + [a.arg for a in args.kwonlyargs])
++                kw_required = {a.arg for a, d in zip(args.kwonlyargs, args.kw_defaults)
++                               if d is None}
++                sigs[node.name] = (required, most, names, kw_required)
++    return {name: sig for name, sig in sigs.items() if seen[name] == 1}
++
++
++def call_mismatches(files):
++    """{'file: call to f(...) ...'} -- calls that the called function cannot accept."""
++    trees = {}
++    for path in files:
++        if path.endswith(".py") and os.path.isfile(path):
++            try:
++                trees[path] = ast.parse(read_text(path))
++            except (SyntaxError, ValueError):
++                continue
++    sigs = _signatures(trees)
++    modules = {os.path.splitext(os.path.basename(p))[0] for p in trees}
++    found = set()
++    for path, tree in trees.items():
++        # Only names this file defines, or imports from the project itself:
++        # a library's `join` is not the project's `join`.
++        known = {n.name: n.name for n in tree.body
++                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
++        for node in tree.body:
++            if isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] in modules:
++                known.update({a.asname or a.name: a.name for a in node.names})
++        for node in ast.walk(tree):
++            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
++                    and node.func.id in known):
++                continue
++            sig = sigs.get(known[node.func.id])
++            if not sig or any(isinstance(a, ast.Starred) for a in node.args) \
++                    or any(k.arg is None for k in node.keywords):
++                continue
++            required, most, names, kw_required = sig
++            given = len(node.args)
++            keywords = {k.arg for k in node.keywords}
++            where = os.path.basename(path)
++            if most is not None and given > most:
++                found.add("%s: %s() given %d positional arguments, takes at most %d"
++                          % (where, node.func.id, given, most))
++            if names is not None:
++                for unknown in sorted(keywords - names):
++                    found.add("%s: %s() has no argument called %s"
++                              % (where, node.func.id, unknown))
++            if given + len(keywords) < required:
++                found.add("%s: %s() needs %d arguments, given %d"
++                          % (where, node.func.id, required, given + len(keywords)))
++            for missing in sorted(kw_required - keywords):
++                found.add("%s: %s() needs the keyword argument %s"
++                          % (where, node.func.id, missing))
++    return found
++
++
++def baseline(files, python=None):
++    """What is already wrong before a round, so only what the round adds counts."""
++    return {"lint": lint(files, python), "calls": call_mismatches(files)}
++
++
++# ---------------------------------------------------------------- the diff
++
++def _files_in_diff(diff):
++    """{file: (added lines, removed lines)} from a unified diff."""
++    out, current = {}, None
++    for line in diff.splitlines():
++        if line.startswith("+++ "):
++            current = line[4:].strip()
++            current = current[2:] if current.startswith("b/") else current
++            out.setdefault(current, ([], []))
++        elif line.startswith("NEW FILE "):
++            current = None
++        elif current and line.startswith("+") and not line.startswith("+++"):
++            out[current][0].append(line)
++        elif current and line.startswith("-") and not line.startswith("---"):
++            out[current][1].append(line)
++    return out
++
++
++def diff_findings(diff, task):
++    findings = []
++    for name, (added, removed) in _files_in_diff(diff).items():
++        base = os.path.basename(name)
++        lazy = [l for l in added if LAZY.match(l) or ELLIPSIS_ONLY.match(l)]
++        if lazy and removed:
++            findings.append(("reject", "%s: a placeholder was written where code was removed "
++                             "(%s) -- write the code out in full" % (base, lazy[0][1:].strip()[:60])))
++        if base.startswith("test_"):
++            lost = (sum(1 for l in removed if re.match(r"-\s*def test_", l))
++                    - sum(1 for l in added if re.match(r"\+\s*def test_", l)))
++            asserts = (sum(1 for l in removed if re.search(r"\bassert", l))
++                       - sum(1 for l in added if re.search(r"\bassert", l)))
++            if lost > 0:
++                findings.append(("reject", "%s: %d test(s) deleted -- never delete or weaken a "
++                                 "test to get a change through" % (base, lost)))
++            elif asserts > 0 and not re.search(r"\btest", task or "", re.I):
++                findings.append(("reject", "%s: %d assertion(s) taken out of the tests"
++                                 % (base, asserts)))
++        if len(removed) > 30 and len(removed) > 3 * max(1, len(added)) \
++                and base.lower() not in (task or "").lower():
++            findings.append(("warn", "%s: %d lines removed and %d added, and the item does not "
++                             "name the file" % (base, len(removed), len(added))))
++    return findings
++
++
++def marker_findings(files):
++    return [("reject", "%s: a merge-conflict marker is left in the file" % os.path.basename(f))
++            for f in files if os.path.isfile(f) and MARKER.search(read_text(f))]
++
++
++# ---------------------------------------------------------------- all of it
++
++def scan(files, diff, task, before, python=None):
++    """Everything the round broke that the checks can see: [(kind, message)]."""
++    findings = marker_findings(files) + diff_findings(diff, task)
++    now = lint(files, python)
++    if now is not None and before.get("lint") is not None:
++        for message in sorted(now - before["lint"]):
++            serious = any(s in message.lower() for s in SERIOUS)
++            findings.append(("reject" if serious else "warn", "lint: " + message))
++    for message in sorted(call_mismatches(files) - (before.get("calls") or set())):
++        findings.append(("reject", "call: " + message))
++    return findings
+diff --git a/ralph_send.py b/ralph_send.py
+index 85c5b1f..e868ab3 100644
+--- a/ralph_send.py
++++ b/ralph_send.py
+@@ -10,8 +10,9 @@ import re
+ import time
+ 
+ import status
+-from ralph_common import LOCATE, say
++from ralph_common import LOCATE, SCAN, say
+ from ralph_locate import locate
++from ralph_scan import baseline, scan
+ from ralph_prompts import compose_round_prompt, design_guide
+ from ralph_rounds import build_round_command, files_for_task, run_round
+ from ralph_tools import FOUND_FILE, SKILLS_FILE
+@@ -50,6 +51,8 @@ class SendMixin:
+         # pay for all of itself on every round.
+         self.set_temperature(attempt_temperature(self.rounds_on_task, self.temp_code,
+                                                  self.temp_brainstorm))
++        # What is already wrong, so only what this round adds is held against it.
++        self.scan_before = baseline(self.edit_files) if SCAN else {}
+         round_files = files_for_task(task, self.edit_files)
+         if not round_files and LOCATE and self.ask and len(self.edit_files) > 1:
+             # It names nothing that can be found. Ask which files, once per item.
+@@ -131,3 +134,24 @@ class SendMixin:
+                 self.note("  Headroom is under 1 GB. This is where the engine dies -")
+                 self.note("  lower LC_CONTEXT, or close whatever else wants the card.")
+         return result
++
++    def scan_round(self, diff):
++        """The no-token checks on this round: [(kind, message)]. See ralph_scan.py."""
++        if not SCAN:
++            return []
++        try:
++            return scan(self.edit_files, diff, self.current_task,
++                        getattr(self, "scan_before", {}) or {})
++        except Exception as exc:
++            self.note("  the automatic checks failed to run: %s" % exc)
++            return []
++
++    def second_opinion(self, task, diff, notes):
++        """The reviewer's verdict, told what the automatic checks noticed."""
++        if notes:
++            try:
++                return self.review(task, diff, notes=notes)
++            except TypeError:
++                pass
++        return self.review(task, diff)
++
+diff --git a/ralph_session.py b/ralph_session.py
+index c542b08..b39c328 100644
+--- a/ralph_session.py
++++ b/ralph_session.py
+@@ -89,6 +89,7 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin):
+         self.milestone_misses = {}  # refills that made nothing of each milestone
+         self.accepted = 0         # changes the reviewer kept
+         self.rejected = 0         # changes the reviewer sent back
++        self.caught = 0           # of those, caught by the automatic checks
+         self.hallucinations = 0   # invented attributes caught this run
+         self.known_phantoms = set()   # so one invention is only reported once
+         self.internal_errors = 0  # unexpected exceptions in a row
+@@ -355,12 +356,21 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin):
+         # check before this asks whether the code is well formed; none can ask
+         # whether it does what the item said.
+         rejected_now = False
+-        if self.review and touched and not self.broken:
+-            status.phase("reviewing", self.current_task)
+-            verdict, why = self.review(self.current_task, round_diff(ws, self.edit_files))
++        diff = round_diff(ws, self.edit_files) if touched and not self.broken else ""
++        findings = self.scan_round(diff) if diff else []
++        caught = [m for kind, m in findings if kind == "reject"]
++        if (self.review or caught) and touched and not self.broken:
++            if caught:
++                verdict, why = "reject", "automatic check: " + "; ".join(caught[:3])
++                self.caught += 1
++            else:
++                status.phase("reviewing", self.current_task)
++                verdict, why = self.second_opinion(self.current_task, diff,
++                                                   [m for kind, m in findings if kind == "warn"])
+             if verdict == "reject":
+                 self.rejected += 1
+-                self.note("Reviewer rejected it: %s" % why[:110])
++                self.note("%s rejected it: %s" % ("An automatic check" if caught else "Reviewer",
++                                                  why[:110]))
+                 if self.rollback and self.rollback():
+                     self.remove_new_sources(before_files)
+                     rejected_now = True
+diff --git a/supervisor_aider.py b/supervisor_aider.py
+index 09f4ff8..a46d852 100644
+--- a/supervisor_aider.py
++++ b/supervisor_aider.py
+@@ -9,7 +9,7 @@ import urllib.error
+ import urllib.request
+ 
+ from supervisor_env import (BASE_URL, CONTEXT, EDIT_FORMAT, HERE, IDENTIFIER, MAP_TOKENS,
+-    PROMPT_CACHE, RALPH_API_TIMEOUT, RALPH_ARCHITECT,
++    PROMPT_CACHE, RALPH_API_TIMEOUT, RALPH_ARCHITECT, REVIEW_PASSES,
+     RALPH_MAP_TOKENS, REASONING, TEMP_CODE, TIMEOUT, VENV_SCRIPTS,
+     WORKSPACE, env_int)
+ 
+@@ -207,55 +207,125 @@ REASON: one sentence
+ """
+ 
+ 
+-def review_change(task, diff, timeout=300):
+-    """A second agent's verdict on one round's change. Returns (verdict, reason).
++BUG_HUNT = """Another developer made this change for this task:
+ 
+-    verdict is "accept", "reject", or "" when no clear answer came back -- in
+-    which case the change is kept. Losing good work because the reviewer
+-    timed out is a worse failure than keeping one unreviewed change.
++    %s
+ 
+-    Deliberately not an aider round: it gets the diff and the task and nothing
+-    else, cannot edit a file, and starts with an empty head. Cold, because a
+-    verdict should not vary with sampling.
++%s
++
++Assume it has a bug, and look for it line by line: a wrong condition, an
++off-by-one, a case the task asks for that is not handled, a name used before it
++exists, a call with the wrong arguments, code cut off or left unfinished,
++something removed that other code still needs.
++
++Reply in exactly one line:
++BUG: <the line, and what is wrong with it>
++or, only if after careful reading there is truly none:
++NONE
++"""
++
++CONFIRM = """A change was made for this task:
++
++    %s
++
++%s
++
++A second reader claims it has this bug:
++
++    %s
++
++Read the code the claim points at. Is the claim right -- a real fault, not a
++matter of style?
++
++Reply in exactly two lines:
++VERDICT: ACCEPT (the claim is wrong, keep the change) or REJECT (the claim is right)
++REASON: one sentence
++"""
++
++
++def _chat(prompt, max_tokens, timeout, temperature=0.1):
++    """(answer and reasoning text, finish reason), or (None, error)."""
++    body = json.dumps({
++        "model": IDENTIFIER,
++        "messages": [{"role": "user", "content": prompt}],
++        "max_tokens": max_tokens,
++        "temperature": temperature,
++    }).encode("utf-8")
++    req = urllib.request.Request(BASE_URL + "/chat/completions", data=body,
++                                 headers={"Content-Type": "application/json",
++                                          "Authorization": "Bearer lm-studio"})
++    try:
++        with urllib.request.urlopen(req, timeout=timeout) as resp:
++            data = json.loads(resp.read().decode("utf-8", "replace"))
++    except Exception as exc:
++        return None, type(exc).__name__
++    choice = (data.get("choices") or [{}])[0]
++    message = choice.get("message") or {}
++    # Thinking models put the answer in content and the working in
++    # reasoning_content; look in both, answer first.
++    return ((message.get("content") or "") + "\n" + (message.get("reasoning_content") or ""),
++            choice.get("finish_reason"))
++
++
++def _verdict(prompt, timeout):
++    """('accept'|'reject'|'', reason) from a two-line VERDICT/REASON reply.
++
++    This model thinks before it answers, out of the same budget: when the
++    thinking uses it up there is no verdict, so one retry with twice the room.
+     """
+-    if not diff.strip():
+-        return "", "nothing to review"
+     reason = ""
+-    # This model thinks before it answers, out of the same budget. On
+-    # 2026-09-23 most reviews came back with no verdict at all -- the thinking
+-    # used the budget up -- and every one of those changes was kept unread.
+-    # One retry with twice the room, then give up as before.
+     for budget in (3000, 6000):
+-        body = json.dumps({
+-            "model": IDENTIFIER,
+-            "messages": [{"role": "user", "content": REVIEW_PROMPT % (task, diff)}],
+-            "max_tokens": budget,
+-            "temperature": 0.1,
+-        }).encode("utf-8")
+-        req = urllib.request.Request(BASE_URL + "/chat/completions", data=body,
+-                                     headers={"Content-Type": "application/json",
+-                                              "Authorization": "Bearer lm-studio"})
+-        try:
+-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+-                data = json.loads(resp.read().decode("utf-8", "replace"))
+-        except Exception as exc:
+-            return "", "review request failed: %s" % type(exc).__name__
+-        choice = (data.get("choices") or [{}])[0]
+-        message = choice.get("message") or {}
+-        # Thinking models put the answer in content and the working in
+-        # reasoning_content; look in both, answer first.
+-        text = (message.get("content") or "") + "\n" + (message.get("reasoning_content") or "")
++        text, finish = _chat(prompt, budget, timeout)
++        if text is None:
++            return "", "review request failed: %s" % finish
+         verdict = re.search(r"VERDICT:\s*(ACCEPT|REJECT)", text, re.I)
+         found = re.search(r"REASON:\s*(.+)", text, re.I)
+         if verdict:
+             return verdict.group(1).lower(), (found.group(1).strip() if found else "")
+-        reason = ("it ran out of room before answering" if choice.get("finish_reason") == "length"
++        reason = ("it ran out of room before answering" if finish == "length"
+                   else "its reply had no VERDICT line")
+-        if choice.get("finish_reason") != "length":
++        if finish != "length":
+             break
+     return "", reason
+ 
+ 
++def review_change(task, diff, timeout=300, notes=()):
++    """A second agent's verdict on one round's change. Returns (verdict, reason).
++
++    verdict is "accept", "reject", or "" when no clear answer came back -- in
++    which case the change is kept. Losing good work because the reviewer
++    timed out is a worse failure than keeping one unreviewed change.
++
++    Deliberately not an aider round: it gets the diff and the task and nothing
++    else, cannot edit a file, and starts with an empty head. Cold, because a
++    verdict should not vary with sampling. `notes` are what the automatic
++    checks noticed but did not reject on; the reviewer weighs them.
++
++    When the plain review keeps a change, a second read looks for the bug on
++    the assumption there is one -- a different question gets a different
++    answer from the same model. A bug it names is put to a third, neutral read
++    before the change is thrown away, so one false alarm cannot cost a round.
++    """
++    if not diff.strip():
++        return "", "nothing to review"
++    seen = ""
++    if notes:
++        seen = ("\nThe automatic checks noticed (not errors by themselves, but look):\n"
++                + "\n".join("- %s" % n for n in notes[:6]) + "\n")
++    verdict, reason = _verdict(REVIEW_PROMPT % (task, diff) + seen, timeout)
++    if verdict != "accept" or REVIEW_PASSES < 2:
++        return verdict, reason
++    text, _ = _chat(BUG_HUNT % (task, diff), 3000, timeout)
++    bug = re.search(r"BUG:\s*(.+)", text or "")
++    if not bug or len(bug.group(1).strip()) < 20:
++        return verdict, reason
++    claim = bug.group(1).strip()[:300]
++    second, why = _verdict(CONFIRM % (task, diff, claim), timeout)
++    if second == "reject":
++        return "reject", "a second look found: %s" % (why or claim)[:200]
++    return verdict, reason
++
++
+ THINKING = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+ 
+ 
+diff --git a/supervisor_env.py b/supervisor_env.py
+index 5dd3c97..668ca5b 100644
+--- a/supervisor_env.py
++++ b/supervisor_env.py
+@@ -150,6 +150,11 @@ SHARE_GPU = env_flag("LC_SHARE_GPU", False)
+ REVIEW = env_flag("LC_RALPH_REVIEW", True)
+ 
+ 
++# After the reviewer keeps a change, a second, adversarial read that hunts for
++# the bug. 1 = the plain review only.
++REVIEW_PASSES = max(1, env_int("LC_RALPH_REVIEWS", 2))
++
++
+ IDENTIFIER = "localcoder"
+ 
+ 
+diff --git a/test_loop.py b/test_loop.py
+index d099a1b..9b61559 100644
+--- a/test_loop.py
++++ b/test_loop.py
+@@ -213,6 +213,38 @@ class TestNewProject(TestLoop):
+         self.assertIn(os.path.join(self.ws, "made.py"), s.edit_files)
+ 
+ 
++LAZY_AIDER = r'''import re, sys
++args = sys.argv[1:]
++files = [args[i + 1] for i, a in enumerate(args) if a == "--file"]
++body = open(files[0]).read()
++open(files[0], "w").write(re.sub(r"- \[ \]", "- [x]", body, count=1))
++for f in files[1:]:
++    if f.endswith(".py"):
++        open(f, "w").write("def add(a, b):\n    # ... rest of the code unchanged\n    pass\n")
++        print("Applied edit to %s" % f)
++print("Tokens: 1k sent, 100 received.")
++'''
++
++
++class TestCaughtWithoutAReviewer(TestLoopWithGit):
++    def test_a_placeholder_edit_is_undone_by_the_automatic_checks(self):
++        write_text(self.fake, LAZY_AIDER)
++        write_text(self.notes, "# Tasks\n\n- [ ] In `add`, handle None\n")
++        self.git("add", "-A")
++        self.git("commit", "-qm", "items")
++        original = read_text(self.code)
++        s = Session([sys.executable, self.fake, "--edit-format", "diff"], self.ws,
++                    os.environ.copy(), minutes=3, single_shot=True, edit_files=[self.code],
++                    entry_hint="none", iteration_timeout=30,
++                    rollback=lambda: self.git("checkout", "--", ".").returncode == 0,
++                    commit=lambda m: (self.git("add", "-A"), self.git("commit", "-qm", m)) and True)
++        with contextlib.redirect_stdout(io.StringIO()):
++            s.run()
++        self.assertEqual(read_text(self.code), original)
++        self.assertEqual(s.caught, 1)
++        self.assertIn("automatic check", read_text(self.notes))
++
++
+ class TestRefillTemperature(unittest.TestCase):
+     def test_checking_is_cold_inventing_is_warm(self):
+         self.assertEqual(refill_temperature("verify", 0.2, 0.8), 0.2)
+diff --git a/test_ralph_scan.py b/test_ralph_scan.py
+new file mode 100644
+index 0000000..f16888a
+--- /dev/null
++++ b/test_ralph_scan.py
+@@ -0,0 +1,151 @@
++"""Tests for catching bad edits: the no-token checks and the second look.
++
++No model, no network: the reviewer's requests are answered by a script.
++"""
++
++import os
++import shutil
++import sys
++import tempfile
++import unittest
++
++import supervisor_aider
++from ralph_common import write_text
++from ralph_scan import baseline, call_mismatches, diff_findings, marker_findings, scan
++
++
++class Temp(unittest.TestCase):
++    def setUp(self):
++        self.dir = tempfile.mkdtemp()
++        self.lib = self.file("lib.py", "def area(width, height=1):\n    return width * height\n")
++        self.app = self.file("app.py", "from lib import area\n\n\ndef main():\n"
++                                       "    return area(2, 3)\n")
++
++    def tearDown(self):
++        shutil.rmtree(self.dir, ignore_errors=True)
++
++    def file(self, name, body):
++        path = os.path.join(self.dir, name)
++        write_text(path, body)
++        return path
++
++
++class TestCalls(Temp):
++    def test_a_changed_signature_breaks_a_caller_in_another_file(self):
++        before = call_mismatches([self.lib, self.app])
++        self.assertEqual(before, set())
++        write_text(self.lib, "def area(width):\n    return width * width\n")
++        after = call_mismatches([self.lib, self.app])
++        self.assertEqual(after, {"app.py: area() given 2 positional arguments, takes at most 1"})
++
++    def test_unknown_and_missing_keywords(self):
++        write_text(self.app, "from lib import area\n\n\ndef main():\n    return area(depth=2)\n")
++        found = call_mismatches([self.lib, self.app])
++        self.assertIn("app.py: area() has no argument called depth", found)
++        write_text(self.app, "from lib import area\n\n\ndef main():\n    return area()\n")
++        self.assertIn("app.py: area() needs 1 arguments, given 0",
++                      call_mismatches([self.lib, self.app]))
++
++    def test_a_library_function_of_the_same_name_is_not_ours(self):
++        write_text(self.app, "from os.path import join\n\n\ndef main():\n"
++                             "    return join('a', 'b', 'c')\n")
++        self.file("mine.py", "def join(one):\n    return one\n")
++        self.assertEqual(call_mismatches([self.lib, self.app,
++                                          os.path.join(self.dir, "mine.py")]), set())
++
++    def test_star_arguments_are_left_alone(self):
++        write_text(self.app, "from lib import area\n\n\ndef main(*a):\n    return area(*a)\n")
++        self.assertEqual(call_mismatches([self.lib, self.app]), set())
++
++
++class TestDiff(unittest.TestCase):
++    def test_a_placeholder_instead_of_code_is_rejected(self):
++        diff = ("+++ b/game.py\n-    def draw(self):\n-        blit()\n"
++                "+    # ... rest of the code unchanged\n")
++        kinds = [k for k, _ in diff_findings(diff, "In `Game.draw`, x")]
++        self.assertEqual(kinds, ["reject"])
++
++    def test_deleted_tests_are_rejected(self):
++        diff = "+++ b/test_game.py\n-    def test_draw(self):\n-        self.assertTrue(x)\n"
++        self.assertIn("test(s) deleted", diff_findings(diff, "In `draw`, speed up")[0][1])
++
++    def test_a_new_test_is_fine(self):
++        diff = "+++ b/test_game.py\n+    def test_more(self):\n+        self.assertTrue(x)\n"
++        self.assertEqual(diff_findings(diff, "Add a test"), [])
++
++    def test_a_big_unexplained_deletion_is_a_warning(self):
++        diff = "+++ b/big.py\n" + "-x = 1\n" * 40 + "+y = 2\n"
++        self.assertEqual(diff_findings(diff, "In `other`, fix it")[0][0], "warn")
++
++    def test_an_ordinary_comment_is_not_a_placeholder(self):
++        diff = "+++ b/a.py\n-x = 1\n+# keep the width in pixels\n+x = 2\n"
++        self.assertEqual(diff_findings(diff, "x"), [])
++
++
++class TestScan(Temp):
++    def test_conflict_markers(self):
++        write_text(self.lib, "<<<<<<< SEARCH\ndef area(w):\n=======\n")
++        self.assertEqual(marker_findings([self.lib])[0][0], "reject")
++
++    def test_only_what_the_round_added_counts(self):
++        before = baseline([self.lib, self.app])
++        write_text(self.lib, "def area(width):\n    return width * width\n")
++        found = scan([self.lib, self.app], "", "In `area`, square it", before)
++        self.assertEqual([k for k, _ in found], ["reject"])
++        self.assertEqual(scan([self.lib, self.app], "", "x", baseline([self.lib, self.app])), [])
++
++    def test_lint_regressions_when_pyflakes_is_there(self):
++        before = baseline([self.lib])
++        if before["lint"] is None:
++            self.skipTest("pyflakes is not installed here")
++        write_text(self.lib, "def area(width, height=1):\n    return widht * height\n")
++        found = scan([self.lib], "", "x", before)
++        self.assertTrue(any(k == "reject" and "undefined name" in m for k, m in found))
++
++
++class TestSecondLook(unittest.TestCase):
++    def setUp(self):
++        self.real = supervisor_aider._chat
++        self.passes = supervisor_aider.REVIEW_PASSES
++        supervisor_aider.REVIEW_PASSES = 2
++        self.asked = []
++
++    def tearDown(self):
++        supervisor_aider._chat = self.real
++        supervisor_aider.REVIEW_PASSES = self.passes
++
++    def script(self, *replies):
++        replies = list(replies)
++
++        def chat(prompt, max_tokens, timeout, temperature=0.1):
++            self.asked.append(prompt)
++            return replies.pop(0), "stop"
++        supervisor_aider._chat = chat
++
++    def test_a_confirmed_bug_rejects_a_change_the_first_review_kept(self):
++        self.script("VERDICT: ACCEPT\nREASON: fine",
++                    "BUG: line 3 returns width twice instead of width * height",
++                    "VERDICT: REJECT\nREASON: the claim is right, height is ignored")
++        verdict, why = supervisor_aider.review_change("area", "+x")
++        self.assertEqual(verdict, "reject")
++        self.assertIn("second look", why)
++        self.assertEqual(len(self.asked), 3)
++
++    def test_an_unconfirmed_bug_keeps_the_change(self):
++        self.script("VERDICT: ACCEPT\nREASON: fine", "BUG: the variable name could be clearer here",
++                    "VERDICT: ACCEPT\nREASON: that is style, not a fault")
++        self.assertEqual(supervisor_aider.review_change("area", "+x")[0], "accept")
++
++    def test_none_found_keeps_it_in_two_requests(self):
++        self.script("VERDICT: ACCEPT\nREASON: fine", "NONE")
++        self.assertEqual(supervisor_aider.review_change("area", "+x")[0], "accept")
++        self.assertEqual(len(self.asked), 2)
++
++    def test_the_automatic_findings_reach_the_reviewer(self):
++        self.script("VERDICT: REJECT\nREASON: it deletes the parser")
++        supervisor_aider.review_change("area", "+x", notes=["big.py: 40 lines removed"])
++        self.assertIn("big.py: 40 lines removed", self.asked[0])
++
++
++if __name__ == "__main__":
++    sys.exit(unittest.main())

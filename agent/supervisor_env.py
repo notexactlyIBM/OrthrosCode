@@ -150,6 +150,11 @@ SHARE_GPU = env_flag("LC_SHARE_GPU", False)
 REVIEW = env_flag("LC_RALPH_REVIEW", True)
 
 
+# After the reviewer keeps a change, a second, adversarial read that hunts for
+# the bug. 1 = the plain review only.
+REVIEW_PASSES = max(1, env_int("LC_RALPH_REVIEWS", 2))
+
+
 IDENTIFIER = "localcoder"
 
 

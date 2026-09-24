@@ -9,7 +9,7 @@ import urllib.error
 import urllib.request
 
 from supervisor_env import (BASE_URL, CONTEXT, EDIT_FORMAT, HERE, IDENTIFIER, MAP_TOKENS,
-    PROMPT_CACHE, RALPH_API_TIMEOUT, RALPH_ARCHITECT,
+    PROMPT_CACHE, RALPH_API_TIMEOUT, RALPH_ARCHITECT, REVIEW_PASSES,
     RALPH_MAP_TOKENS, REASONING, TEMP_CODE, TIMEOUT, VENV_SCRIPTS,
     WORKSPACE, env_int)
 
@@ -207,7 +207,89 @@ REASON: one sentence
 """
 
 
-def review_change(task, diff, timeout=300):
+BUG_HUNT = """Another developer made this change for this task:
+
+    %s
+
+%s
+
+Assume it has a bug, and look for it line by line: a wrong condition, an
+off-by-one, a case the task asks for that is not handled, a name used before it
+exists, a call with the wrong arguments, code cut off or left unfinished,
+something removed that other code still needs.
+
+Reply in exactly one line:
+BUG: <the line, and what is wrong with it>
+or, only if after careful reading there is truly none:
+NONE
+"""
+
+CONFIRM = """A change was made for this task:
+
+    %s
+
+%s
+
+A second reader claims it has this bug:
+
+    %s
+
+Read the code the claim points at. Is the claim right -- a real fault, not a
+matter of style?
+
+Reply in exactly two lines:
+VERDICT: ACCEPT (the claim is wrong, keep the change) or REJECT (the claim is right)
+REASON: one sentence
+"""
+
+
+def _chat(prompt, max_tokens, timeout, temperature=0.1):
+    """(answer and reasoning text, finish reason), or (None, error)."""
+    body = json.dumps({
+        "model": IDENTIFIER,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }).encode("utf-8")
+    req = urllib.request.Request(BASE_URL + "/chat/completions", data=body,
+                                 headers={"Content-Type": "application/json",
+                                          "Authorization": "Bearer lm-studio"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+    except Exception as exc:
+        return None, type(exc).__name__
+    choice = (data.get("choices") or [{}])[0]
+    message = choice.get("message") or {}
+    # Thinking models put the answer in content and the working in
+    # reasoning_content; look in both, answer first.
+    return ((message.get("content") or "") + "\n" + (message.get("reasoning_content") or ""),
+            choice.get("finish_reason"))
+
+
+def _verdict(prompt, timeout):
+    """('accept'|'reject'|'', reason) from a two-line VERDICT/REASON reply.
+
+    This model thinks before it answers, out of the same budget: when the
+    thinking uses it up there is no verdict, so one retry with twice the room.
+    """
+    reason = ""
+    for budget in (3000, 6000):
+        text, finish = _chat(prompt, budget, timeout)
+        if text is None:
+            return "", "review request failed: %s" % finish
+        verdict = re.search(r"VERDICT:\s*(ACCEPT|REJECT)", text, re.I)
+        found = re.search(r"REASON:\s*(.+)", text, re.I)
+        if verdict:
+            return verdict.group(1).lower(), (found.group(1).strip() if found else "")
+        reason = ("it ran out of room before answering" if finish == "length"
+                  else "its reply had no VERDICT line")
+        if finish != "length":
+            break
+    return "", reason
+
+
+def review_change(task, diff, timeout=300, notes=()):
     """A second agent's verdict on one round's change. Returns (verdict, reason).
 
     verdict is "accept", "reject", or "" when no clear answer came back -- in
@@ -216,44 +298,32 @@ def review_change(task, diff, timeout=300):
 
     Deliberately not an aider round: it gets the diff and the task and nothing
     else, cannot edit a file, and starts with an empty head. Cold, because a
-    verdict should not vary with sampling.
+    verdict should not vary with sampling. `notes` are what the automatic
+    checks noticed but did not reject on; the reviewer weighs them.
+
+    When the plain review keeps a change, a second read looks for the bug on
+    the assumption there is one -- a different question gets a different
+    answer from the same model. A bug it names is put to a third, neutral read
+    before the change is thrown away, so one false alarm cannot cost a round.
     """
     if not diff.strip():
         return "", "nothing to review"
-    reason = ""
-    # This model thinks before it answers, out of the same budget. On
-    # 2026-09-23 most reviews came back with no verdict at all -- the thinking
-    # used the budget up -- and every one of those changes was kept unread.
-    # One retry with twice the room, then give up as before.
-    for budget in (3000, 6000):
-        body = json.dumps({
-            "model": IDENTIFIER,
-            "messages": [{"role": "user", "content": REVIEW_PROMPT % (task, diff)}],
-            "max_tokens": budget,
-            "temperature": 0.1,
-        }).encode("utf-8")
-        req = urllib.request.Request(BASE_URL + "/chat/completions", data=body,
-                                     headers={"Content-Type": "application/json",
-                                              "Authorization": "Bearer lm-studio"})
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                data = json.loads(resp.read().decode("utf-8", "replace"))
-        except Exception as exc:
-            return "", "review request failed: %s" % type(exc).__name__
-        choice = (data.get("choices") or [{}])[0]
-        message = choice.get("message") or {}
-        # Thinking models put the answer in content and the working in
-        # reasoning_content; look in both, answer first.
-        text = (message.get("content") or "") + "\n" + (message.get("reasoning_content") or "")
-        verdict = re.search(r"VERDICT:\s*(ACCEPT|REJECT)", text, re.I)
-        found = re.search(r"REASON:\s*(.+)", text, re.I)
-        if verdict:
-            return verdict.group(1).lower(), (found.group(1).strip() if found else "")
-        reason = ("it ran out of room before answering" if choice.get("finish_reason") == "length"
-                  else "its reply had no VERDICT line")
-        if choice.get("finish_reason") != "length":
-            break
-    return "", reason
+    seen = ""
+    if notes:
+        seen = ("\nThe automatic checks noticed (not errors by themselves, but look):\n"
+                + "\n".join("- %s" % n for n in notes[:6]) + "\n")
+    verdict, reason = _verdict(REVIEW_PROMPT % (task, diff) + seen, timeout)
+    if verdict != "accept" or REVIEW_PASSES < 2:
+        return verdict, reason
+    text, _ = _chat(BUG_HUNT % (task, diff), 3000, timeout)
+    bug = re.search(r"BUG:\s*(.+)", text or "")
+    if not bug or len(bug.group(1).strip()) < 20:
+        return verdict, reason
+    claim = bug.group(1).strip()[:300]
+    second, why = _verdict(CONFIRM % (task, diff, claim), timeout)
+    if second == "reject":
+        return "reject", "a second look found: %s" % (why or claim)[:200]
+    return verdict, reason
 
 
 THINKING = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)

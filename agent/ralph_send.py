@@ -10,8 +10,9 @@ import re
 import time
 
 import status
-from ralph_common import LOCATE, say
+from ralph_common import LOCATE, SCAN, say
 from ralph_locate import locate
+from ralph_scan import baseline, scan
 from ralph_prompts import compose_round_prompt, design_guide
 from ralph_rounds import build_round_command, files_for_task, run_round
 from ralph_tools import FOUND_FILE, SKILLS_FILE
@@ -50,6 +51,8 @@ class SendMixin:
         # pay for all of itself on every round.
         self.set_temperature(attempt_temperature(self.rounds_on_task, self.temp_code,
                                                  self.temp_brainstorm))
+        # What is already wrong, so only what this round adds is held against it.
+        self.scan_before = baseline(self.edit_files) if SCAN else {}
         round_files = files_for_task(task, self.edit_files)
         if not round_files and LOCATE and self.ask and len(self.edit_files) > 1:
             # It names nothing that can be found. Ask which files, once per item.
@@ -131,3 +134,24 @@ class SendMixin:
                 self.note("  Headroom is under 1 GB. This is where the engine dies -")
                 self.note("  lower LC_CONTEXT, or close whatever else wants the card.")
         return result
+
+    def scan_round(self, diff):
+        """The no-token checks on this round: [(kind, message)]. See ralph_scan.py."""
+        if not SCAN:
+            return []
+        try:
+            return scan(self.edit_files, diff, self.current_task,
+                        getattr(self, "scan_before", {}) or {})
+        except Exception as exc:
+            self.note("  the automatic checks failed to run: %s" % exc)
+            return []
+
+    def second_opinion(self, task, diff, notes):
+        """The reviewer's verdict, told what the automatic checks noticed."""
+        if notes:
+            try:
+                return self.review(task, diff, notes=notes)
+            except TypeError:
+                pass
+        return self.review(task, diff)
+

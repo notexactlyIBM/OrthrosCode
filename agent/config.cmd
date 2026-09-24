@@ -263,6 +263,18 @@ REM  Most parts a DIGEST: request reads a file in.  About 5,000 tokens a
 REM  part and one request each, so 12 is roughly 60,000 tokens of file.
 set "LC_RALPH_DIGEST_PARTS=12"
 
+REM --- Catching bad edits. ------------------------------------
+REM  After every round, checks that cost no tokens: lint and call
+REM  signatures across the whole project (only what the round added
+REM  counts), placeholders like "rest of the code unchanged", conflict
+REM  markers, deleted tests.  A round they catch is undone.
+set "LC_RALPH_SCAN=1"
+REM  Reads of each change by the model.  2 = the review, then, if it
+REM  keeps the change, a second read that assumes there is a bug and
+REM  looks for it; a bug it names is checked by a third read before the
+REM  change is thrown away.  1 = the review only.
+set "LC_RALPH_REVIEWS=2"
+
 REM --- Start even when the card is shared? (1/0) -----------
 REM  LEAVE THIS AT 0.  An unattended run refuses to start if something
 REM  else is already on the graphics card -- a second LM Studio, an

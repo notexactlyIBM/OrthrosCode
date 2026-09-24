@@ -151,6 +151,8 @@ class ReportMixin:
         if self.accepted or self.rejected:
             note("  reviewed  : %d kept, %d sent back by the second agent"
                  % (self.accepted, self.rejected))
+        if getattr(self, "caught", 0):
+            note("  caught    : %d bad edit(s) stopped by the automatic checks" % self.caught)
         if self.hallucinations:
             note("  invented  : %d attribute(s) read that nothing assigns"
                  % self.hallucinations)

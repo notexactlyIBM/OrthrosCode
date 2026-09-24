@@ -97,8 +97,10 @@ flowchart TD
    its test suite -- seconds, where a failed launch costs minutes of model
    loading. A broken agent is rolled back before anything is loaded.
 3. **Work.** The agent loads the model and works through the task list, one
-   item per round. Each round's change is parsed, linted, imported and tested,
-   then read by an independent reviewer request that keeps or rejects it. Kept
+   item per round. Each round's change is parsed, linted, imported, run and
+   tested; checked across the whole project for broken calls, placeholders and
+   lost tests; then read by an independent reviewer, and once more by a reader
+   hunting for the bug. Kept
    rounds are committed; anything else is undone, and the reason is written
    down for the next try.
 4. **Handover.** The model is unloaded, the server stopped, anything left
@@ -311,7 +313,9 @@ becomes the record of how the agents evolved.
 |---|---|
 | **Linter** | flake8's error rules, inside each round, so the model fixes its own slips at once |
 | **Tests** | a unittest suite, after every edit, every round and before launch |
-| **Reviewer** | a separate, cold request that reads each diff against its item and keeps or rejects it |
+| **Automatic checks** | after every round, at no token cost: lint and call signatures across the whole project (only what the round added counts), placeholders where code was cut, conflict markers, deleted tests. A round they catch is undone |
+| **Reviewer** | a separate, cold request that reads each diff against its item, told what the automatic checks noticed |
+| **Second look** | when the reviewer keeps a change, another read assumes there is a bug and hunts for it; a bug it names is confirmed by a third read before the change is undone |
 | `FIND: text` | every line in the project containing it, in `FOUND.md` next round |
 | `DOCS: module` | an installed library's own documentation, offline |
 | `RESEARCH: question` | a web search and page fetch, in `RESEARCH.md` |
@@ -331,6 +335,7 @@ becomes the record of how the agents evolved.
 | **Local only** | Every model call goes to LM Studio on your machine. No keys, no telemetry; aider's update check and remote model lists are off. |
 | **No shell** | Unattended aider edits files but never runs a command the model suggests. |
 | **Tests as a gate** | After every edit, every round and before every launch. A change that fails them is rolled back. |
+| **Many readers** | Every change is parsed, linted, imported, run, tested, checked for broken calls, placeholders and lost tests, reviewed, and read again by a reader looking for the bug. Any one of them can undo it. |
 | **Rollback** | Folders are committed before each turn. An agent that fails to start is reset, and its failed version kept as a git tag. |
 | **Proven history** | Every proven version is remembered. A change that turns out fatal after being copied into both is stepped back past, as far as the baseline if need be. |
 | **Prompts that fit** | A guard loaded into the agents' Pythons keeps aider from pulling files into a round past what the window holds, or sending a prompt the window cannot take. A refused prompt is never mistaken for a crashed engine. |

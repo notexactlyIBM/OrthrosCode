@@ -89,6 +89,7 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin):
         self.milestone_misses = {}  # refills that made nothing of each milestone
         self.accepted = 0         # changes the reviewer kept
         self.rejected = 0         # changes the reviewer sent back
+        self.caught = 0           # of those, caught by the automatic checks
         self.hallucinations = 0   # invented attributes caught this run
         self.known_phantoms = set()   # so one invention is only reported once
         self.internal_errors = 0  # unexpected exceptions in a row
@@ -355,12 +356,21 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin):
         # check before this asks whether the code is well formed; none can ask
         # whether it does what the item said.
         rejected_now = False
-        if self.review and touched and not self.broken:
-            status.phase("reviewing", self.current_task)
-            verdict, why = self.review(self.current_task, round_diff(ws, self.edit_files))
+        diff = round_diff(ws, self.edit_files) if touched and not self.broken else ""
+        findings = self.scan_round(diff) if diff else []
+        caught = [m for kind, m in findings if kind == "reject"]
+        if (self.review or caught) and touched and not self.broken:
+            if caught:
+                verdict, why = "reject", "automatic check: " + "; ".join(caught[:3])
+                self.caught += 1
+            else:
+                status.phase("reviewing", self.current_task)
+                verdict, why = self.second_opinion(self.current_task, diff,
+                                                   [m for kind, m in findings if kind == "warn"])
             if verdict == "reject":
                 self.rejected += 1
-                self.note("Reviewer rejected it: %s" % why[:110])
+                self.note("%s rejected it: %s" % ("An automatic check" if caught else "Reviewer",
+                                                  why[:110]))
                 if self.rollback and self.rollback():
                     self.remove_new_sources(before_files)
                     rejected_now = True

@@ -162,6 +162,8 @@ FIELD_SIGNS = (
      "it's best to only add files that need changes"),
     ("prompts the guard kept from being sent", GUARD_REFUSED),
     ("files the guard kept out of a round", "Orthros guard: not adding"),
+    ("bad edits stopped by the automatic checks", "An automatic check rejected it"),
+    ("changes a second look at the diff found a bug in", "a second look found"),
 )
 OVERSIZE = re.compile(r"request \((\d+) tokens\) exceeds the available context size "
                       r"\((\d+) tokens\)")

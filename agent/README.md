@@ -58,6 +58,7 @@ into items, and checks earlier work -- until the clock runs out.
 | `ralph_send.py` | what one round is sent: its files, its reading, the numbers it came back with |
 | `ralph_locate.py` | asks which files an item needs when it names none (after Agentless) |
 | `ralph_gists.py` | GISTS.md: every module in a few lines, for planning (after ReadAgent) |
+| `ralph_scan.py` | after each round, checks that cost no tokens: project-wide lint and call signatures, placeholders, conflict markers, lost tests |
 | `ralph_digest.py` | `DIGEST:` reads a file too big for a round in parts (after Chain-of-Agents) |
 | `ralph_prompts.py` | everything the model is told |
 | `ralph_tasks.py` | task list, plan (`PLAN.md`), progress ledger (`PROGRESS.md`) |

@@ -213,6 +213,38 @@ class TestNewProject(TestLoop):
         self.assertIn(os.path.join(self.ws, "made.py"), s.edit_files)
 
 
+LAZY_AIDER = r'''import re, sys
+args = sys.argv[1:]
+files = [args[i + 1] for i, a in enumerate(args) if a == "--file"]
+body = open(files[0]).read()
+open(files[0], "w").write(re.sub(r"- \[ \]", "- [x]", body, count=1))
+for f in files[1:]:
+    if f.endswith(".py"):
+        open(f, "w").write("def add(a, b):\n    # ... rest of the code unchanged\n    pass\n")
+        print("Applied edit to %s" % f)
+print("Tokens: 1k sent, 100 received.")
+'''
+
+
+class TestCaughtWithoutAReviewer(TestLoopWithGit):
+    def test_a_placeholder_edit_is_undone_by_the_automatic_checks(self):
+        write_text(self.fake, LAZY_AIDER)
+        write_text(self.notes, "# Tasks\n\n- [ ] In `add`, handle None\n")
+        self.git("add", "-A")
+        self.git("commit", "-qm", "items")
+        original = read_text(self.code)
+        s = Session([sys.executable, self.fake, "--edit-format", "diff"], self.ws,
+                    os.environ.copy(), minutes=3, single_shot=True, edit_files=[self.code],
+                    entry_hint="none", iteration_timeout=30,
+                    rollback=lambda: self.git("checkout", "--", ".").returncode == 0,
+                    commit=lambda m: (self.git("add", "-A"), self.git("commit", "-qm", m)) and True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            s.run()
+        self.assertEqual(read_text(self.code), original)
+        self.assertEqual(s.caught, 1)
+        self.assertIn("automatic check", read_text(self.notes))
+
+
 class TestRefillTemperature(unittest.TestCase):
     def test_checking_is_cold_inventing_is_warm(self):
         self.assertEqual(refill_temperature("verify", 0.2, 0.8), 0.2)

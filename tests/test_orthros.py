@@ -173,6 +173,49 @@ class TestRestart(Sandbox):
         self.assertEqual(again.state["next"], "B")
 
 
+class TestSurrender(Sandbox):
+    def test_giving_up_is_loud_and_start_clears_it(self):
+        self.o.pause("the card is gone", error=True)
+        alert = os.path.join(self.root, orthros.ALERT_FILE)
+        self.assertIn("the card is gone", orthros.read_text(alert))
+        self.assertEqual(self.o.view()["alert"][1], "the card is gone")
+        self.o.start()
+        self.assertFalse(os.path.exists(alert))
+        self.assertIsNone(self.o.view()["alert"])
+
+    def test_an_ordinary_pause_is_quiet(self):
+        self.o.pause("Paused after the session, as asked.")
+        self.assertFalse(os.path.exists(os.path.join(self.root, orthros.ALERT_FILE)))
+
+    def test_machine_failures_are_retried_with_backoff_then_surrendered(self):
+        self.o.settings["env_retry_minutes"] = [2, 5]
+        failed = self.result("A", launched=False, log_text="The LM Studio server never came up.")
+        self.o.launch_failed("A", failed)
+        self.assertGreater(self.o.backoff_until, orthros.now() + 100)
+        self.assertFalse(self.o.state["paused"] and self.o.phase == "error")
+        self.o.launch_failed("A", failed)
+        self.assertGreater(self.o.backoff_until, orthros.now() + 250)
+        self.o.launch_failed("A", failed)
+        self.assertEqual(self.o.phase, "error")
+        self.assertTrue(os.path.exists(os.path.join(self.root, orthros.ALERT_FILE)))
+
+
+class TestTail(Sandbox):
+    def test_reads_new_output_by_offset(self):
+        log = os.path.join(self.o.logs, "20260101-000000-A.log")
+        self.write(self.o.logs, "20260101-000000-A.log", "one\n\x1b[1mtwo\x1b[0m\n")
+        first = self.o.tail_log("A", "", -1)
+        self.assertEqual(first["text"], "one\ntwo\n")    # escapes gone
+        with open(log, "a") as handle:
+            handle.write("three\n")
+        more = self.o.tail_log("A", first["file"], first["offset"])
+        self.assertEqual((more["text"], more["reset"]), ("three\n", False))
+
+    def test_a_long_log_starts_on_a_whole_line(self):
+        self.write(self.o.logs, "20260101-000000-B.log", "x" * 30000 + "\nlast line\n")
+        self.assertEqual(self.o.tail_log("B", "", -1)["text"], "last line\n")
+
+
 class TestChat(Sandbox):
     def test_status_question_gets_a_plain_answer(self):
         reply = self.o.chat("how is it going?")
@@ -213,6 +256,20 @@ class TestApplyPatch(Sandbox):
             self.assertIn("return 7", orthros.read_text(os.path.join(folder, "agent.py")))
             self.assertEqual(state["agents"][n]["goods"][-1], orthros.head(folder))
         self.assertIn("now proven", out.getvalue())
+
+    def test_a_crlf_file_takes_an_lf_patch(self):
+        for n in orthros.NAMES:
+            folder = self.o.folders[n]
+            with open(os.path.join(folder, "config.cmd"), "wb") as handle:
+                handle.write(b"@echo off\r\nset \"X=1\"\r\n")
+            orthros.commit_all(folder, "cmd")
+        patch = ("diff --git a/config.cmd b/config.cmd\n--- a/config.cmd\n+++ b/config.cmd\n"
+                 "@@ -1,2 +1,3 @@\n @echo off\n set \"X=1\"\n+set \"Y=2\"\n")
+        self.write(self.root, "cmd.patch", patch)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(orthros.apply_patch(self.root, os.path.join(self.root, "cmd.patch")), 0)
+        with open(os.path.join(self.o.folders["A"], "config.cmd"), "rb") as handle:
+            self.assertEqual(handle.read(), b"@echo off\r\nset \"X=1\"\r\nset \"Y=2\"\r\n")
 
     def test_a_file_that_does_not_apply_is_left_out(self):
         patch = ("diff --git a/agent.py b/agent.py\n--- a/agent.py\n+++ b/agent.py\n"

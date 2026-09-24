@@ -81,6 +81,19 @@ with an empty head and re-reads the task list from disk, so no single round
 has to hold the whole project -- which is what makes a 32k context window
 enough to work on a codebase that does not fit in it.
 
+Borrowed from the wider Ralph community, beyond the loop itself:
+
+- **Search before you build** (Geoffrey Huntley): a round is told not to
+  assume something is missing because it was not in the files it was sent,
+  and to ask with `FIND:` first. Duplicates cost more than the round saved.
+- **Acceptance criteria on every item** (spec-driven Ralph): items end with
+  `Done when:` and one check anyone can make, and the reviewer holds the
+  change to it -- the local stand-in for a completion promise.
+- **Count the tries** (`NR_OF_TRIES`): an item that ends turn after turn
+  without progress is parked for a person rather than retried for ever.
+- **Backpressure** -- tests and linters that reject invalid work -- was
+  already here: a test suite after every edit, round and launch.
+
 ## How it works
 
 ```mermaid
@@ -183,7 +196,9 @@ into A. Proven work flows both ways, so both end up with everything.
 | **Tests as a gate** | A test suite runs after every edit, after every round and before every launch. A change that fails it is rolled back. |
 | **Rollback** | Both folders are committed before each turn. An agent that fails to start is reset, and its failed version is kept as a git tag for inspection. |
 | **Proven history** | Every proven version is remembered. If a change that looked good turns out fatal, even after it was copied into both agents, each one steps back past it, as far as the original baseline if need be. |
-| **Knows when to stop** | A failure that is plainly the machine's (LM Studio down, card busy), or several turns in a row with nothing kept, pauses Orthros instead of burning the GPU all night. |
+| **Prompts that fit** | Orthros loads a small guard into the agents' Pythons: aider may not pull files into a round past what the context window holds, nor send a prompt the window cannot take. A refused prompt is never mistaken for a crashed engine. |
+| **Retries, then stops out loud** | A failure that is plainly the machine's (LM Studio down, card busy) is retried after 2, 5 and 15 minutes. When Orthros does give up -- that, several idle turns, low memory or disk -- it writes `ORTHROS-NEEDS-YOU.txt`, turns the page red, raises a desktop notification and beeps. |
+| **No item kills turn after turn** | An item that ends two turns in a row without progress is parked for a person, and an early stop becomes the twin's first item. |
 | **Fair turns** | Turns alternate, and their length leans towards a 50/50 split of time and tokens. |
 
 ## What you need
@@ -229,12 +244,21 @@ it behaves.
 
 ## Using it
 
-The page shows only the vitals:
+The page shows:
 - which agent is working, and on what;
 - rounds, changes kept and sent back, and tokens;
 - each agent's version and whether it is proven;
-- the time and token split between the two;
-- recent events.
+- **GPU**: a slowly turning lattice whose lit share is how busy the card is
+  (nvidia-smi's utilization -- a picture of load, not a count of cores), with
+  a plane that rises with memory in use, and the numbers beneath;
+- **Raw output**: a read-only terminal of the running turn's log as it is
+  written -- the agent, aider and the model's replies;
+- **Talk to Orthros**: *Ask* how it is going, what went wrong, what is next or
+  what temperatures are used, and get a few plain sentences from Orthros's own
+  records. *Suggest direction* puts your words at the top of the chosen
+  agent's task list (the twin works through it) -- straight away, or when the
+  running turn that is using that list ends;
+- the time and token split between the two, and recent events.
 
 **Pause after this session** lets the current turn finish, then stops.
 **Stop after this round** stops at the next safe point -- the agent checks
@@ -255,6 +279,17 @@ into the folder being worked on.
 | `grace_minutes` | 30 | time past its end before a turn is asked to stop |
 | `pause_after_idle` | 4 | turns in a row with nothing kept before Orthros pauses (0 = never) |
 | `install_requirements` | false | install an agent's changed `requirements.txt` into its own venv before its turn (off: it would download whatever the twin wrote there) |
+| `aider_guard` | true | load `orthros_guard\` into the agents' Pythons (see Safety nets) |
+| `park_after_tries` | 2 | turns in a row that end on the same item without progress before it is parked (0 = never) |
+| `env_retry_minutes` | [2, 5, 15] | waits before retrying a start the machine made fail |
+| `min_free_disk_mb` | 2048 | do not start a turn with less disk free |
+| `keep_logs` | 300 | turn logs kept in `logs\` |
+| `gpu_telemetry` | true | poll nvidia-smi for the page's GPU view |
+
+Temperature is set per kind of round, in each agent's `config.cmd`:
+`LC_TEMP_CODE` (0.2) for rounds that write code and for checking finished
+work, `LC_TEMP_BRAINSTORM` (0.85) for planning and briefs, and halfway between
+for breaking a milestone into items. The reviewer runs at 0.1.
 
 ### Steering
 
@@ -265,8 +300,21 @@ improving **B**. The files:
 - `PLAN.md`: coarse milestones, broken into items as the queue empties;
 - `RALPH_PROMPT.md`: the mission, sent with every round.
 
-Edit any of them to steer. `SETUP.bat --mission` rewrites all three from the
-templates in `orthros_setup.py`.
+Edit any of them to steer -- or use *Suggest direction* on the page, which
+writes to them for you at a safe moment. `SETUP.bat --mission` rewrites all
+three from the templates in `orthros_setup.py`.
+
+### Updating agents that are already running
+
+`agent\` is only the template the agents were made from. To bring a fix made
+there into the two live agents, close Orthros and run:
+
+    python orthros.py --apply-patch patches\2026-09-24-keep-working.patch
+
+Each agent gets it file by file with a three-way merge; what applies is
+checked and becomes that agent's newest proven version. Files that clash with
+what the agents wrote themselves are listed and left out. Make a patch of
+your own with `git diff <from> --relative=agent -- agent/ > my.patch`.
 
 ### Following along
 
@@ -277,7 +325,9 @@ templates in `orthros_setup.py`.
   turns), `LESSONS.md` (mistakes caught, fed back into every round) and
   `PROGRESS.md` (one row per turn).
 - **Full output:** `orthros.log` has what Orthros did; `logs\` has each turn's
-  complete output.
+  complete output, and the page's *Raw output* shows it live.
+- **After a rollback:** `ROLLBACK.md` in that agent's folder holds the undone
+  diff, readable by the rounds that must redo the useful part.
 - **Publishing:** `ORTHROS.bat --export` copies the newest proven agent into
   `agent\` and writes `EVOLUTION.md`. Commit those, and this repository's own
   history becomes the record of how the agents evolved.
@@ -296,11 +346,16 @@ templates in `orthros_setup.py`.
 | **Skills** | `SKILLS.md`, how common changes are done in this codebase, sent with every round |
 | **Field reports** | written by Orthros after each turn, read when planning |
 | **Planning** | milestones in `PLAN.md`, broken into items as the queue runs dry, with regular checks of work already ticked |
+| **Stop-path check** | `test_stop_paths.py` reads the loop's own source and fails any way of ending a session that does not say why |
 
 ## Layout
 
 ```
 ORTHROS.bat, orthros.py, orthros.html   the referee and its page (standard library only)
+orthros_guard\                    loaded into the agents' Pythons: keeps aider inside the window
+tests\                            the referee's tests: python -m unittest discover -s tests
+patches\                          fixes to agent\, for --apply-patch
+docs\WORK-STOPPAGE.md             why turns were ending early, and what changed
 SETUP.bat, orthros_setup.py         builds everything below; holds the mission templates
 agent\                            the agent's code: the template both agents start from
 LICENSE, README.md, EVOLUTION.md
@@ -360,10 +415,26 @@ Each field report records the least memory that was free during the turn.
 - **Orthros paused with a message.** It will say why. The turn's full output is
   in `logs\`, and the agent's own log is `.localcoder-ralph.log` in the folder
   it was working on.
-- **Linux or macOS?** Not yet: the launchers and process handling are Windows
-  specific. Porting them would make a good first contribution.
+- **`ORTHROS-NEEDS-YOU.txt` appeared.** Orthros tried what it could and gave
+  up; the file says why. Deal with that, then press Start (the file goes).
+- **"Five rounds in a row lost to the engine", but the engine looked fine.**
+  Look in the log for `exceeds the available context size`: the prompt was
+  too big, not the engine dead. The guard and the agent patch (above) deal
+  with it; [docs/WORK-STOPPAGE.md](docs/WORK-STOPPAGE.md) has the story.
+- **Linux or macOS?** Not yet for real runs: the launchers and process
+  handling are Windows specific. `--simulate` and both test suites run
+  anywhere. Porting the rest would make a good first contribution.
 
 ## Credits
 
 Built on [aider](https://aider.chat) and [LM Studio](https://lmstudio.ai),
 driven by the Ralph loop technique. Released under the [MIT license](LICENSE).
+
+The Ralph technique is Geoffrey Huntley's
+([how-to-ralph-wiggum](https://github.com/ghuntley/how-to-ralph-wiggum)): the
+same prompt in a fresh process, state on disk, one item per loop, search
+before building, backpressure from tests. Counting attempts per item
+(`NR_OF_TRIES`) and acceptance criteria on every item come from
+[fstandhartinger/ralph-wiggum](https://github.com/fstandhartinger/ralph-wiggum),
+a spec-driven take on it -- see ANTIGRAVITY SUGGESTIONS.md for the rest of
+what it offers.

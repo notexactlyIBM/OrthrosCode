@@ -24,3 +24,6 @@ janus.log
 __pycache__/
 *.pyc
 *.tmp
+
+# Written when Orthros gives up and needs a person; removed on Start.
+ORTHROS-NEEDS-YOU.txt

@@ -51,6 +51,12 @@ Do the NEXT unfinished item in the task list, and only that one.
 Too big for one round? Split it into smaller `- [ ]` items underneath, tick
 nothing, and stop.
 
+Before building something, make sure it is not already there -- do not
+assume it is missing because it is not in the files you were sent. Write
+`FIND: <name>` and stop; the answer comes next round. If an item ends with
+`Done when:`, that check is what finished means, and the reviewer holds you
+to it.
+
 Need something you do not have? Write one of these lines in the task list and
 stop; the answer comes with the next round:
 
@@ -121,6 +127,10 @@ area. A small improvement that certainly works beats a big one that might.
   folder and is not yours to change.
 - Never remove a safety net -- rollback, the reviewer, the tests, timeouts,
   crash recovery -- to make something else easier.
+- A session that stops early throws the rest of its turn away. Prefer a
+  recovery -- park the item, try the next brief, send less -- to a stop, and
+  any new stop must say why with `self.stop(reason)`; test_stop_paths.py
+  checks that.
 - No busywork: no renames, reformatting, or comment-only changes.
 - Use the standard library and the packages already installed. A new entry
   in requirements.txt is only installed if the operator has allowed it;
@@ -151,7 +161,13 @@ Where things are:
 - `ralph_checks.py`, `ralph_inventions.py` the checks after each round
 - `supervisor*.py` LM Studio, aider's command line, the reviewer, git
 - `research.py` web search and fetch; `split.py` mechanical refactoring
+- `ralph_send.py` what a round is sent; `test_stop_paths.py` checks every
+  way a session can end says why
 - `test_*.py` the tests; SKILLS.md how common changes are done
+
+Items from Orthros (`Found by Orthros: ...`) and from the operator
+(`From the operator: ...`) arrive at the top of the list. ROLLBACK.md, when
+there is one, holds the diff of the last rollback -- no git command needed.
 
 If an item cannot be finished in one go, split it into smaller `- [ ]` items
 underneath and tick nothing. `- [!]` means stuck and waiting for a human.
@@ -172,24 +188,18 @@ Check the ticked items above really work before building on them.
 """
 
 TASKS = {
-    "B": """- [ ] In `recent_lessons` (ralph_tools.py), add an optional `task` argument; when given, return the lessons sharing the most words with it, newest first among equals, still at most `count`.
-- [ ] In `compose_round_prompt` (ralph_prompts.py), add an optional `task` argument and pass it on to `recent_lessons`.
-- [ ] In `Session.send_round` (ralph_session.py), pass the current task to `compose_round_prompt`.
-- [ ] In test_ralph_tools.py, add a unittest test that `recent_lessons` with a `task` puts the matching lesson first.
-- [ ] In `OutcomeMixin.judge_round` (ralph_outcome.py), call `record_lesson` when an item is ticked without any code changing, naming the item.
-- [ ] In `ReportMixin._finish` (ralph_report.py), when the session kept no changes, call `record_lesson` with one line saying how many rounds it ran and what ended it.
-- [ ] Create KNOWLEDGE.md with what rounds keep rediscovering: the 32k context and what a round sends, the ~9,000-token file limit, which module owns what, and the machine's known failure modes from config.cmd's comments. Under 60 lines.
-- [ ] In `refill_list` (ralph_rounds.py), add KNOWLEDGE.md from the workspace to the read-only files when it exists.
-- [ ] In SKILLS.md, add a skill: adding a new ralph_ module, and covering it with a test_ file.""",
-    "A": """- [ ] In `handle_tool_requests` (ralph_tools.py), add a `CALLERS: <function>` request that lists every line calling the function (`name(`), leaving out its own `def` line, into FOUND.md.
-- [ ] In test_ralph_tools.py, add a unittest test for the `CALLERS:` request.
-- [ ] In `test_check` (ralph_checks.py), include the first failing test's assertion message in the report, not only its name.
-- [ ] In `files_for_refill` (ralph_rounds.py), size files with `os.path.getsize` instead of reading every file's text twice.
-- [ ] In `Session.send_round` (ralph_session.py), add the approximate tokens sent (bytes / 4 of the files) to the "sending N of M files" line.
-- [ ] In `import_check` (ralph_checks.py), remember the result for the last `code_fingerprint` of the files and return it without running Python again when nothing changed.
-- [ ] In research.py, add a `--site` option that restricts a search to one domain by adding `site:<domain>` to the query.
-- [ ] In research.py, cache each query's result in `.localcoder-research-cache/` for 24 hours, so repeating a lookup costs nothing.
-- [ ] Add test_supervisor_aider.py with unittest tests that `build_aider_command` starts aider with `-m aider` and includes `--no-suggest-shell-commands`.""",
+    "B": """- [ ] In `ReportMixin._finish` (ralph_report.py), append one line to a new STOPS.md -- date, rounds, kept, and `self.stop_reason` -- keeping the newest 20 lines. Done when: a test in test_ralph_report.py finishes a fake session twice and finds two lines.
+- [ ] In `compose_refill_prompt` (ralph_prompts.py), add the last three lines of STOPS.md under a heading "How the last sessions ended", when the file exists. Done when: a test sees the heading in a refill prompt built next to a STOPS.md.
+- [ ] In `record_lesson` (ralph_tools.py), when LESSONS.md passes 60 lesson lines, move all but the newest 40 into LESSONS.old.md. Done when: a test writes 61 lessons and finds 40 left.
+- [ ] In KNOWLEDGE.md, add a section "Why sessions stop" listing each stop message in ralph_refill.py, ralph_outcome.py and ralph_report.py, the file that says it, and what usually causes it. Done when: every `self.stop(` message in those files appears in it.
+- [ ] In SKILLS.md, add a skill "Keep a round's prompt inside the window": what a round sends (task list, named files, SKILLS.md, answers), how `files_for_task` picks files, and why naming a file in a reply can pull it in. Done when: the skill names `files_for_task` and ralph_send.py.
+- [ ] In `remember_review` (ralph_tasks.py), keep the reviewer's last two reasons under the item instead of one. Done when: a test rejects an item three times and finds exactly the last two reasons.""",
+    "A": """- [ ] In `SendMixin.send_round` (ralph_send.py), estimate the prompt's tokens (bytes / 4 of every file and read) before running aider, and when it is over 60% of LC_CONTEXT drop the read-only files, largest first, until it fits. Done when: a test with a large read-only file sees it left out of the command.
+- [ ] In `refill_list` (ralph_rounds.py), apply the same 60% budget to the read-only files a refill sends, dropping the largest first. Done when: a test sees the largest read file left out when over budget.
+- [ ] In `ReportMixin.checkpoint` (ralph_report.py), log how many rounds since the last checkpoint were rejected, refused as too big, or lost to the engine. Done when: the checkpoint note names all three counts.
+- [ ] In `handle_tool_requests` (ralph_tools.py), add a `TESTS: <module>` request that runs one test module with unittest and writes the output into FOUND.md. Done when: a test asks for TESTS: test_ralph_tools and finds "Ran" in FOUND.md.
+- [ ] In `run_research` (ralph_rounds.py), skip the lookup when RESEARCH.md was written in the last 20 minutes for the same query. Done when: a test calls it twice and the second call returns without running research.py.
+- [ ] In test_loop.py, add a test that a session whose reviewer rejects every change still runs until its time is up, and ends with a reason. Done when: the test passes and asserts on `stop_reason`.""",
 }
 
 WHEN_OUT = {
@@ -245,6 +255,10 @@ how new items are written -- the rules and examples refill rounds are given.
 ## [ ] Memory hygiene
 Keep DONE.md, LESSONS.md and RESEARCH.md from growing without bound: summarise
 or archive old entries so what rounds read stays small and current.
+
+## [ ] Memory of why sessions end
+STOPS.md with one line per session and how it ended, read by planning rounds,
+so a stop that keeps recurring becomes a milestone of its own. Test it.
 """,
     "A": """## [ ] Code navigation tools
 Requests a round can make to find its way around: who calls a function, where
@@ -269,6 +283,15 @@ weakening what they catch.
 ## [ ] Better research
 Site-restricted searches, documentation first for known libraries, a cache,
 and RESEARCH.md written so a small model can use it at a glance.
+
+## [ ] Prompts that always fit
+Measure what every round and refill sends before sending it, and trim what is
+read-only first, so no round is refused as bigger than the window. Test it
+with a folder whose files are too big together.
+
+## [ ] Sessions that run their whole time
+Every early stop either recovers (park, next brief, send less) or is proven
+necessary by a test. FIELD_REPORT.md's "Ended:" lines are the evidence.
 """,
 }
 

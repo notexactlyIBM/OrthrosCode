@@ -37,3 +37,17 @@ front of every round.
 **Find where something is used.** Write `FIND: name` in the task list and
 stop; the matches are in FOUND.md next round. `DOCS: module` does the same
 with an installed library's own documentation.
+
+**Add a way for a session to stop -- or better, not to.** An early stop
+throws away the rest of the turn, so first try to recover: park the item
+(`park_task`), move to the next brief, or send less next round. When a stop
+is truly needed, return False straight after `self.stop("why")`, in a method
+whose docstring says "False to stop". test_stop_paths.py fails any stop that
+does not say why.
+
+**Keep a round inside the context window.** A round sends the task list, the
+files `files_for_task` picks from the item's backticked names, SKILLS.md and
+any fresh answers (ralph_send.py). A reply that names another file can pull
+it in too. A prompt bigger than the window is refused -- `refused` on the
+RoundResult -- and the next round on that item sends less.
+

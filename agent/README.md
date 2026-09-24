@@ -55,6 +55,7 @@ into items, and checks earlier work -- until the clock runs out.
 | `ralph.py` | the loop's entry point and what other modules import |
 | `ralph_session.py` | the loop itself, with `ralph_setup`, `ralph_refill`, `ralph_outcome`, `ralph_report` |
 | `ralph_rounds.py` | one aider round, research, the diff the reviewer sees |
+| `ralph_send.py` | what one round is sent: its files, its reading, the numbers it came back with |
 | `ralph_prompts.py` | everything the model is told |
 | `ralph_tasks.py` | task list, plan (`PLAN.md`), progress ledger (`PROGRESS.md`) |
 | `ralph_checks.py` | parse, import, start, and keep files small enough for a round |
@@ -66,6 +67,7 @@ into items, and checks earlier work -- until the clock runs out.
 | `gui.py`, `gui.html` | this agent's dashboard |
 | `bench_parallel.py` | measures whether two workers on one card beat one |
 | `test_*.py` | the unittest suite: run after every edit, every round, and before launch |
+| `test_stop_paths.py` | reads the loop's source: every way a session can end must say why |
 | `SKILLS.md` | how common changes are done here; sent with every round |
 | `orthros_shared.pth` | layers this agent's venv over `..\shared-venv` |
 

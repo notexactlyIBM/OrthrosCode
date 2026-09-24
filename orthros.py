@@ -1576,9 +1576,10 @@ class Orthros:
         reset = name != os.path.basename(path) or offset < 0 or offset > size
         if reset:
             offset = max(0, size - 24000)
+        start = offset
         text, offset = read_from(path, offset)
-        if reset and offset and "\n" in text:
-            text = text[text.index("\n") + 1:]      # start on a whole line
+        if reset and start and "\n" in text:
+            text = text[text.index("\n") + 1:]      # started mid-file: begin on a whole line
         return {"file": os.path.basename(path), "offset": offset, "text": text,
                 "reset": reset, "live": running.get("agent") == agent}
 
@@ -1942,6 +1943,14 @@ def fake_agent(minutes):
                      attempt=1, budget=2, review=None, outcome=None,
                      last_round_seconds=42, last_in=12000, last_out=2200, tok_per_sec=31.4,
                      edits_applied=1, edits_failed=0)
+        # What a real turn's log carries, so the page's raw-output view has
+        # something to show in a simulation.
+        print("Round %d  |  %s" % (state["rounds"], state["item"]))
+        print("Model: openai/localcoder with diff edit format")
+        print("I'll make the smallest change that does this, in agent.py.")
+        print("agent.py\n<<<<<<< SEARCH\n# agent\n=======\n# agent, improved\n>>>>>>> REPLACE")
+        print("Tokens: 12k sent, 2.2k received.")
+        print("Applied edit to agent.py", flush=True)
         for phase in ("working", "checking", "reviewing"):
             state["phase"] = phase
             write_json(status_path, state)
@@ -2036,6 +2045,27 @@ def split_patch(text):
     return out
 
 
+def match_line_endings(part, target):
+    """Give a patch's hunk lines CRLF endings when the file it patches has them.
+
+    A `git diff` is written with LF. The agents keep their .cmd files in CRLF
+    -- cmd.exe misreads labels without it -- and their repositories have no
+    rule to convert, so an LF patch does not match a CRLF file at all.
+    """
+    try:
+        with open(target, "rb") as handle:
+            crlf = b"\r\n" in handle.read(65536)
+    except OSError:
+        return part
+    if not crlf or "\n@@" not in part:
+        return part
+    head, body = part.split("\n@@", 1)
+    lines = ("@@" + body).split("\n")
+    fixed = [l if (not l or l.endswith("\r") or l.startswith(("@@", "\\"))) else l + "\r"
+             for l in lines]
+    return head + "\n" + "\n".join(fixed)
+
+
 def apply_patch(root, patch_path):
     """Put the operator's own change into both live agents, and count it as proven.
 
@@ -2069,7 +2099,7 @@ def apply_patch(root, patch_path):
         for rel, part in parts:
             fd, tmp = tempfile.mkstemp(suffix=".patch")
             with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-                handle.write(part)
+                handle.write(match_line_endings(part, os.path.join(folder, rel)))
             ok, out = git(folder, "apply", "--whitespace=nowarn", tmp)
             if not ok:
                 ok, out = git(folder, "apply", "--3way", "--whitespace=nowarn", tmp)

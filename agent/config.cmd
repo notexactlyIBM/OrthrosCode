@@ -329,6 +329,11 @@ REM --- How often it stops to check it is getting somewhere. -
 REM  In minutes.  At each checkpoint it reports what moved since the
 REM  last one, and stops early if the answer is nothing.
 set "LC_RALPH_CHECKPOINT=10"
+REM  ...but only once this many rounds have run since the last one.  Ten
+REM  minutes is two or three rounds on a 27B model, fewer with a refill
+REM  or a slow review in them -- too few to call a run stuck, and it was
+REM  ending sessions that were about to get going.
+set "LC_RALPH_CHECKPOINT_ROUNDS=4"
 
 REM --- Longest reply the model may give, in tokens. ---------
 REM  aider never sends a limit of its own, so without this the model

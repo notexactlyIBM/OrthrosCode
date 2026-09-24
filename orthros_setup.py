@@ -503,6 +503,10 @@ def main():
         say("\nInstalling into shared-venv failed; scroll up for pip's reason.")
         return 1
     ok = all([make_agent(x) for x in NAMES])
+    # The machine may have changed since Orthros last looked: look again at
+    # the next start.
+    with open(os.path.join(ROOT, ".orthros-reprobe"), "w", encoding="utf-8") as h:
+        h.write("setup was run\n")
     lms = find_lms()
     say()
     say("LM Studio's lms tool: %s" % (lms or "NOT FOUND -- install LM Studio (see README), "

@@ -211,9 +211,11 @@ label { color: var(--dim); font-size: 13px; display: flex; gap: 6px; align-items
 
   <div class="row2">
     <section class="card">
-      <div class="cardhead"><h2>GPU</h2><span class="sp"></span></div>
+      <div class="cardhead"><h2>GPU</h2><span class="sp"></span>
+        <button type="button" id="probeBtn" title="Look at the hardware again and fit the settings to it">Check hardware</button></div>
       <canvas id="gpu" aria-label="The GPU as a slowly turning lattice: the share of points lit is how busy the card is"></canvas>
       <div class="gpustat" id="gpustat">waiting for readings…</div>
+      <div class="gpustat" id="tunestat"></div>
     </section>
     <section class="card">
       <div class="cardhead"><h2>Raw output</h2><span class="termfile" id="termFile"></span><span class="sp"></span>
@@ -441,7 +443,21 @@ function drawGpu(t) {
 }
 requestAnimationFrame(drawGpu);
 
+function renderTune(d) {
+  const h = d.hardware || {}, el = $("#tunestat");
+  if (!h.auto) { el.textContent = "Settings: from config.cmd (auto_tune is off)."; return; }
+  const use = Object.assign({}, h.configured || {}, h.good || {});
+  const bits = [];
+  if (use.LC_CONTEXT) bits.push(`context <b>${fmtN(+use.LC_CONTEXT)}</b>`);
+  if (use.LC_RALPH_ITER_TIMEOUT) bits.push(`rounds up to ${use.LC_RALPH_ITER_TIMEOUT}s`);
+  const trial = Object.entries(h.trial || {}).map(([k, v]) => `${k.replace("LC_RALPH_", "").replace("LC_", "").toLowerCase()} ${v}`);
+  el.innerHTML = `Settings: ${bits.join(" · ") || "as configured"}` +
+    (trial.length ? ` · <b>next turn tries</b> ${esc(trial.join(", "))}` : " · fitted to this machine");
+  el.title = (h.why || []).join("\n");
+}
+
 function renderGpuStat(d) {
+  renderTune(d);
   const g = d.gpu, el = $("#gpustat");
   if (!g) { el.textContent = "No readings: nvidia-smi was not found or did not answer."; return; }
   const gb = (m) => m == null ? "?" : (m / 1024).toFixed(1);
@@ -539,6 +555,7 @@ $("#createTask").onclick = async () => {
   await chooseMode("task", r.key);
   msg.textContent = `Created. Press Start, or it begins at the next handover.`;
 };
+$("#probeBtn").onclick = async () => { $("#probeBtn").disabled = true; await post("/api/hardware"); $("#probeBtn").disabled = false; tick(); };
 $("#practiceEvery").addEventListener("change", () => post("/api/settings", { practice_every: +$("#practiceEvery").value }));
 
 let chatShown = "";

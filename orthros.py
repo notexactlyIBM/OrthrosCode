@@ -41,6 +41,7 @@ import traceback
 import urllib.parse
 import webbrowser
 
+import orthros_tune as tune
 import orthros_work as work
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -89,6 +90,9 @@ DEFAULTS = {
     # 0 = never.
     "practice_every": 4,
     "practice_minutes": 20,
+    # Fit context and timeouts to the machine, from what each turn measures
+    # (see orthros_tune.py). The agents' config.cmd holds the starting point.
+    "auto_tune": True,
 }
 # Files an agent may edit in a task or a practice: any project, not just Python.
 PROJECT_FILES = "*.py;*.js;*.mjs;*.cjs;*.ts;*.tsx;*.jsx;*.html;*.css"
@@ -537,6 +541,7 @@ class Orthros:
         self.proc = None
         self.backoff_until = 0               # a machine failure's wait before retrying
         self.gpu = None                      # the latest nvidia-smi reading, for the page
+        self.tuner = tune.Tuner(root)
         self.gpu_history = []
 
     # ---------------------------------------------------------------- state
@@ -592,7 +597,7 @@ class Orthros:
                 git(folder, "tag", "-f", "orthros/baseline", sha)
         self.save()
 
-    def agent_env(self, name, workspace=None, kind="self"):
+    def agent_env(self, name, workspace=None, kind="self", tuned=True):
         folder, target = self.folders[name], workspace or self.folders[PEER[name]]
         env = os.environ.copy()
         for line in read_text(os.path.join(folder, "config.cmd")).splitlines():
@@ -603,6 +608,8 @@ class Orthros:
                     if "%~dp0" in match.group(2) else os.path.expandvars(value)
         env.update(LC_WORKSPACE=target, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8",
                    LC_UNLOAD_ON_EXIT="1", LC_STOP_SERVER_ON_EXIT="1")
+        if tuned and self.settings.get("auto_tune", True):
+            env.update({k: str(v) for k, v in self.tuner.settings().items() if k.startswith("LC_")})
         if kind != "self":
             # Someone else's project: whatever it is written in, and started
             # after each round if it has an entry point.
@@ -661,6 +668,36 @@ class Orthros:
                 os.remove(os.path.join(self.logs, name))
             except OSError:
                 pass
+
+    def configured(self):
+        """The agents' own settings, before any tuning: the starting point."""
+        env = self.agent_env("A", tuned=False)
+        return {k: env[k] for k in ("LC_CONTEXT", "LC_RALPH_MAX_OUTPUT", "LC_RALPH_API_TIMEOUT",
+                                    "LC_RALPH_ITER_TIMEOUT", "LC_MODEL_KEY") if env.get(k)}
+
+    def maybe_look(self, force=""):
+        """Look at the hardware if there is a reason to: see orthros_tune.py."""
+        if not self.settings.get("auto_tune", True) or self.simulate:
+            return
+        card = (self.gpu.get("name"), int(self.gpu.get("mem_total") or 0)) if self.gpu else None
+        reason = force or self.tuner.due(card)
+        if not reason:
+            return
+        current = self.configured()
+        why = self.tuner.look(self.find_lms("A"), current.get("LC_MODEL_KEY", ""), current)
+        look = self.tuner.data["look"]
+        self.event("looked at the hardware (%s): %s, %d GB of video memory, %d GB of memory%s"
+                   % (reason, look.get("gpu") or "no NVIDIA card found",
+                      (look.get("vram_mb") or 0) // 1024, (look.get("ram_mb") or 0) // 1024,
+                      ("; " + "; ".join(why)) if why else ""))
+
+    def tune_after(self, result):
+        if not self.settings.get("auto_tune", True) or self.simulate:
+            return
+        note = self.tuner.after_turn(read_text(result.get("log") or ""), result["launched"],
+                                     self.configured())
+        if note:
+            self.event("settings: " + note)
 
     def next_work(self, name):
         """What this turn is for: {kind, folder, label, exercise}.
@@ -1452,6 +1489,7 @@ class Orthros:
                 name = self.state["next"]
                 if not self.memory_is_free_enough(name) or not self.cleared_for_launch(name):
                     continue
+                self.maybe_look()            # cheap unless there is a reason to look
                 result = self.run_turn(name)
                 if self.stop_mode and not result["launched"]:
                     # Stopped by hand before it got going: not the code's fault.
@@ -1459,6 +1497,7 @@ class Orthros:
                 else:
                     self.field_report(result)
                     self.judge(result)
+                    self.tune_after(result)
             except Exception as exc:
                 self.event("Orthros error: %s" % exc, "bad")
                 traceback.print_exc()
@@ -1961,6 +2000,12 @@ class Orthros:
                 "tasks": [{k: t[k] for k in ("key", "name", "folder", "open", "done", "parked")}
                           for t in work.list_tasks(self.root)],
                 "exercises": work.exercises(),
+                "hardware": {"look": self.tuner.data.get("look", {}),
+                             "good": self.tuner.data.get("good", {}),
+                             "trial": self.tuner.data.get("trial", {}),
+                             "why": self.tuner.data.get("why", []),
+                             "auto": bool(self.settings.get("auto_tune", True)),
+                             "configured": self.configured()},
                 "planned": {n: self.plan_minutes(n) for n in NAMES}}
 
 
@@ -2024,6 +2069,9 @@ def serve(orthros, port):
                 elif url.path in ("/api/pause", "/api/stop", "/api/force"):
                     mode = {"/api/pause": "pause", "/api/stop": "now", "/api/force": "force"}
                     self.send(200, {"result": orthros.stop(mode[url.path])})
+                elif url.path == "/api/hardware":
+                    orthros.maybe_look(force="asked from the page")
+                    self.send(200, {"result": "ok"})
                 elif url.path == "/api/mode":
                     self.send(200, {"result": orthros.set_mode(body.get("mode") or "self",
                                                                body.get("task"))})
@@ -2375,6 +2423,8 @@ def main():
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--export", nargs="?", const="A", choices=NAMES,
                         help="copy an agent's newest proven version into agent\\ and exit")
+    parser.add_argument("--probe", action="store_true",
+                        help="look at the hardware now and put fitting settings on trial")
     parser.add_argument("--apply-patch", metavar="PATCH",
                         help="apply a `git diff --relative=agent` of agent\\ to both live "
                              "agents, check it, and count it as proven")
@@ -2385,6 +2435,13 @@ def main():
         return export(HERE, args.export)
     if args.apply_patch:
         return apply_patch(HERE, args.apply_patch)
+    if args.probe:
+        orthros = Orthros(HERE)
+        orthros.event = lambda text, kind="info": print(text)
+        orthros.maybe_look(force="asked")
+        print("On trial for the next turn: %s" % (tune.describe(orthros.tuner.data["trial"])
+                                                   or "nothing -- the current settings fit"))
+        return 0
     if not args.simulate and not all(os.path.isdir(os.path.join(HERE, "OrthrosCode %s" % n, ".git"))
                                      for n in NAMES):
         print("The two agents are not set up yet. Run SETUP.bat first (see README.md).")

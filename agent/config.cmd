@@ -93,7 +93,8 @@ REM  K and V cache quantization to Q8_0.  `lms load` cannot set those, but
 REM  it uses the model's defaults.  The cache then takes half the room, so
 REM  65536 here costs about what 32768 cost before.  Try it with SELFTEST,
 REM  watch the first turn, and come back to 32768 on any "bad allocation".
-set "LC_CONTEXT=32768"
+REM  Running at 65536 with those settings since 2026-09-24.
+set "LC_CONTEXT=65536"
 
 REM --- How many requests it can answer at once. -------------
 REM  LEAVE THIS AT 1.  Memory used = LC_CONTEXT x LC_PARALLEL, so the

@@ -241,7 +241,7 @@ function agentCard(name, d) {
         `${fmtN(live.last_out)} out${live.tok_per_sec ? ` · ${live.tok_per_sec} tok/s` : ""}` +
         (edits ? " · " + edits : ""));
     }
-    if (live.review) detail.push(`reviewer: ${esc(live.review)}`);
+    if (typeof live.review === "string" && live.review) detail.push(`reviewer: ${esc(live.review)}`);
     else if (live.outcome) detail.push(`result: ${esc(live.outcome)}`);
     if (live.symptom) detail.push(`trouble: ${esc(live.symptom === "enginedied" ? "the engine died" : "ran out of room")}`);
     now = `<div>${what}</div><div class="item">${esc(live.item || live.detail || "")}</div>

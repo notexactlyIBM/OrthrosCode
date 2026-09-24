@@ -334,12 +334,84 @@ def point_at_peer(x):
         h.write(body)
 
 
+# The Pythons aider-chat 0.86 installs on (it asks for >=3.10,<3.13), best first.
+AIDER_PYTHONS = ((3, 12), (3, 11), (3, 10))
+
+
+def venv_config(folder):
+    """A venv's pyvenv.cfg as a dict, or {}."""
+    out = {}
+    try:
+        with open(os.path.join(folder, "pyvenv.cfg"), encoding="utf-8") as handle:
+            for line in handle:
+                key, sep, value = line.partition("=")
+                if sep:
+                    out[key.strip().lower()] = value.strip()
+    except OSError:
+        pass
+    return out
+
+
+def version_of(folder):
+    """The Python a venv was made with, as '3.12', or ''."""
+    return ".".join(venv_config(folder).get("version", "").split(".")[:2])
+
+
+def py_launcher(version):
+    """The interpreter `py -3.12` would run, or ''. Windows' py launcher knows them all."""
+    try:
+        proc = subprocess.run(["py", "-" + version, "-c", "import sys; print(sys.executable)"],
+                              capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    path = proc.stdout.strip()
+    return path if proc.returncode == 0 and os.path.isfile(path) else ""
+
+
+def python_for_aider():
+    """A Python aider installs on: this one if it will do, else one the py launcher has.
+
+    `py -3` picks the newest Python on the machine, and a machine that gains
+    Python 3.14 still needs 3.12 or older for aider.
+    """
+    if sys.version_info[:2] in AIDER_PYTHONS:
+        return sys.executable
+    for major, minor in AIDER_PYTHONS:
+        path = py_launcher("%d.%d" % (major, minor))
+        if path:
+            return path
+    return ""
+
+
+def shared_python():
+    """The interpreter shared-venv was made with -- the one the agents' venvs need too.
+
+    An agent's venv borrows shared-venv's packages through orthros_shared.pth,
+    which does so only when the two Python versions match, because compiled
+    packages load only in the version they were built for. On 2026-09-24 a new
+    Python 3.14 made both agents' venvs, which then could not see aider.
+    """
+    cfg = venv_config(SHARED)
+    for path in (cfg.get("executable", ""), os.path.join(cfg.get("home", ""), "python.exe")):
+        if path and os.path.isfile(path):
+            return path
+    version = version_of(SHARED)
+    return py_launcher(version) if version else ""
+
+
 def make_shared():
     if os.path.isfile(os.path.join(SHARED, "Scripts", "python.exe")):
-        say("shared-venv is there.")
+        say("shared-venv is there (Python %s)." % (version_of(SHARED) or "?"))
         return True
-    say("Creating shared-venv and installing aider into it (a few minutes, ~800 MB)...")
-    return (run([sys.executable, "-m", "venv", SHARED])
+    python = python_for_aider()
+    if not python:
+        say("aider needs Python 3.10, 3.11 or 3.12, and this machine has only %d.%d.\n"
+            "Install Python 3.12 from https://www.python.org/downloads/ (it can live beside "
+            "the one you have), then run this again." % sys.version_info[:2])
+        return False
+    say("Creating shared-venv with %s and installing aider into it (a few minutes, ~800 MB)..."
+        % python)
+    return (run([python, "-m", "venv", SHARED])
             and run([os.path.join(SHARED, "Scripts", "python.exe"), "-m", "pip", "install",
                      "--disable-pip-version-check", "-r",
                      os.path.join(TEMPLATE, "requirements.txt")]))
@@ -361,10 +433,22 @@ def make_agent(x):
     if not os.path.isfile(marker):
         with open(marker, "w", encoding="utf-8") as h:
             h.write("Looked after by Orthros: the other agent commits and rolls back here.\n")
-    python = os.path.join(folder, "venv", "Scripts", "python.exe")
+    venv = os.path.join(folder, "venv")
+    python = os.path.join(venv, "Scripts", "python.exe")
+    want, have = version_of(SHARED), version_of(venv)
+    if os.path.isfile(python) and want and have and want != have:
+        say("OrthrosCode %s's venv is Python %s but shared-venv is %s, so it cannot use the "
+            "shared packages. Making it again." % (x, have, want))
+
+        def writable(func, path, _):
+            os.chmod(path, 0o666)
+            func(path)
+
+        shutil.rmtree(venv, onerror=writable)
     if not os.path.isfile(python):
+        base = shared_python() or sys.executable
         say("Creating OrthrosCode %s's own venv, layered over shared-venv..." % x)
-        if not run([sys.executable, "-m", "venv", os.path.join(folder, "venv")]):
+        if not run([base, "-m", "venv", venv]):
             return False
     pth = os.path.join(folder, "orthros_shared.pth")
     site = os.path.join(folder, "venv", "Lib", "site-packages")
@@ -372,8 +456,13 @@ def make_agent(x):
         shutil.copy2(pth, site)
     ok = subprocess.run([python, "-c", "import aider, flake8, httpx"],
                         capture_output=True).returncode == 0
-    say("OrthrosCode %s: %s" % (x, "ready" if ok else "its venv cannot import aider -- "
-                                                  "is shared-venv complete?"))
+    if ok:
+        say("OrthrosCode %s: ready" % x)
+    else:
+        say("OrthrosCode %s: its venv (Python %s) cannot import aider from shared-venv "
+            "(Python %s). If those differ, delete shared-venv and run this again; if they "
+            "match, shared-venv's install was cut short -- delete it and run this again."
+            % (x, version_of(venv) or "?", version_of(SHARED) or "?"))
     return ok
 
 

@@ -322,10 +322,9 @@ function render(d) {
 
 // ------------------------------------------------------------------ GPU view
 // A lattice of points turning slowly. The share of points lit is the card's
-// utilization as nvidia-smi reports it (how much of the time kernels are
-// running) -- a picture of how busy it is, not a count of cores. The lit
-// points shift as it works, faster when tokens are flowing, and the tinted
-// plane rises with memory in use.
+// utilization as nvidia-smi reports it every 2 seconds: the share of time the
+// CUDA cores had work. The same points stay lit; only the count moves, easing
+// to each new reading. The tinted plane is memory in use. No reading, no change.
 const N = 7, PTS = [];
 for (let x = 0; x < N; x++) for (let y = 0; y < N; y++) for (let z = 0; z < N; z++)
   PTS.push([x / (N - 1) * 2 - 1, y / (N - 1) * 2 - 1, z / (N - 1) * 2 - 1]);
@@ -335,7 +334,7 @@ for (let i = ORDER.length - 1, seed = 7; i > 0; i--) { seed = (seed * 16807) % 2
 const EDGES = [[0,1],[1,3],[3,2],[2,0],[4,5],[5,7],[7,6],[6,4],[0,4],[1,5],[2,6],[3,7]];
 const CORNERS = [0, 1].flatMap((x) => [0, 1].flatMap((y) => [0, 1].map((z) => [x * 2 - 1, y * 2 - 1, z * 2 - 1])));
 const still = matchMedia("(prefers-reduced-motion: reduce)");
-let angle = 0.6, phase = 0, lastT = 0;
+let angle = 0.6, lastT = 0, litShown = 0, memShown = 0;
 const cvs = $("#gpu"), ctx = cvs.getContext("2d");
 
 function color(name, alpha) {
@@ -350,9 +349,10 @@ function drawGpu(t) {
   if (document.hidden) { lastT = t; return; }
   const dt = Math.min(100, t - (lastT || t)); lastT = t;
   const g = gpuState || {}, util = Math.max(0, Math.min(100, g.util || 0));
-  const tps = (lastState && lastState.live && lastState.live.tok_per_sec) || 0;
-  if (!still.matches) angle += dt * 0.00011;                 // about a minute a turn
-  phase += dt * (0.0015 + util / 100 * 0.004 + Math.min(tps, 60) * 0.0002);
+  if (!still.matches) angle += dt * 0.00006;                 // about two minutes a turn
+  // Lit points follow the reading and nothing else: the same points stay lit,
+  // and the count eases to each new nvidia-smi sample instead of jumping.
+  litShown += (util / 100 * PTS.length - litShown) * Math.min(1, dt / 600);
   const dpr = window.devicePixelRatio || 1, w = cvs.clientWidth, h = cvs.clientHeight;
   if (cvs.width !== Math.round(w * dpr) || cvs.height !== Math.round(h * dpr)) {
     cvs.width = Math.round(w * dpr); cvs.height = Math.round(h * dpr); }
@@ -363,19 +363,21 @@ function drawGpu(t) {
     const y1 = y * ct - z1 * st, z2 = y * st + z1 * ct, p = 6 / (6 + z2);
     return [cx + x1 * scale * p, cy - y1 * scale * p, z2, p]; };
   // memory: a tinted plane that rises with what is in use
-  const mem = g.mem_total ? Math.max(0, Math.min(1, g.mem_used / g.mem_total)) : 0;
+  const memTarget = g.mem_total ? Math.max(0, Math.min(1, g.mem_used / g.mem_total)) : 0;
+  memShown += (memTarget - memShown) * Math.min(1, dt / 600);
+  const mem = memShown;
   if (mem) { const yy = mem * 2 - 1, quad = [[-1, yy, -1], [1, yy, -1], [1, yy, 1], [-1, yy, 1]].map(project);
     ctx.beginPath(); quad.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)); ctx.closePath();
     ctx.fillStyle = color("--b", 0.13); ctx.fill(); }
   const corners = CORNERS.map(project);
   ctx.strokeStyle = color("--line"); ctx.lineWidth = 1;
   for (const [a, b] of EDGES) { ctx.beginPath(); ctx.moveTo(corners[a][0], corners[a][1]); ctx.lineTo(corners[b][0], corners[b][1]); ctx.stroke(); }
-  const lit = new Set(), n = Math.round(util / 100 * PTS.length), shift = Math.floor(phase) * 37;
-  for (let i = 0; i < n; i++) lit.add(ORDER[(i + shift) % PTS.length]);
+  const lit = new Set(), n = Math.round(litShown);
+  for (let i = 0; i < n; i++) lit.add(ORDER[i]);
   const shown = PTS.map((p, i) => [...project(p), lit.has(i)]).sort((a, b) => b[2] - a[2]);
   const on = color("--a"), off = color("--dim", 0.35);
   for (const [x, y, z, p, isLit] of shown) {
-    ctx.globalAlpha = isLit ? 0.55 + 0.45 * (1 - (z + 1.8) / 3.6) : 0.7;
+    ctx.globalAlpha = isLit ? 0.8 : 0.5;
     ctx.fillStyle = isLit ? on : off;
     ctx.beginPath(); ctx.arc(x, y, (isLit ? 2.6 : 1.3) * p, 0, Math.PI * 2); ctx.fill();
   }

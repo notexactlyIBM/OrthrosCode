@@ -2176,6 +2176,30 @@ def write_evolution(root, state):
         handle.write("\n".join(lines) + "\n")
 
 
+def open_window(url):
+    """The page in a window of its own: no tabs, no address bar.
+
+    Edge ships with Windows 10 and 11 and, like Chrome, opens a bare app
+    window with --app. Nothing to install. Falls back to an ordinary tab.
+    """
+    env = os.environ.get
+    candidates = [os.path.join(base, *tail) for base in
+                  (env("ProgramFiles(x86)", ""), env("ProgramFiles", ""), env("LOCALAPPDATA", ""))
+                  if base for tail in (("Microsoft", "Edge", "Application", "msedge.exe"),
+                                       ("Google", "Chrome", "Application", "chrome.exe"))]
+    candidates += [shutil.which(n) or "" for n in ("msedge", "chrome", "chromium")]
+    for path in candidates:
+        if path and os.path.isfile(path):
+            try:
+                subprocess.Popen([path, "--app=" + url, "--window-size=1240,1000"],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 creationflags=CREATE_NO_WINDOW if os.name == "nt" else 0)
+                return
+            except OSError:
+                continue
+    webbrowser.open(url)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--simulate", action="store_true")
@@ -2212,7 +2236,7 @@ def main():
     print("Orthros%s -- %s" % (" (simulation)" if args.simulate else "", url))
     print("Close this window to stop Orthros. A session in progress finishes on its own.")
     if not args.no_browser:
-        webbrowser.open(url)
+        open_window(url)
     loop = threading.Thread(target=orthros.loop, daemon=True)
     loop.start()
     if orthros.settings.get("gpu_telemetry", True):

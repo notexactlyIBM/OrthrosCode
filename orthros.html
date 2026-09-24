@@ -174,7 +174,7 @@ label { color: var(--dim); font-size: 13px; display: flex; gap: 6px; align-items
   <section class="card mode">
     <div class="line">
       <div class="seg" role="group" aria-label="What the agents work on">
-        <button id="modeSelf" type="button">Improve each other</button>
+        <button id="modeSelf" type="button">Improve itself</button>
         <button id="modeTask" type="button">Work on a task</button>
       </div>
       <span class="msgline" id="modeNote"></span>
@@ -198,7 +198,7 @@ label { color: var(--dim); font-size: 13px; display: flex; gap: 6px; align-items
         <div class="line"><button class="primary" type="button" id="createTask">Create task</button>
           <button type="button" id="cancelTask">Cancel</button><span class="msgline" id="taskMsg"></span></div>
       </div>
-      <p>A and B take turns on the task, with the same turn lengths as improving each other.
+      <p>A and B take turns on the task, with the same turn lengths as self-improvement.
         Its files are in <code id="taskPath">tasks\</code>. Steer it with <b>Suggest direction</b> for "the task".</p>
     </div>
   </section>
@@ -342,7 +342,7 @@ function split(el, val, a, b, fmt) {
 function render(d) {
   const pill = $("#pill"); pill.className = "pill " + d.phase;
   $("#phase").textContent = (PHASES[d.phase] || d.phase) + (d.simulate ? " (simulation)" : "");
-  $("#sub").textContent = d.mode === "task" ? `Working on the task ${d.task}` : "Improving each other";
+  $("#sub").textContent = d.mode === "task" ? `Working on the task ${d.task}` : "Improving itself";
   renderMode(d);
   const b = $("#banner"); const alert = d.alert && d.paused ? d.alert : null;
   const msg = alert ? `Orthros needs you (${hhmm(alert[0])}): ${alert[1]}\nIt has written ORTHROS-NEEDS-YOU.txt too. Press Start once it is dealt with.`

@@ -526,7 +526,7 @@ class Orthros:
         self.state.setdefault("tries", {})       # "<folder>|<item>": turns that died on it
         self.state.setdefault("directions", [])  # the operator's, waiting for a safe moment
         self.state.setdefault("chat", [])
-        self.state.setdefault("mode", "self")    # "self": improve each other; "task": a project
+        self.state.setdefault("mode", "self")    # "self": improve itself; "task": a project
         self.state.setdefault("task", "")        # the task's key under tasks\
         self.state["paused"] = True          # never resume unattended on restart
         self.state.setdefault("running", None)
@@ -1714,7 +1714,7 @@ class Orthros:
     # ---------------------------------------------------------------- modes
 
     def set_mode(self, mode, task=None):
-        """Switch between improving each other and working a task. Takes effect
+        """Switch between improving itself and working a task. Takes effect
         at the next handover; the turn in flight finishes as it began."""
         if mode not in ("self", "task"):
             return "unknown mode"
@@ -1730,7 +1730,7 @@ class Orthros:
             self.save()
         if changed or task:
             self.event("mode: %s" % ("working on the task %s" % self.state["task"]
-                                     if mode == "task" else "improving each other"), "start")
+                                     if mode == "task" else "improving itself"), "start")
         self.wake.set()
         return "ok"
 

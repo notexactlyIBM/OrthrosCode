@@ -50,7 +50,7 @@ with **Suggest direction** for *the task*.
 A good turn on a task also proves the agent that ran it, and the task's
 results, including its own tests, go into that agent's field report.
 
-### Improve each other
+### Improve itself
 
 A works on B's code, then B on A's. Each keeps a task list, a plan and a
 mission for its twin, in the twin's folder. To keep the two from colliding they
@@ -201,7 +201,7 @@ on two stand-in agents in a temporary folder, with turns of a few seconds.
 
 ## The dashboard
 
-- **Mode**: *Improve each other* (with how often to practise, and recent
+- **Mode**: *Improve itself* (with how often to practise, and recent
   practice scores) or *Work on a task* (pick one, or create one).
 - **Agents**: who is working, on what, which round and try; rounds, changes
   kept and sent back, tokens; each agent's version and whether it is proven.

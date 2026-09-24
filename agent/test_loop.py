@@ -190,6 +190,29 @@ class TestLocateInALoop(TestLoop):
         self.assertEqual(len(asked), 1)
 
 
+class TestNewProject(TestLoop):
+    def test_files_a_round_creates_are_seen_and_committed(self):
+        make = self.fake + ".make.py"
+        write_text(make, "import sys, re\n"
+                   "args = sys.argv[1:]\n"
+                   "notes = [args[i + 1] for i, a in enumerate(args) if a == '--file'][0]\n"
+                   "body = open(notes).read()\n"
+                   "open(notes, 'w').write(re.sub(r'- \\[ \\]', '- [x]', body, count=1))\n"
+                   "open('made.py', 'w').write('def made():\\n    return 1\\n')\n"
+                   "print('Tokens: 1k sent, 100 received.')\n")
+        os.remove(self.code)
+        commits = []
+        glob_files = lambda: [f for f in [os.path.join(self.ws, "made.py")]  # noqa: E731
+                              if os.path.isfile(f)]
+        s = Session([sys.executable, make], self.ws, self.env, minutes=3, single_shot=True,
+                    edit_files=[], entry_hint="none", iteration_timeout=30,
+                    commit=lambda m: commits.append(m) or True, list_files=glob_files)
+        with contextlib.redirect_stdout(io.StringIO()):
+            s.run()
+        self.assertIn("LocalCoder ralph: round 1", commits)
+        self.assertIn(os.path.join(self.ws, "made.py"), s.edit_files)
+
+
 class TestRefillTemperature(unittest.TestCase):
     def test_checking_is_cold_inventing_is_warm(self):
         self.assertEqual(refill_temperature("verify", 0.2, 0.8), 0.2)

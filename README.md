@@ -262,6 +262,28 @@ into A. Proven work flows both ways, so both end up with everything.
 fake agents in a temp folder, with turns of a few seconds, so you can see how
 it behaves.
 
+## Two modes
+
+The switch at the top of the page picks what the agents work on.
+
+**Improve each other** -- the original loop: A works on B's code, then B on
+A's. Every few turns (`practice_every`, 4 by default) one turn is a **practice**
+instead: a fresh copy of a small exercise from `exercises\`, 20 minutes, then
+tests the agent never saw are run against what it wrote. The score goes into
+that agent's FIELD_REPORT.md, so the twin improving it sees whether its
+changes made it a better coder in general -- not only better at editing
+itself. The standing prompt says so: that is what "better" means here.
+
+**Work on a task** -- press *New task*, give it a name and say what to build.
+Orthros makes `tasks\<name>\` (its own git history), and A and B take turns
+on it with the same turn lengths, handovers and safety nets. The first round
+turns your description into a task list. Steer it with *Suggest direction*
+for "the task". A turn on a task also proves the agent that ran it, and its
+results -- and the task's own tests -- go into the agent's field report too.
+
+Switching takes effect at the next handover; a turn in progress finishes as
+it began. Add your own exercises: see [exercises/README.md](exercises/README.md).
+
 ## Using it
 
 The page shows:
@@ -305,6 +327,8 @@ into the folder being worked on.
 | `min_free_disk_mb` | 2048 | do not start a turn with less disk free |
 | `keep_logs` | 300 | turn logs kept in `logs\` |
 | `gpu_telemetry` | true | poll nvidia-smi for the page's GPU view |
+| `practice_every` | 4 | in self-improvement mode, one turn in this many is a practice exercise (0 = never) |
+| `practice_minutes` | 20 | length of a practice turn |
 
 Temperature is set per kind of round, in each agent's `config.cmd`:
 `LC_TEMP_CODE` (0.2) for rounds that write code and for checking finished
@@ -377,6 +401,8 @@ your own with `git diff <from> --relative=agent -- agent/ > my.patch`.
 ```
 ORTHROS.bat, orthros.py, orthros.html   the referee and its page (standard library only)
 orthros_guard\                    loaded into the agents' Pythons: keeps aider inside the window
+orthros_work.py                   what a turn works on: the twin, a task, or a practice
+exercises\                        practice jobs, each with hidden tests
 tests\                            the referee's tests: python -m unittest discover -s tests
 patches\                          fixes to agent\, for --apply-patch
 docs\WORK-STOPPAGE.md             why turns were ending early, and what changed
@@ -388,6 +414,7 @@ made by SETUP.bat, not in the repository:
 shared-venv\                      aider and friends, installed once
 OrthrosCode A\, OrthrosCode B\      the two live agents, each its own git repository
 logs\, orthros.log, orthros.json      what happened, and the settings
+tasks\, practice\                 task projects and practice copies
 ```
 
 See [agent/README.md](agent/README.md) for the agent's own files and settings.

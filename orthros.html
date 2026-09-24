@@ -56,6 +56,26 @@ label { color: var(--dim); font-size: 13px; display: flex; gap: 6px; align-items
 .banner.alarm { border: 2px solid var(--bad); color: var(--bad); font-weight: 600; animation: alarm 1.2s infinite; }
 @keyframes alarm { 50% { background: color-mix(in srgb, var(--bad) 14%, var(--card)); } }
 
+.card.mode { margin-bottom: 12px; }
+.mode .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.mode .seg button { border: none; border-radius: 0; padding: 8px 16px; background: var(--card); color: var(--dim); }
+.mode .seg button.on { background: var(--ink); color: var(--bg); font-weight: 600; }
+.mode .pane { margin-top: 12px; display: none; }
+.mode .pane.on { display: block; }
+.mode .line { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.mode .line select { min-width: 200px; max-width: 100%; }
+.mode p { color: var(--dim); font-size: 13px; margin: 10px 0 0; }
+.mode input[type=number] { width: 60px; padding: 4px 6px; }
+.newtask { display: none; margin-top: 10px; gap: 8px; flex-direction: column; }
+.newtask.on { display: flex; }
+.newtask input, .newtask textarea { font: inherit; color: var(--ink); background: var(--card); border: 1px solid var(--line);
+  border-radius: 8px; padding: 7px 10px; }
+.newtask textarea { min-height: 90px; resize: vertical; }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.chip { font-size: 12px; padding: 3px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--dim); }
+.chip b { color: var(--ink); font-weight: 600; }
+.msgline { font-size: 12px; color: var(--dim); }
+.msgline.bad { color: var(--bad); }
 .row2 { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 12px; }
 .row2 .card { margin-top: 12px; }
 #gpu { width: 100%; height: 230px; display: block; }
@@ -151,6 +171,38 @@ label { color: var(--dim); font-size: 13px; display: flex; gap: 6px; align-items
 
   <div class="banner" id="banner"></div>
 
+  <section class="card mode">
+    <div class="line">
+      <div class="seg" role="group" aria-label="What the agents work on">
+        <button id="modeSelf" type="button">Improve each other</button>
+        <button id="modeTask" type="button">Work on a task</button>
+      </div>
+      <span class="msgline" id="modeNote"></span>
+    </div>
+    <div class="pane" id="selfPane">
+      <p>A works on B's code, then B on A's. Every
+        <input type="number" id="practiceEvery" min="0" max="50"> turns, an agent does a
+        practice exercise instead -- a small job it has never seen, scored by tests it never
+        sees. Those scores are how "better" is measured. 0 turns practice off.</p>
+      <div class="chips" id="practiceChips"></div>
+    </div>
+    <div class="pane" id="taskPane">
+      <div class="line">
+        <label>Task <select id="taskPick"></select></label>
+        <button type="button" id="newTaskBtn">New task</button>
+        <span class="msgline" id="taskInfo"></span>
+      </div>
+      <div class="newtask" id="newTask">
+        <input id="taskName" maxlength="40" placeholder="A short name, e.g. csv-cleaner">
+        <textarea id="taskBrief" placeholder="What should it build? Say what goes in, what comes out, and how you would check it works. The agents turn this into a task list."></textarea>
+        <div class="line"><button class="primary" type="button" id="createTask">Create task</button>
+          <button type="button" id="cancelTask">Cancel</button><span class="msgline" id="taskMsg"></span></div>
+      </div>
+      <p>A and B take turns on the task, with the same turn lengths as improving each other.
+        Its files are in <code id="taskPath">tasks\</code>. Steer it with <b>Suggest direction</b> for "the task".</p>
+    </div>
+  </section>
+
   <div class="agents">
     <section class="agent" id="agentA" style="--c: var(--a)"></section>
     <div class="swap"><span id="swap">&#8646;</span></div>
@@ -220,7 +272,8 @@ function agentCard(name, d) {
   const live = on ? d.live : null;
   let role = "Waiting", now = "";
   if (on) {
-    role = `Working on ${peer}`;
+    role = run.kind === "task" ? `Working on the task ${esc(run.label)}`
+      : run.kind === "practice" ? `Practising: ${esc(run.label)}` : `Working on ${peer}`;
     const total = run.minutes * 60, gone = live.elapsed || 0, left = Math.max(0, total - gone);
     const pct = Math.min(100, gone / total * 100);
     const tries = live.attempt && live.budget ? ` · try ${live.attempt} of ${live.budget}` : "";
@@ -258,11 +311,13 @@ function agentCard(name, d) {
   } else now = `<div class="item">not run yet · first turn ${d.planned[name]} min</div>`;
   const s = on ? live : (a.last || {});
   const tokens = on ? (live.tokens_in || 0) + (live.tokens_out || 0) : (s.tokens || 0);
+  const pr = (a.practice || []).slice(-1)[0];
+  const practiced = pr ? ` · practice ${esc(pr[1])} ${pr[2]}/${pr[3]}` : "";
   const proof = a.unproven ? `${a.unproven} change set${a.unproven > 1 ? "s" : ""} waiting to prove` :
     (a.version === a.proven ? "proven" : "");
   return `<div class="top"><div class="letter">${name}</div>
       <div style="min-width:0"><div class="role">${role} ${on ? '<span class="dot" style="display:inline-block;margin-left:4px"></span>' : ""}</div>
-      <div class="ver">version ${esc(a.version)}${proof ? " · " + proof : ""}</div></div></div>
+      <div class="ver">version ${esc(a.version)}${proof ? " · " + proof : ""}${practiced}</div></div></div>
     <div class="now">${now}</div>
     <div class="nums">
       <div class="num"><b>${s.rounds ?? 0}</b><span>rounds</span></div>
@@ -285,7 +340,8 @@ function split(el, val, a, b, fmt) {
 function render(d) {
   const pill = $("#pill"); pill.className = "pill " + d.phase;
   $("#phase").textContent = (PHASES[d.phase] || d.phase) + (d.simulate ? " (simulation)" : "");
-  $("#sub").textContent = d.running ? `${d.running.agent} is improving ${d.running.agent === "A" ? "B" : "A"}` : "A improves B, B improves A";
+  $("#sub").textContent = d.mode === "task" ? `Working on the task ${d.task}` : "Improving each other";
+  renderMode(d);
   const b = $("#banner"); const alert = d.alert && d.paused ? d.alert : null;
   const msg = alert ? `Orthros needs you (${hhmm(alert[0])}): ${alert[1]}\nIt has written ORTHROS-NEEDS-YOU.txt too. Press Start once it is dealt with.`
     : d.backoff ? `The machine was not ready. Trying again in ${fmtLeft(d.backoff)}.`
@@ -424,6 +480,66 @@ async function pollTerm() {
 }
 $("#termAgent").addEventListener("change", () => { term.agent = null; pollTerm(); });
 setInterval(pollTerm, 1000);
+
+// ------------------------------------------------------------------ mode
+let wantTask = false;
+function renderMode(d) {
+  const task = d.mode === "task";
+  $("#modeSelf").classList.toggle("on", !task && !wantTask);
+  $("#modeTask").classList.toggle("on", task || wantTask);
+  $("#selfPane").classList.toggle("on", !task && !wantTask);
+  $("#taskPane").classList.toggle("on", task || wantTask);
+  const busyOnTask = d.running ? d.running.kind === "task" : null;
+  $("#modeNote").textContent = busyOnTask !== null && busyOnTask !== task
+    ? "Switches when the running turn ends." : "";
+  if (document.activeElement !== $("#practiceEvery")) $("#practiceEvery").value = d.settings.practice_every ?? 4;
+  const chips = [];
+  for (const n of ["A", "B"]) for (const p of (d.agents[n].practice || []).slice(-3))
+    chips.push(`<span class="chip">${n} · ${esc(p[1])} <b>${p[2]}/${p[3]}</b></span>`);
+  $("#practiceChips").innerHTML = chips.length ? chips.join("") :
+    `<span class="chip">no practice yet${d.exercises.length ? ` · ${d.exercises.length} exercises ready` : ""}</span>`;
+  const pick = $("#taskPick");
+  if (document.activeElement !== pick) {
+    const opts = d.tasks.map((t) => `<option value="${esc(t.key)}">${esc(t.name)}</option>`).join("");
+    const key = JSON.stringify(d.tasks.map((t) => t.key)) + d.task;
+    if (pick.dataset.key !== key) {
+      pick.innerHTML = d.tasks.length ? (d.task ? "" : '<option value="">choose a task</option>') + opts
+        : '<option value="">no tasks yet</option>';
+      pick.value = d.task || "";
+      pick.dataset.key = key;
+    }
+  }
+  const t = d.tasks.find((x) => x.key === (pick.value || d.task));
+  $("#taskInfo").textContent = t ? `${t.done} done · ${t.open} open${t.parked ? ` · ${t.parked} parked` : ""}` : "";
+  $("#taskPath").textContent = t ? t.folder : "tasks\\<name>";
+  const target = $("#chatTarget");
+  if (d.task && !target.querySelector('option[value="task"]'))
+    target.insertAdjacentHTML("beforeend", '<option value="task">the task</option>');
+  if (!d.tasks.length && (task || wantTask)) $("#newTask").classList.add("on");
+}
+async function chooseMode(mode, task) {
+  const r = await post("/api/mode", task === undefined ? { mode } : { mode, task });
+  if (r.result !== "ok") { $("#taskMsg").textContent = r.result || r.error || ""; return false; }
+  wantTask = false; tick(); return true;
+}
+$("#modeSelf").onclick = () => { wantTask = false; $("#newTask").classList.remove("on"); chooseMode("self"); };
+$("#modeTask").onclick = () => {
+  const task = $("#taskPick").value;
+  if (task) chooseMode("task", task);
+  else { wantTask = true; $("#newTask").classList.add("on"); if (lastState) renderMode(lastState); $("#taskName").focus(); }
+};
+$("#taskPick").onchange = () => { if ($("#taskPick").value) chooseMode("task", $("#taskPick").value); };
+$("#newTaskBtn").onclick = () => { $("#newTask").classList.toggle("on"); $("#taskName").focus(); };
+$("#cancelTask").onclick = () => { $("#newTask").classList.remove("on"); wantTask = false; tick(); };
+$("#createTask").onclick = async () => {
+  const msg = $("#taskMsg"); msg.className = "msgline";
+  const r = await post("/api/task", { name: $("#taskName").value.trim(), brief: $("#taskBrief").value.trim() });
+  if (r.error) { msg.textContent = r.error; msg.className = "msgline bad"; return; }
+  $("#taskName").value = $("#taskBrief").value = ""; $("#newTask").classList.remove("on");
+  await chooseMode("task", r.key);
+  msg.textContent = `Created. Press Start, or it begins at the next handover.`;
+};
+$("#practiceEvery").addEventListener("change", () => post("/api/settings", { practice_every: +$("#practiceEvery").value }));
 
 let chatShown = "";
 function renderChat(chat, waiting) {

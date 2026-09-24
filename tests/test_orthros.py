@@ -216,6 +216,56 @@ class TestTail(Sandbox):
         self.assertEqual(self.o.tail_log("B", "", -1)["text"], "last line\n")
 
 
+class TestModes(Sandbox):
+    def test_self_mode_practises_every_few_turns(self):
+        self.o.settings["practice_every"] = 2
+        self.assertEqual(self.o.next_work("A")["kind"], "self")
+        self.o.agent("A")["since_practice"] = 2
+        w = self.o.next_work("A")
+        self.assertEqual(w["kind"], "practice")
+        self.assertTrue(os.path.isfile(os.path.join(w["folder"], "orthros_tasks.md")))
+        self.assertFalse(os.path.exists(os.path.join(w["folder"], "hidden")))
+
+    def test_task_mode_needs_a_task_and_then_both_agents_work_it(self):
+        self.assertEqual(self.o.set_mode("task"), "choose or create a task first")
+        made = self.o.new_task("Line counter", "Count lines, words and characters in files.")
+        self.assertEqual(made["key"], "line-counter")
+        self.assertEqual(self.o.set_mode("task", "line-counter"), "ok")
+        for n in orthros.NAMES:
+            w = self.o.next_work(n)
+            self.assertEqual((w["kind"], os.path.basename(w["folder"])), ("task", "line-counter"))
+        self.assertEqual(self.o.new_task("x", "too short")["error"][:3], "Say")
+
+    def test_a_practice_turn_is_scored_recorded_and_reported(self):
+        result = self.result("A", kind="practice", label="word_count", score=[5, 7], kept=2,
+                             reason="Time is up.", seconds=1200, minutes=20)
+        self.o.field_report(result)
+        self.o.judge(result)
+        self.assertEqual(self.o.agent("A")["practice"][-1][1:], ["word_count", 5, 7])
+        self.assertEqual(self.o.agent("A")["since_practice"], 0)
+        report = orthros.read_text(os.path.join(self.o.folders["A"], "FIELD_REPORT.md"))
+        self.assertIn("**Practice** on word_count: 5 of 7", report)
+        self.assertEqual(self.o.agent("B")["pending"], [])     # no carry-over from a practice
+
+    def test_self_turns_count_towards_the_next_practice(self):
+        self.o.judge(self.result("A", kept=1, reason="Time is up.", seconds=2700))
+        self.assertEqual(self.o.agent("A")["since_practice"], 1)
+
+    def test_start_puts_the_definition_of_better_into_the_mission(self):
+        for n in orthros.NAMES:
+            self.write(self.o.folders[n], "RALPH_PROMPT.md", "# How to work\n")
+        self.o.prepare_folders()
+        self.assertIn("# What better means",
+                      orthros.read_text(os.path.join(self.o.folders["B"], "RALPH_PROMPT.md")))
+
+    def test_direction_for_the_task(self):
+        self.o.new_task("demo", "Build a small demo of something useful.")
+        self.o.set_mode("task", "demo")
+        self.o.chat("use argparse", kind="direct", target="task")
+        notes = orthros.read_text(os.path.join(self.root, "tasks", "demo", "orthros_tasks.md"))
+        self.assertIn("From the operator: use argparse", notes)
+
+
 class TestChat(Sandbox):
     def test_status_question_gets_a_plain_answer(self):
         reply = self.o.chat("how is it going?")

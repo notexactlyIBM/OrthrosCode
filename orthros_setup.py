@@ -22,6 +22,8 @@ import shutil
 import subprocess
 import sys
 
+from orthros_work import BETTER
+
 ROOT = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE = os.path.join(ROOT, "agent")
 SHARED = os.path.join(ROOT, "shared-venv")
@@ -321,7 +323,7 @@ def write_mission(x):
                 .replace("{MINE}", mine).replace("{THEIRS}", theirs))
 
     with open(os.path.join(folder, "RALPH_PROMPT.md"), "w", encoding="utf-8") as h:
-        h.write(fill(PROMPT))
+        h.write(fill(PROMPT) + BETTER)
     with open(os.path.join(folder, "orthros_tasks.md"), "w", encoding="utf-8") as h:
         h.write(fill(HEADER).replace("{TASKS}", TASKS[x]).replace("{WHEN_OUT}", WHEN_OUT[x]))
     with open(os.path.join(folder, "PLAN.md"), "w", encoding="utf-8") as h:

@@ -41,6 +41,8 @@ import traceback
 import urllib.parse
 import webbrowser
 
+import orthros_work as work
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 NAMES = ("A", "B")
 PEER = {"A": "B", "B": "A"}
@@ -81,7 +83,15 @@ DEFAULTS = {
     "min_free_disk_mb": 2048,
     "keep_logs": 300,            # turn logs kept in logs\, newest first
     "gpu_telemetry": True,       # poll nvidia-smi for the page's GPU view
+    # In self-improvement mode, every this many turns of an agent's, one is a
+    # practice exercise instead: a small job it has never seen, scored by
+    # tests it never sees, so "better" is measured on coding in general.
+    # 0 = never.
+    "practice_every": 4,
+    "practice_minutes": 20,
 }
+# Files an agent may edit in a task or a practice: any project, not just Python.
+PROJECT_FILES = "*.py;*.js;*.mjs;*.cjs;*.ts;*.tsx;*.jsx;*.html;*.css"
 
 GUARD_DIR = os.path.join(HERE, "orthros_guard")
 # Written when Orthros gives up and needs a person; removed on Start. The
@@ -493,7 +503,8 @@ class Orthros:
         self.state.setdefault("agents", {})
         for n in NAMES:
             a = self.state["agents"].setdefault(n, {})
-            for key, value in (("good", ""), ("goods", []), ("good_failures", 0),
+            for key, value in (("practice", []), ("tasks", []), ("since_practice", 0),
+                               ("good", ""), ("goods", []), ("good_failures", 0),
                                ("pending", []), ("seconds", 0), ("tokens", 0),
                                ("sessions", 0), ("kept", 0), ("launch_failures", 0),
                                ("rollbacks", 0), ("carried_in", 0), ("weak_streak", 0),
@@ -509,6 +520,8 @@ class Orthros:
         self.state.setdefault("tries", {})       # "<folder>|<item>": turns that died on it
         self.state.setdefault("directions", [])  # the operator's, waiting for a safe moment
         self.state.setdefault("chat", [])
+        self.state.setdefault("mode", "self")    # "self": improve each other; "task": a project
+        self.state.setdefault("task", "")        # the task's key under tasks\
         self.state["paused"] = True          # never resume unattended on restart
         self.state.setdefault("running", None)
         stale = self.state["running"]
@@ -569,6 +582,7 @@ class Orthros:
                 with open(marker, "w", encoding="utf-8") as handle:
                     handle.write("Looked after by Orthros: the other agent commits and rolls back "
                                  "here.\n")
+            work.ensure_better(folder)       # the mission says what "better" is measured by
             sha = commit_all(folder, "Orthros: snapshot before orchestration")
             if not self.agent(n)["goods"]:
                 # The baseline: the version everything started from, kept for
@@ -578,8 +592,8 @@ class Orthros:
                 git(folder, "tag", "-f", "orthros/baseline", sha)
         self.save()
 
-    def agent_env(self, name):
-        folder, target = self.folders[name], self.folders[PEER[name]]
+    def agent_env(self, name, workspace=None, kind="self"):
+        folder, target = self.folders[name], workspace or self.folders[PEER[name]]
         env = os.environ.copy()
         for line in read_text(os.path.join(folder, "config.cmd")).splitlines():
             match = re.match(r'\s*set\s+"([A-Z0-9_]+)=(.*)"\s*$', line, re.I)
@@ -589,6 +603,10 @@ class Orthros:
                     if "%~dp0" in match.group(2) else os.path.expandvars(value)
         env.update(LC_WORKSPACE=target, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8",
                    LC_UNLOAD_ON_EXIT="1", LC_STOP_SERVER_ON_EXIT="1")
+        if kind != "self":
+            # Someone else's project: whatever it is written in, and started
+            # after each round if it has an entry point.
+            env.update(LC_RALPH_FILES=PROJECT_FILES, LC_RALPH_RUN="")
         if self.settings.get("aider_guard", True) and os.path.isdir(GUARD_DIR):
             env["PYTHONPATH"] = os.pathsep.join(p for p in (GUARD_DIR, env.get("PYTHONPATH"))
                                                 if p)
@@ -644,7 +662,32 @@ class Orthros:
             except OSError:
                 pass
 
-    def launch(self, name, minutes, token):
+    def next_work(self, name):
+        """What this turn is for: {kind, folder, label, exercise}.
+
+        Task mode: the chosen task, for both agents in turn. Self mode: the
+        twin's code -- except every `practice_every` turns, a practice.
+        """
+        if self.state.get("mode") == "task":
+            folder = work.task_folder(self.root, self.state.get("task"))
+            if folder:
+                return {"kind": "task", "folder": folder, "label": self.state["task"]}
+        me = self.agent(name)
+        every = int(self.settings.get("practice_every") or 0)
+        if every and me.get("since_practice", 0) >= every:
+            exercise = work.next_exercise(me.get("practice") or [])
+            if exercise:
+                return {"kind": "practice", "exercise": exercise, "label": exercise,
+                        "folder": work.start_practice(self.root, name, exercise)}
+        return {"kind": "self", "folder": self.folders[PEER[name]], "label": PEER[name]}
+
+    @staticmethod
+    def describe(work_):
+        return {"task": "the task %s" % work_["label"],
+                "practice": "the practice exercise %s" % work_["label"]}.get(
+                    work_["kind"], "%s's code" % work_["label"])
+
+    def launch(self, name, minutes, token, work_=None):
         self.prune_logs()
         folder = self.folders[name]
         stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -654,7 +697,8 @@ class Orthros:
                    "--minutes", str(minutes)]
         else:
             cmd = [self.python_for(name), "supervisor.py", "--loop", "--minutes", str(minutes)]
-        env = self.agent_env(name)
+        work_ = work_ or {}
+        env = self.agent_env(name, work_.get("folder"), work_.get("kind", "self"))
         env["ORTHROS_SESSION"] = env["JANUS_SESSION"] = token
         log = open(log_path, "ab")
         try:
@@ -666,13 +710,14 @@ class Orthros:
             log.close()
         return proc, log_path
 
-    def run_turn(self, name):
-        """One agent's session on the other, from launch to handover. Returns
-        the result dict it also records."""
-        peer = self.folders[PEER[name]]
+    def run_turn(self, name, work_=None):
+        """One agent's session -- on its twin, a task or a practice -- from launch
+        to handover. Returns the result dict it also records."""
         for n in NAMES:                      # whatever either agent did to its config
             self.fix_workspace_line(n)
         self.apply_directions(from_loop=True)   # before the commits, so they are kept
+        work_ = work_ or self.next_work(name)
+        peer = work_["folder"]
         own_sha = commit_all(self.folders[name], "Orthros: %s as it starts its turn" % name)
         pre = commit_all(peer, "Orthros: before %s works on it" % name)
         self.install_requirements(name)
@@ -681,19 +726,21 @@ class Orthros:
                 os.remove(os.path.join(peer, leftover))
             except OSError:
                 pass
-        minutes = self.plan_minutes(name)
+        minutes = (int(self.settings.get("practice_minutes") or 20) if work_["kind"] == "practice"
+                   else self.plan_minutes(name))
         token = "%s-%d" % (name, int(now() * 1000))
         started = now()
-        proc, log_path = self.launch(name, minutes, token)
+        proc, log_path = self.launch(name, minutes, token, work_)
         self.proc = proc
         running = {"agent": name, "pid": proc.pid, "started": started, "minutes": minutes,
-                   "log": log_path, "own": own_sha, "pre": pre, "token": token}
+                   "log": log_path, "own": own_sha, "pre": pre, "token": token,
+                   "workspace": peer, "kind": work_["kind"], "label": work_["label"]}
         with self.lock:
             self.state["running"] = running
             self.save()
-        self.set_phase("running", "%s is working on %s" % (name, PEER[name]))
-        self.event("%s started: %d minutes on %s's code (version %s)"
-                   % (name, minutes, PEER[name], short(own_sha)), "start")
+        self.set_phase("running", "%s is working on %s" % (name, self.describe(work_)))
+        self.event("%s started: %d minutes on %s (version %s)"
+                   % (name, minutes, self.describe(work_), short(own_sha)), "start")
 
         launched, stop_sent = False, False
         speed = 20.0 if self.simulate else 1.0          # simulated minutes pass fast
@@ -739,6 +786,11 @@ class Orthros:
         self.set_phase("handover", "releasing the model")
         self.release(name)
         post = commit_all(peer, "Orthros: after %s's turn" % name)
+        score = None
+        if work_["kind"] == "practice":
+            score = work.score_practice(peer, work_["exercise"], self.python_for(name))
+        elif work_["kind"] == "task":
+            score = work.run_tests(peer, self.python_for(name))
         result = {
             "agent": name, "started": started, "seconds": int(seconds), "exit": code,
             "lowest_free_mb": lowest,
@@ -749,6 +801,8 @@ class Orthros:
             "reason": st.get("ended_reason") or "", "log": log_path,
             "own": own_sha, "pre": pre, "post": post,
             "item": st.get("item") or "", "minutes": minutes,
+            "kind": work_["kind"], "label": work_["label"], "folder": peer,
+            "score": list(score) if score else None,
         }
         with self.lock:
             self.state["running"] = None
@@ -948,7 +1002,15 @@ class Orthros:
                             % (result["exit"], " | ".join(tail(result["log"], 6))[:400]), when)
             return
         text = read_text(result["log"])
-        lines = ["%d min, %d rounds, %d items ticked, %d changes kept, %d sent back, "
+        lines = []
+        kind, score = result.get("kind", "self"), result.get("score")
+        if kind == "practice":
+            lines.append("**Practice** on %s: %s of the hidden tests passed."
+                         % (result["label"], "%d of %d" % tuple(score) if score else "none"))
+        elif kind == "task":
+            lines.append("**Task** %s%s." % (result["label"], ": its own tests, %d of %d passing"
+                                               % tuple(score) if score and score[1] else ""))
+        lines += ["%d min, %d rounds, %d items ticked, %d changes kept, %d sent back, "
                  "%s tokens. Ended: %s" % (result["seconds"] // 60, result["rounds"],
                                            result["ticked"], result["kept"],
                                            result["sent_back"],
@@ -975,7 +1037,17 @@ class Orthros:
         lines += ["Rejected: %s" % r.strip()[:160] for r in reasons]
         errors = re.findall(r"LocalCoder hit an unexpected error: (.+)", text)[-2:]
         lines += ["Error: %s" % e.strip()[:160] for e in errors]
+        record = self.coding_record(name)
+        if record:
+            lines.append("General coding lately: " + record)
         self.field_note(name, "\n".join("- " + l for l in lines), when, bullets=True)
+
+    def coding_record(self, name):
+        """The measure that matters: practice scores and task turns, newest last."""
+        me = self.agent(name)
+        bits = ["practice %s %d/%d" % (p[1], p[2], p[3]) for p in (me.get("practice") or [])[-4:]]
+        bits += ["task %s %d kept" % (t[1], t[4]) for t in (me.get("tasks") or [])[-2:]]
+        return ", ".join(bits)
 
     def field_note(self, name, text, when=None, bullets=False):
         """Put a dated entry at the top of FIELD_REPORT.md; keep the newest five."""
@@ -1050,7 +1122,22 @@ class Orthros:
                                         "last changes to it")
         self.count_tries(name, result, good)
         self.note_early_stop(name, result)
-        if result["post"] != result["pre"]:
+        kind, score = result.get("kind", "self"), result.get("score")
+        if kind == "practice":
+            me["since_practice"] = 0
+            me["practice"] = (me["practice"] + [[result["started"], result["label"],
+                                                 score[0] if score else 0,
+                                                 score[1] if score else 0]])[-40:]
+            self.event("%s's practice on %s: %s hidden tests passed" % (
+                name, result["label"], "%d of %d" % tuple(score) if score else "no"),
+                "good" if score and score[1] and score[0] == score[1] else "info")
+        elif kind == "task":
+            me["tasks"] = (me["tasks"] + [[result["started"], result["label"],
+                                           score[0] if score else 0, score[1] if score else 0,
+                                           result["kept"], result["ticked"]]])[-40:]
+        else:
+            me["since_practice"] = me.get("since_practice", 0) + 1
+        if kind == "self" and result["post"] != result["pre"]:
             self.agent(peer_name)["pending"].append([result["pre"], result["post"]])
         self.state["next"] = peer_name
         self.save()
@@ -1127,7 +1214,8 @@ class Orthros:
         parked it were never charged to it.
         """
         limit = int(self.settings.get("park_after_tries") or 0)
-        folder = PEER[name]
+        path = result.get("folder") or self.folders[PEER[name]]
+        folder = os.path.basename(path)
         tries = self.state.setdefault("tries", {})
         mine = [k for k in tries if k.startswith(folder + "|")]
         if good or not result["launched"]:
@@ -1135,8 +1223,7 @@ class Orthros:
                 del tries[k]
             return
         item = (result.get("item") or "").strip()
-        if not limit or not item or item not in OPEN_ITEM.findall(
-                read_text(notes_file(self.folders[folder]))):
+        if not limit or not item or item not in OPEN_ITEM.findall(read_text(notes_file(path))):
             return
         key = "%s|%s" % (folder, item)
         for k in mine:
@@ -1148,7 +1235,7 @@ class Orthros:
         why = ("%d turns in a row ended on this item without progress (last: %s). "
                "Split it smaller, or rewrite it so one round can finish it."
                % (tries[key], (result.get("reason") or "?")[:120]))
-        if park_item(notes_file(self.folders[folder]), item, why):
+        if park_item(notes_file(path), item, why):
             self.event("parked the item %s's turns keep dying on: %s" % (name, item[:70]), "bad")
         del tries[key]
 
@@ -1396,7 +1483,7 @@ class Orthros:
         is the judgement. Without this, that turn is silently lost.
         """
         agent = running["agent"]
-        peer = self.folders[PEER[agent]]
+        peer = running.get("workspace") or self.folders[PEER[agent]]
         st = read_json(os.path.join(peer, STATUS_FILE), {}) or {}
         self.release(agent)
         self.state["next"] = PEER[agent]
@@ -1533,7 +1620,7 @@ class Orthros:
             self.state["paused"] = True     # no handover once it ends
             self.save()
         if mode == "now" and self.state.get("running"):
-            self.request_stop(self.folders[PEER[self.state["running"]["agent"]]])
+            self.request_stop(self.workspace_of(self.state["running"]))
         self.event({"pause": "will pause when this session ends",
                     "now": "asked the running agent to stop after this round",
                     "force": "force-stopping the running agent"}[mode])
@@ -1583,6 +1670,36 @@ class Orthros:
         return {"file": os.path.basename(path), "offset": offset, "text": text,
                 "reset": reset, "live": running.get("agent") == agent}
 
+    # ---------------------------------------------------------------- modes
+
+    def set_mode(self, mode, task=None):
+        """Switch between improving each other and working a task. Takes effect
+        at the next handover; the turn in flight finishes as it began."""
+        if mode not in ("self", "task"):
+            return "unknown mode"
+        if task is not None:
+            if task and not work.task_folder(self.root, task):
+                return "no such task"
+            self.state["task"] = work.slug(task) if task else ""
+        if mode == "task" and not work.task_folder(self.root, self.state.get("task")):
+            return "choose or create a task first"
+        with self.lock:
+            changed = self.state.get("mode") != mode
+            self.state["mode"] = mode
+            self.save()
+        if changed or task:
+            self.event("mode: %s" % ("working on the task %s" % self.state["task"]
+                                     if mode == "task" else "improving each other"), "start")
+        self.wake.set()
+        return "ok"
+
+    def new_task(self, name, brief):
+        key, error = work.create_task(self.root, name, brief)
+        if error:
+            return {"error": error}
+        self.event("new task %s" % key, "start")
+        return {"result": "ok", "key": key}
+
     # ---------------------------------------------------------------- the operator's chat
 
     def chat(self, text, kind="ask", target="both"):
@@ -1601,17 +1718,19 @@ class Orthros:
         if not text:
             return "Say something first."
         if kind == "direct":
-            names = NAMES if target not in NAMES else (target,)
+            names = (target,) if target in NAMES + ("task",) else NAMES
+            if target == "task" and not self.direction_folder("task"):
+                return "There is no task chosen. Pick or create one first."
             with self.lock:
                 for n in names:
                     self.state["directions"].append({"agent": n, "text": text, "at": now()})
                 applied = self.apply_directions()
-            where = " and ".join(names)
+            where = " and ".join("the task" if n == "task" else n for n in names)
             if applied == len(names):
-                reply = ("Added to the top of %s's task list. The next round on it starts "
+                reply = ("Added to the top of %s's list. The next round on it starts "
                          "there." % where)
             else:
-                reply = ("Queued for %s's task list. The list is in use by the running turn, "
+                reply = ("Queued for %s's list. The list is in use by the running turn, "
                          "so it goes in, at the top, as soon as that turn ends." % where)
             self.event("operator direction for %s: %s" % (where, text[:80]), "start")
         else:
@@ -1621,6 +1740,15 @@ class Orthros:
                                                         [now(), "orthros", reply]])[-40:]
             self.save()
         return reply
+
+    def workspace_of(self, running):
+        return running.get("workspace") or self.folders[PEER[running["agent"]]]
+
+    def direction_folder(self, target):
+        """Where a direction for `target` goes: an agent's list (its twin works it) or the task's."""
+        if target == "task":
+            return work.task_folder(self.root, self.state.get("task"))
+        return self.folders.get(target, "")
 
     def apply_directions(self, from_loop=False):
         """Write queued directions into lists no turn is using. Returns how many went in.
@@ -1632,19 +1760,33 @@ class Orthros:
         done = 0
         with self.lock:
             running = self.state.get("running")
-            busy = (None if from_loop else PEER[running["agent"]] if running
-                    else None if self.state["paused"] else PEER[self.state["next"]])
+            if from_loop:
+                busy = None
+            elif running:
+                busy = self.workspace_of(running)
+            elif self.state["paused"]:
+                busy = None
+            else:
+                busy = self.next_folder()
             waiting = []
             for d in self.state.get("directions", []):
-                if d["agent"] == busy:
+                folder = self.direction_folder(d["agent"])
+                if not folder:
+                    continue
+                if busy and os.path.normcase(folder) == os.path.normcase(busy):
                     waiting.append(d)
                     continue
-                if add_first(notes_file(self.folders[d["agent"]]),
-                             "From the operator: %s" % d["text"]):
+                if add_first(notes_file(folder), "From the operator: %s" % d["text"]):
                     done += 1
             self.state["directions"] = waiting
             self.save()
         return done
+
+    def next_folder(self):
+        """The folder the next turn will work in, without setting up a practice."""
+        if self.state.get("mode") == "task":
+            return work.task_folder(self.root, self.state.get("task"))
+        return self.folders[PEER[self.state["next"]]]
 
     def answer(self, question):
         """A few plain sentences on how things stand, picked by what was asked."""
@@ -1669,9 +1811,11 @@ class Orthros:
         if run:
             gone = int((live.get("elapsed") or 0) // 60)
             item = (live.get("item") or live.get("detail") or "").strip()
+            what = self.describe({"kind": run.get("kind", "self"),
+                                  "label": run.get("label") or PEER[run["agent"]]})
             return ("%s is working on %s: %s, round %s, %s kept and %s sent back so far, %d of "
                     "%d minutes gone.%s" % (
-                        run["agent"], PEER[run["agent"]], live.get("phase") or "starting",
+                        run["agent"], what, live.get("phase") or "starting",
                         live.get("round") or 0, live.get("accepted") or 0,
                         live.get("rejected") or 0, gone, run["minutes"],
                         (" Current item: %s" % item[:140]) if item else ""))
@@ -1686,6 +1830,10 @@ class Orthros:
 
     def say_progress(self, brief=False):
         out = []
+        for n in NAMES:
+            record = self.coding_record(n)
+            if record:
+                out.append("%s on coding in general: %s." % (n, record))
         for n in NAMES:
             a = self.agent(n)
             last = a.get("last") or {}
@@ -1708,6 +1856,12 @@ class Orthros:
 
     def say_next(self):
         out = []
+        if self.state.get("mode") == "task":
+            folder = work.task_folder(self.root, self.state.get("task"))
+            items = OPEN_ITEM.findall(read_text(notes_file(folder))) if folder else []
+            out.append("The task %s: %d open, next up: %s." % (
+                self.state.get("task"), len(items), "; ".join(i[:90] for i in items[:3]) or
+                "nothing -- the next round plans more"))
         for n in NAMES:
             folder = self.folders[n]
             items = OPEN_ITEM.findall(read_text(notes_file(folder)))
@@ -1771,7 +1925,7 @@ class Orthros:
         running = st.get("running")
         live = {}
         if running:
-            peer = self.folders[PEER[running["agent"]]]
+            peer = self.workspace_of(running)
             s = read_json(os.path.join(peer, STATUS_FILE), {}) or {}
             if self.is_mine(s, running):
                 live = {k: s.get(k) for k in ("phase", "detail", "item", "round", "rounds",
@@ -1790,7 +1944,8 @@ class Orthros:
             a = st["agents"][n]
             agents[n] = {k: a.get(k) for k in ("seconds", "tokens", "sessions", "kept",
                                                "launch_failures", "rollbacks", "carried_in",
-                                               "last")}
+                                               "last", "since_practice")}
+            agents[n]["practice"] = (a.get("practice") or [])[-6:]
             agents[n]["version"] = short(head(self.folders[n]))
             agents[n]["proven"] = short((a.get("goods") or [a.get("good")])[-1])
             agents[n]["proven_count"] = len(a.get("goods") or [])
@@ -1802,6 +1957,10 @@ class Orthros:
                 "chat": st.get("chat", [])[-20:], "directions": len(st.get("directions") or []),
                 "alert": st.get("alert"), "gpu": self.gpu, "gpu_history": self.gpu_history[-60:],
                 "backoff": max(0, int(self.backoff_until - now())),
+                "mode": st.get("mode", "self"), "task": st.get("task", ""),
+                "tasks": [{k: t[k] for k in ("key", "name", "folder", "open", "done", "parked")}
+                          for t in work.list_tasks(self.root)],
+                "exercises": work.exercises(),
                 "planned": {n: self.plan_minutes(n) for n in NAMES}}
 
 
@@ -1865,6 +2024,11 @@ def serve(orthros, port):
                 elif url.path in ("/api/pause", "/api/stop", "/api/force"):
                     mode = {"/api/pause": "pause", "/api/stop": "now", "/api/force": "force"}
                     self.send(200, {"result": orthros.stop(mode[url.path])})
+                elif url.path == "/api/mode":
+                    self.send(200, {"result": orthros.set_mode(body.get("mode") or "self",
+                                                               body.get("task"))})
+                elif url.path == "/api/task":
+                    self.send(200, orthros.new_task(body.get("name") or "", body.get("brief") or ""))
                 elif url.path == "/api/chat":
                     reply = orthros.chat(body.get("text"), body.get("kind") or "ask",
                                          body.get("target") or "both")
@@ -1873,7 +2037,10 @@ def serve(orthros, port):
                     if "session_minutes" in body:
                         orthros.settings["session_minutes"] = max(5, min(480, int(
                             body["session_minutes"])))
-                        write_json(orthros.settings_path, orthros.settings)
+                    if "practice_every" in body:
+                        orthros.settings["practice_every"] = max(0, min(50, int(
+                            body["practice_every"])))
+                    write_json(orthros.settings_path, orthros.settings)
                     self.send(200, {"result": "ok"})
                 else:
                     self.send(404, {"error": "not found"})

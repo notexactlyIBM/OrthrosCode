@@ -317,6 +317,10 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin):
         notes_path, ws = self.notes_path, self.workspace
         after_open = len(open_tasks(notes_path))
         after_done = done_count(notes_path)
+        # Files the round created count as its work. A new project has none to
+        # begin with, and they were only picked up after a commit -- which
+        # needs a change seen in the files already known. So none ever were.
+        self.refresh_files()
         touched = code_fingerprint(self.edit_files) != before_print
 
         # The model does not always work the item we pointed it at -- it often

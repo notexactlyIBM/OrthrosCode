@@ -95,6 +95,22 @@ class TestRunRound(Temp):
         self.assertEqual(r.symptom, "context")
         self.assertTrue(r.crowded)
 
+    def test_prompt_too_big_is_not_engine_death(self):
+        # Verbatim shape from the 2026-09-23 logs: the connection-error line
+        # comes first, and used to mark the round as a dead engine.
+        r = self.run_fake(
+            "litellm.APIConnectionError: APIConnectionError: OpenAIException - Engine",
+            'protocol predict request returned 400: {"error":{"code":400,"message":"request',
+            "(32958 tokens) exceeds the available context size (32768 tokens), try",
+            "Retrying in 0.2 seconds...",
+            "litellm.APIConnectionError: APIConnectionError: OpenAIException - Engine")
+        self.assertEqual((r.symptom, r.refused, r.overstuffed), ("context", True, True))
+
+    def test_guard_refusal_is_a_refused_prompt(self):
+        r = self.run_fake("Orthros guard: prompt too big for the context window: ~40000 of "
+                          "32768 tokens. Not sending it.")
+        self.assertTrue(r.refused)
+
     def test_failed_edit(self):
         r = self.run_fake("The SEARCH/REPLACE block failed to match")
         self.assertEqual(r.failed, 1)

@@ -6,7 +6,8 @@ import tempfile
 import unittest
 
 from ralph_common import ROUNDS_IF_BIG, ROUNDS_IF_SMALL, read_text, write_text
-from ralph_tasks import (add_items, done_count, milestones, next_milestone, open_tasks,
+from ralph_tasks import (add_items, done_count, milestones, next_milestone,
+                         normalize_checkboxes, normalize_plan, open_tasks, park_milestone,
                          park_task, progress_regressions, progress_rows, progress_summary,
                          record_progress, remember_review, triage)
 
@@ -19,6 +20,32 @@ class Temp(unittest.TestCase):
 
     def tearDown(self):
         shutil.rmtree(self.dir, ignore_errors=True)
+
+
+class TestLooseForms(Temp):
+    def test_plan_headings_without_boxes_become_milestones(self):
+        plan = os.path.join(self.dir, "PLAN.md")
+        write_text(plan, "# Plan\n\n## [x] Old\n\nb\n\n## 1. Better research\n\nx\n\n"
+                         "### Milestone 2: Faster checks\n")
+        self.assertEqual(normalize_plan(plan), 2)
+        self.assertEqual(next_milestone(plan), ("Better research", "x"))
+
+    def test_plan_with_a_pending_milestone_is_left_alone(self):
+        plan = os.path.join(self.dir, "PLAN.md")
+        write_text(plan, "# Plan\n\n## [ ] Real\n\n## Notes\n")
+        self.assertEqual(normalize_plan(plan), 0)
+
+    def test_numbered_and_empty_boxes_become_items(self):
+        write_text(self.notes, "# T\n\n1. [ ] one\n- [] two\n  + [ ] three\n- [ ] four\n")
+        self.assertEqual(normalize_checkboxes(self.notes), 3)
+        self.assertEqual(open_tasks(self.notes), ["one", "two", "three", "four"])
+
+    def test_parked_milestone_is_skipped(self):
+        plan = os.path.join(self.dir, "PLAN.md")
+        write_text(plan, "# Plan\n\n## [ ] Stuck\n\na\n\n## [ ] Next\n\nb\n")
+        self.assertTrue(park_milestone(plan, "Stuck", "no items came of it"))
+        self.assertEqual(next_milestone(plan), ("Next", "b"))
+        self.assertEqual([m[0] for m in milestones(plan)], ["Next"])
 
 
 class TestTriage(unittest.TestCase):

@@ -41,6 +41,8 @@ def milestones(plan_path):
     marks = list(MILESTONE.finditer(body))
     out = []
     for index, match in enumerate(marks):
+        if match.group(1) == "!":
+            continue                     # parked: a boundary, not a milestone
         end = marks[index + 1].start() if index + 1 < len(marks) else len(body)
         out.append((match.group(2), body[match.end():end].strip(),
                     match.group(1).lower() == "x"))
@@ -67,6 +69,93 @@ def mark_decomposed(plan_path, title):
     if not pattern.search(body):
         return False
     return write_text(plan_path, pattern.sub(r"\1[x]\2", body, count=1))
+
+
+def park_milestone(plan_path, title, reason):
+    """Mark a milestone `## [!]`: no round could make items of it. True if done.
+
+    `[!]` is neither `[ ]` nor `[x]`, so the next refill takes the milestone
+    after it, and a person reading the plan sees why.
+    """
+    body = read_text(plan_path)
+    pattern = re.compile(r"^(##[ \t]*)\[ \]([ \t]*%s[ \t]*)$" % re.escape(title),
+                         re.MULTILINE)
+    if not pattern.search(body):
+        return False
+    return write_text(plan_path, pattern.sub(lambda m: "%s[!]%s\n\n*Parked*: %s"
+                                             % (m.group(1), m.group(2), reason), body, count=1))
+
+
+# What a small model writes when it means a milestone or an item but does not
+# quite write the form asked for. A plan with `## 1. Better research` in it,
+# or a list with `1. [ ] ...` items, used to count as "added nothing", and the
+# session stopped: "It could not think of anything else."
+LOOSE_HEADING = re.compile(r"^#{2,3}[ \t]+(?!\[[ xX!]\])(?:\d+[.)][ \t]*)?"
+                           r"(?:milestone[ \t]*\d*[ \t]*[:.\-][ \t]*)?(\S.*?)[ \t]*$",
+                           re.MULTILINE | re.IGNORECASE)
+LOOSE_PLAN_ITEM = re.compile(r"^[ \t]*(?:[-*+]|\d+[.)])[ \t]*\[ ?\][ \t]*(\S.*?)[ \t]*$",
+                             re.MULTILINE)
+LOOSE_OPEN = re.compile(r"^([ \t]*)(?:[-*+]|\d+[.)])[ \t]*\[ ?\][ \t]*(?=\S)", re.MULTILINE)
+
+
+def normalize_plan(plan_path):
+    """Put milestones a planning round wrote loosely into the `## [ ]` form.
+
+    Only when the plan has no milestone left to break down -- a plan that
+    has one is in the right form already, and its other headings are
+    someone's notes. Returns how many were fixed.
+    """
+    if next_milestone(plan_path):
+        return 0
+    body = read_text(plan_path)
+    fixed, count = LOOSE_HEADING.subn(lambda m: "## [ ] %s" % m.group(1), body)
+    if not count:
+        fixed, count = LOOSE_PLAN_ITEM.subn(lambda m: "## [ ] %s" % m.group(1), body)
+    if count:
+        write_text(plan_path, fixed)
+    return count
+
+
+def normalize_checkboxes(notes_path):
+    """Rewrite `1. [ ] x`, `+ [ ] x` and `- [] x` as `- [ ] x`. Returns how many changed."""
+    body = read_text(notes_path)
+    changed = [0]
+
+    def fix(match):
+        want = match.group(1) + "- [ ] "
+        if match.group(0) != want:
+            changed[0] += 1
+        return want
+
+    fixed = LOOSE_OPEN.sub(fix, body)
+    if changed[0]:
+        write_text(notes_path, fixed)
+    return changed[0]
+
+
+PARKED_LINE = re.compile(r"^[ \t]*[-*][ \t]*\[!\][ \t]*(.+?)[ \t]*$", re.MULTILINE)
+
+
+def drop_reparked(notes_path):
+    """Remove open items that repeat a parked one word for word. Returns how many.
+
+    A refill that proposes again what was just parked is not new work: the
+    same rounds would be spent and the item parked again.
+    """
+    body = read_text(notes_path)
+    parked = set(PARKED_LINE.findall(body))
+    if not parked:
+        return 0
+    kept, dropped = [], 0
+    for line in body.split("\n"):
+        match = TASK_OPEN.match(line)
+        if match and match.group(1).strip() in parked:
+            dropped += 1
+            continue
+        kept.append(line)
+    if dropped:
+        write_text(notes_path, "\n".join(kept))
+    return dropped
 
 
 def find_notes_file(workspace, configured=""):

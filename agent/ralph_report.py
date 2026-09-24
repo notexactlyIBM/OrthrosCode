@@ -7,8 +7,8 @@ import os
 import time
 
 import status
-from ralph_checks import code_lines
-from ralph_common import (CHECKPOINT_MINUTES, LOG_FILE, ROUND_FILE,
+from ralph_checks import code_fingerprint, code_lines
+from ralph_common import (CHECKPOINT_MINUTES, CHECKPOINT_ROUNDS, LOG_FILE, ROUND_FILE,
     TRANSCRIPT_FILE, say)
 from ralph_tasks import (done_count, open_tasks, parked_count, progress_summary,
     record_progress)
@@ -21,6 +21,7 @@ class ReportMixin:
         self.next_checkpoint = time.time() + CHECKPOINT_MINUTES * 60
         self.mark_done = done_count(self.notes_path)
         self.mark_size = code_lines(self.edit_files)
+        self.mark_print = code_fingerprint(self.edit_files)
         self.mark_rounds = self.rounds
         self.engine_failures = 0
 
@@ -58,7 +59,17 @@ class ReportMixin:
         if self.pace:
             self.note("  %s" % self.pace_summary())
 
-        if ticked == 0 and grew == 0:
+        changed = code_fingerprint(self.edit_files) != self.mark_print
+        if ticked <= 0 and grew == 0 and not changed and did < CHECKPOINT_ROUNDS:
+            # Too few rounds to judge. Look again later, from the same mark.
+            self.note("  Nothing moved yet, but only %d round(s) ran. Looking again"
+                      % did)
+            self.note("  in %d minutes." % CHECKPOINT_MINUTES)
+            say("+" + "-" * 60 + "+")
+            say()
+            self.next_checkpoint = time.time() + CHECKPOINT_MINUTES * 60
+            return True
+        if ticked <= 0 and grew == 0 and not changed:
             # Why nothing moved decides whether stopping is the right answer.
             # An engine that spent the last ten minutes refusing to answer has
             # told us nothing about the task list, and ending the run blames
@@ -76,7 +87,7 @@ class ReportMixin:
             say("+" + "-" * 60 + "+")
             say()
             return False
-        if ticked == 0:
+        if ticked <= 0:
             self.note("  Code is changing but nothing is getting ticked off.")
             self.note("  Carrying on -- it may be mid-way through a big item.")
         else:

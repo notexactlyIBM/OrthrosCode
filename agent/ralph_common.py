@@ -62,9 +62,10 @@ PROGRESS_FILE = "PROGRESS.md"
 # time into items as the list empties.
 #
 # `## [ ] Title` means not yet broken into items. `[x]` means it has been --
-# which is not the same as finished; the items carry that.
+# which is not the same as finished; the items carry that. `[!]` means no
+# round could make items of it, and it is skipped.
 PLAN_FILE = "PLAN.md"
-MILESTONE = re.compile(r"^##\s*\[( |x|X)\]\s*(.+?)\s*$", re.MULTILINE)
+MILESTONE = re.compile(r"^##[ \t]*\[( |x|X|!)\][ \t]*(.+?)[ \t]*$", re.MULTILINE)
 
 # Headings at the bottom of a task list that hold standing instructions rather
 # than checkboxes -- the operator's own answer to "what next". Matched loosely
@@ -116,6 +117,11 @@ def more_refills(refills):
 
 # How often the loop stops to ask itself whether any of this is working.
 CHECKPOINT_MINUTES = _env_int("LC_RALPH_CHECKPOINT", 10)
+
+# ...and the fewest rounds that look may judge. Ten minutes is two or three
+# rounds on this rig, fewer when a refill or a slow review falls inside it --
+# too few to call a run stuck. See config.cmd.
+CHECKPOINT_ROUNDS = _env_int("LC_RALPH_CHECKPOINT_ROUNDS", 4)
 
 # Short-form instructions in LocalCoder's own prompts. See config.cmd.
 TERSE = _env_flag("LC_RALPH_TERSE")

@@ -197,6 +197,7 @@ REJECT if any of these is true:
 - It reads something before it is assigned.
 - It breaks or contradicts nearby code it did not mean to touch.
 - It changes things the task did not ask for.
+- The task says `Done when:` and the change does not meet that check.
 
 Otherwise ACCEPT. Do not reject for style or taste.
 
@@ -219,28 +220,40 @@ def review_change(task, diff, timeout=300):
     """
     if not diff.strip():
         return "", "nothing to review"
-    body = json.dumps({
-        "model": IDENTIFIER,
-        "messages": [{"role": "user", "content": REVIEW_PROMPT % (task, diff)}],
-        "max_tokens": 3000,
-        "temperature": 0.1,
-    }).encode("utf-8")
-    req = urllib.request.Request(BASE_URL + "/chat/completions", data=body,
-                                 headers={"Content-Type": "application/json",
-                                          "Authorization": "Bearer lm-studio"})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8", "replace"))
-    except Exception as exc:
-        return "", "review request failed: %s" % type(exc).__name__
-    message = (data.get("choices") or [{}])[0].get("message") or {}
-    # Thinking models put the answer in content and the working in
-    # reasoning_content; look in both, answer first.
-    text = (message.get("content") or "") + "\n" + (message.get("reasoning_content") or "")
-    verdict = re.search(r"VERDICT:\s*(ACCEPT|REJECT)", text, re.I)
-    reason = re.search(r"REASON:\s*(.+)", text, re.I)
-    return ((verdict.group(1).lower() if verdict else ""),
-            (reason.group(1).strip() if reason else ""))
+    reason = ""
+    # This model thinks before it answers, out of the same budget. On
+    # 2026-09-23 most reviews came back with no verdict at all -- the thinking
+    # used the budget up -- and every one of those changes was kept unread.
+    # One retry with twice the room, then give up as before.
+    for budget in (3000, 6000):
+        body = json.dumps({
+            "model": IDENTIFIER,
+            "messages": [{"role": "user", "content": REVIEW_PROMPT % (task, diff)}],
+            "max_tokens": budget,
+            "temperature": 0.1,
+        }).encode("utf-8")
+        req = urllib.request.Request(BASE_URL + "/chat/completions", data=body,
+                                     headers={"Content-Type": "application/json",
+                                              "Authorization": "Bearer lm-studio"})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8", "replace"))
+        except Exception as exc:
+            return "", "review request failed: %s" % type(exc).__name__
+        choice = (data.get("choices") or [{}])[0]
+        message = choice.get("message") or {}
+        # Thinking models put the answer in content and the working in
+        # reasoning_content; look in both, answer first.
+        text = (message.get("content") or "") + "\n" + (message.get("reasoning_content") or "")
+        verdict = re.search(r"VERDICT:\s*(ACCEPT|REJECT)", text, re.I)
+        found = re.search(r"REASON:\s*(.+)", text, re.I)
+        if verdict:
+            return verdict.group(1).lower(), (found.group(1).strip() if found else "")
+        reason = ("it ran out of room before answering" if choice.get("finish_reason") == "length"
+                  else "its reply had no VERDICT line")
+        if choice.get("finish_reason") != "length":
+            break
+    return "", reason
 
 
 def find_test_cmd():

@@ -92,9 +92,11 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin):
         self.engine_failures = 0  # rounds lost to the engine since the last checkpoint
         self.engine_streak = 0    # consecutive rounds lost to the engine
         self.was_cut_off = False  # last round ran out of room part-way through
+        self.lean = False         # the last prompt was refused as too big: send less
         self.fat_rounds = 0       # rounds lost to the prompt, not the reply
         self.brainstormed = 0     # generation rounds run back to back
         self.empty_refills = 0    # refills in a row that added nothing
+        self.milestone_misses = {}  # refills that made nothing of each milestone
         self.accepted = 0         # changes the reviewer kept
         self.rejected = 0         # changes the reviewer sent back
         self.hallucinations = 0   # invented attributes caught this run
@@ -231,7 +233,7 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin):
             self.stop("Stopped from the dashboard.")
             return False
         if self.single_shot and self.rounds >= 1:
-            self.note("Single round finished.")
+            self.stop("Single round finished.")
             return False
         left = self.deadline - time.time()
         if not self.single_shot and left <= 0:
@@ -246,6 +248,8 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin):
         if remaining[0] != self.current_task:
             self.current_task = remaining[0]
             self.rounds_on_task = 0
+            self.stalled = 0        # three empty rounds means three on this item
+            self.lean = False
             if self.single_shot:
                 self.task_budget = ROUNDS_IF_SMALL
             else:
@@ -285,6 +289,12 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin):
         say("    %s" % task[:64])
         say("-" * 62)
 
+        # Commit what the loop wrote since the last round -- a refill's items,
+        # ticks, parks, lessons, answers -- so that undoing this round undoes
+        # only this round. Undo is `git checkout -- .`: it took all of that
+        # too, and a rejected round after a refill emptied the list again.
+        if self.commit and not self.broken:
+            self.commit("LocalCoder ralph: notes before round %d" % self.rounds)
         before = (len(remaining), done_count(self.notes_path), code_fingerprint(self.edit_files),
                   self.listing())
         self.maybe_switch_to_whole_files()
@@ -343,6 +353,11 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin):
         reads = [p for p in (answers + [self.conventions, design_guide(task),
                                         os.path.join(self.workspace, SKILLS_FILE)])
                  if p and os.path.isfile(p) and p not in docs]
+        if self.lean:
+            # The last prompt for this item was refused as too big to read.
+            round_files, reads = round_files[:1], reads[:1]
+            say("    sending less after a refused prompt: %d file(s), %d to read"
+                % (len(round_files), len(reads)))
         cmd = build_round_command(self.base_cmd, round_prompt, self.notes_path,
                                   round_files, reads)
         started = time.time()
@@ -448,11 +463,12 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin):
                 self.accepted += 1
                 self.note("Reviewer accepted it%s." % (": " + why[:90] if why else ""))
             else:
-                self.note("Reviewer gave no clear verdict -- keeping the change.")
+                self.note("Reviewer gave no clear verdict (%s) -- keeping the change."
+                          % (why or "no reason given")[:80])
 
         self.report_inventions()
-        self.judge_round(result, touched, was_broken, rejected_now,
-                         after_done - before_done, after_open - before_open)
+        counted = self.judge_round(result, touched, was_broken, rejected_now,
+                                   after_done - before_done, after_open - before_open)
 
         # Only ever commit a round that left the code runnable, so `git
         # revert` never lands on a broken snapshot.
@@ -467,8 +483,8 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin):
                       items_done=done_count(notes_path),
                       milestones=self.milestone_state())
 
-        if not result.ran:
-            self.stalled += 1
+        if not result.ran and not counted:
+            self.stalled += 1       # killed on the clock; once, not twice
         if self.stalled >= 3 and not self.park_stalled():
             return False
         if not self.single_shot and time.time() >= self.next_checkpoint \

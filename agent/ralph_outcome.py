@@ -10,7 +10,7 @@ import status
 from ralph_inventions import phantom_attributes, used_before_set
 from ralph_common import say
 from ralph_setup import last_line
-from ralph_tasks import add_items, park_task
+from ralph_tasks import add_items, open_tasks, park_task
 from ralph_tools import record_lesson
 
 
@@ -43,6 +43,14 @@ class OutcomeMixin:
         if result.symptom != "context":
             return True
         self.overflows += 1
+        if result.refused:
+            # Not the engine, whatever aider's wording says, and not worth a
+            # reload: the same prompt would be refused again. Send less.
+            self.lean = True
+            self.note("LM Studio refused the prompt: it is bigger than the window.")
+            self.note("The engine is fine. The next round on this item sends less.")
+            self.note_tail(result, "What it said")
+            return True
         if result.overstuffed:
             # Neither lever reaches this one. The prompt is most of the window
             # before the model has said a word, so there is nothing to grow
@@ -102,7 +110,7 @@ class OutcomeMixin:
                    % (os.path.basename(path), name) for path, name in fresh[:4]])
 
     def judge_round(self, result, touched, was_broken, rejected_now, ticked, split):
-        """Say what the round amounted to, and count stalls."""
+        """Say what the round amounted to, and count stalls. True if it counted one."""
         if self.broken:
             self.note("It does not run - next round repairs it.")
             say("      %s" % last_line(self.broken[0][1])[:70])
@@ -115,6 +123,7 @@ class OutcomeMixin:
             # down should end up parked for a person, not retried all session.
             self.stalled += 1
             self.note("Rolled back. The reason is on the item for the next try.")
+            return True
         elif ticked > 0:
             self.note("Ticked off %d item(s)." % ticked)
             if not touched:
@@ -146,6 +155,8 @@ class OutcomeMixin:
             # The round that changes nothing is the one worth explaining.
             if not result.symptom:
                 self.note_tail(result, "No symptom to name")
+            return True
+        return False
 
     def park_stalled(self):
         """Three rounds with nothing to show: park the item. False to stop.
@@ -154,6 +165,13 @@ class OutcomeMixin:
         when three rounds died on one item. One item refusing to move is a fact
         about that item; only a run where nothing anywhere moves is stuck.
         """
+        if self.current_task and self.current_task not in open_tasks(self.notes_path):
+            # Ticked, reworded or split by the round itself: nothing is left to
+            # park, and nothing is stuck. This used to end the session.
+            self.note("The item is no longer on the list as it was; moving on.")
+            self.current_task = None
+            self.stalled = 0
+            return True
         if self.current_task and park_task(
                 self.notes_path, self.current_task,
                 "three rounds with nothing to show - needs a human eye"):

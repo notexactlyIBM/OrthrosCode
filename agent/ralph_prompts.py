@@ -27,6 +27,13 @@ If the item is too big to finish properly in one go, split it in the task list
 into smaller `- [ ]` items, tick nothing, and stop. The next round picks up the
 first of them.
 
+Before building something, make sure it is not already there. Do not
+assume it is missing because it is not in the files you were given: write
+`FIND: <name>` in the task list and stop, and the answer comes next round.
+A duplicate costs more than the round it saves.
+
+If an item says `Done when:`, that check is what "finished" means.
+
 If you need information you do not have, add a line in exactly this form and
 stop -- the answer will be in RESEARCH.md next round:
 
@@ -66,6 +73,8 @@ Each item:
 - Is ONE change.
 - Is specific enough to start with nothing left to decide.
 - If too big for one round, is the first step of the big thing.
+- Ends with `Done when:` and one check anyone can make -- a test that
+  passes, a value that is returned, a line that is printed.
 
 Vary them: a bug, a missing capability, robustness, speed, a shortcut paid
 off. Five versions of one idea is a bad batch however good the idea.
@@ -89,6 +98,9 @@ of work with no memory of this one:
   is an item.
 - If the idea is too big for one round -- a whole mode, a whole subsystem --
   write the first concrete step of it, not the whole thing.
+- End with `Done when:` and one check anyone can make without asking you: a
+  test that passes, a value a function returns, a line the log prints. The
+  reviewer holds the change to it.
 
 **Do not survey the code first.** Go straight to the first thing worth doing
 and write it down, then the next. A brief like "check every aspect of the

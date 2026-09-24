@@ -13,8 +13,11 @@ import sys
 import tempfile
 import unittest
 
+import subprocess
+
 import status
 from ralph_common import read_text, write_text
+from ralph_refill import refill_temperature
 from ralph_session import Session
 
 FAKE_AIDER = '''import os, re, sys
@@ -87,6 +90,84 @@ class TestLoop(unittest.TestCase):
         self.assertEqual(self.run_quietly(s), 0)
         self.assertIn("reload", s.stop_reason.lower())
         self.assertEqual(status.read(self.ws).get("phase"), "finished")
+
+
+# Refills write a plan or add items; work rounds tick one and touch the code.
+REFILLING_AIDER = r'''import os, re, sys
+args = sys.argv[1:]
+files = [args[i + 1] for i, a in enumerate(args) if a == "--file"]
+notes = files[0]
+body = open(notes, encoding="utf-8").read()
+if notes.endswith("PLAN.md"):
+    open(notes, "a", encoding="utf-8").write("\n## [ ] Handle None\n\nMake them safe.\n")
+elif "- [ ]" not in body:
+    open(notes, "a", encoding="utf-8").write(
+        "\n- [ ] In `add`, handle None\n- [ ] In `sub`, handle None\n")
+else:
+    open(notes, "w", encoding="utf-8").write(re.sub(r"- \[ \]", "- [x]", body, count=1))
+    for f in files[1:]:
+        if f.endswith(".py"):
+            open(f, "a", encoding="utf-8").write("# touched\n")
+            print("Applied edit to %s" % os.path.basename(f))
+print("Tokens: 1.2k sent, 300 received.")
+'''
+
+
+class TestLoopWithGit(unittest.TestCase):
+    """The rollback is real here: `git checkout -- .`, as in a managed folder."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.ws = os.path.join(self.dir, "ws")
+        os.makedirs(self.ws)
+        self.fake = os.path.join(self.dir, "fake_aider.py")
+        write_text(self.fake, REFILLING_AIDER)
+        self.notes = os.path.join(self.ws, "tasks.md")
+        write_text(self.notes, "# Tasks\n\n- [x] done already\n")
+        self.code = os.path.join(self.ws, "calc.py")
+        write_text(self.code, "def add(a, b):\n    return a + b\n")
+        self.git("init", "-q")
+        self.git("add", "-A")
+        self.git("commit", "-qm", "base")
+        status._path = None
+
+    def tearDown(self):
+        status._path = None
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def git(self, *args):
+        return subprocess.run(["git", "-C", self.ws, "-c", "user.name=t", "-c", "user.email=t@t"]
+                              + list(args), capture_output=True, text=True)
+
+    def run_session(self, review):
+        s = Session([sys.executable, self.fake, "--edit-format", "diff"], self.ws,
+                    os.environ.copy(), minutes=3, single_shot=False, edit_files=[self.code],
+                    entry_hint="none", iteration_timeout=30, review=review,
+                    rollback=lambda: self.git("checkout", "--", ".").returncode == 0,
+                    commit=lambda m: (self.git("add", "-A"), self.git("commit", "-qm", m)) and True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            s.run()
+        return s
+
+    def test_a_rejected_round_does_not_undo_the_refill_before_it(self):
+        s = self.run_session(lambda task, diff: ("reject", "not what was asked"))
+        log = read_text(os.path.join(self.ws, ".localcoder-ralph.log"))
+        # Before: every rejection emptied the list, and the session ended on
+        # "the item could not be parked" because the item had been undone too.
+        self.assertNotIn("could not be", s.stop_reason)
+        self.assertIn("Parked after 2 rounds: In `add`", log)
+        self.assertIn("Parked after 2 rounds: In `sub`", log)
+        # The same two ideas again are not new work: dropped, then it stops.
+        self.assertIn("repeat ones already parked", log)
+        self.assertEqual(read_text(self.notes).count("- [!] In `add`"), 1)
+
+
+class TestRefillTemperature(unittest.TestCase):
+    def test_checking_is_cold_inventing_is_warm(self):
+        self.assertEqual(refill_temperature("verify", 0.2, 0.8), 0.2)
+        self.assertEqual(refill_temperature("plan", 0.2, 0.8), 0.8)
+        self.assertEqual(refill_temperature("brief", 0.2, 0.8), 0.8)
+        self.assertEqual(refill_temperature("decompose", 0.2, 0.8), 0.5)
 
 
 if __name__ == "__main__":

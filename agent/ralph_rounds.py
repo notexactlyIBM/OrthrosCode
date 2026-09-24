@@ -317,6 +317,20 @@ ENGINE_DEAD = (
 )
 
 
+# The prompt was bigger than the window and was never processed. LM Studio
+# answers 400, and aider words that as `litellm.APIConnectionError` -- which
+# is in ENGINE_DEAD. So on 2026-09-23 a prompt 190 tokens too big was taken
+# for a dead engine five times over: reload, resend the same prompt, and the
+# turn ended at "Five rounds in a row lost to the engine". Checked after the
+# dead-engine phrases and overriding them, because the connection-error line
+# comes first. The last is Orthros's guard declining to send one at all.
+TOO_BIG = (
+    "exceeds the available context size",
+    "exceed_context_size_error",
+    "orthros guard: prompt too big",
+)
+
+
 # aider prints e.g. "Tokens: 8.2k sent, 4.2k received." once per exchange.
 TOKEN_LINE = re.compile(
     r"tokens:\s*([\d,.]+)\s*([km]?)\s*sent,\s*([\d,.]+)\s*([km]?)\s*received", re.I)
@@ -335,9 +349,11 @@ INPUT_LINE = re.compile(r"input tokens:\s*~?([\d,]+)\s*of\s*([\d,]+)", re.I)
 # What one round of aider did, in the only terms we can observe from outside.
 # `tail` is the last of its output, kept so a round that achieved nothing can
 # say why in the log instead of leaving it to the console nobody was watching.
+# `refused`: the prompt was too big to be read at all -- see TOO_BIG.
 RoundResult = collections.namedtuple(
     "RoundResult",
-    "ran symptom sent got applied failed tail shrugged_off crowded overstuffed")
+    "ran symptom sent got applied failed tail shrugged_off crowded overstuffed refused",
+    defaults=(False,))
 
 
 NOTHING = RoundResult(False, "", 0, 0, 0, 0, (), 0, False, False)
@@ -435,6 +451,7 @@ def run_round(cmd, workspace, child_env, timeout, label="round"):
     shrugged_off = 0   # engine errors aider retried through and survived
     crowded = False    # was the WINDOW full, or just our own reply ceiling?
     overstuffed = False  # or was the PROMPT too big for either to matter?
+    refused = False    # or too big to be read at all?
     # Only the tail is kept in memory. The whole thing is on disk in the
     # transcript; this is what gets quoted into the summary log.
     tail = collections.deque(maxlen=40)
@@ -464,6 +481,8 @@ def run_round(cmd, workspace, child_env, timeout, label="round"):
             if not room and not fat and not symptom \
                     and any(dead in low for dead in ENGINE_DEAD):
                 symptom = "enginedied"
+            if any(big in low for big in TOO_BIG):
+                symptom, refused, overstuffed, crowded = "context", True, True, True
             if EDIT_FAILED in low:
                 failed += 1
             elif low.startswith(APPLIED) or (" " + APPLIED) in low:
@@ -483,6 +502,9 @@ def run_round(cmd, workspace, child_env, timeout, label="round"):
                 if symptom == "enginedied":
                     symptom = ""
                     shrugged_off += 1
+                elif refused:
+                    # A later exchange fitted -- aider dropped what it had added.
+                    symptom, refused, overstuffed = "", False, False
         proc.wait(timeout=30)
         ran = not timed_out
         if not symptom and proc.returncode not in (0, None) and sent == 0 and applied == 0:
@@ -514,4 +536,4 @@ def run_round(cmd, workspace, child_env, timeout, label="round"):
                             if shrugged_off else ""))
             handle.close()
     return RoundResult(ran, symptom, sent, received, applied, failed,
-                       tuple(tail), shrugged_off, crowded, overstuffed)
+                       tuple(tail), shrugged_off, crowded, overstuffed, refused)

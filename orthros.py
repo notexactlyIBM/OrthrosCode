@@ -66,15 +66,45 @@ DEFAULTS = {
     # limit free, and end a turn early rather than be killed during one.
     "min_free_mb": 4096,
     "critical_free_mb": 1536,
+    # Load orthros_guard\sitecustomize.py into the agents' Pythons: aider may
+    # not pull files into a round past what the window holds, nor send a
+    # prompt the window cannot take. See that file for why.
+    "aider_guard": True,
+    # Turns in a row that end on the same item without progress before
+    # Orthros parks that item (`- [!]`), so the next turn does not die on it
+    # too. 0 = never.
+    "park_after_tries": 2,
+    # A start that fails because of the machine -- LM Studio not up, the card
+    # busy -- is tried again after these many minutes before Orthros gives up.
+    "env_retry_minutes": [2, 5, 15],
+    # Do not start a turn with less free disk than this (logs, git, models).
+    "min_free_disk_mb": 2048,
+    "keep_logs": 300,            # turn logs kept in logs\, newest first
+    "gpu_telemetry": True,       # poll nvidia-smi for the page's GPU view
 }
+
+GUARD_DIR = os.path.join(HERE, "orthros_guard")
+# Written when Orthros gives up and needs a person; removed on Start. The
+# page shows it too, and Windows beeps: a surrender nobody hears is a night
+# of a machine doing nothing.
+ALERT_FILE = "ORTHROS-NEEDS-YOU.txt"
+LOG_CAP = 20 * 1024 * 1024           # orthros.log is rotated past this
+GUARD_REFUSED = "Orthros guard: prompt too big"
 
 # The task list, plan and ledger an agent keeps about the one it works on.
 # They live in the folder being worked on but belong to the worker, so a
 # rollback of the code keeps them, and they are never carried across.
 MEMORY_FILES = ("orthros_tasks.md", "janus_tasks.md", "PLAN.md", "PROGRESS.md", "PROGRESS.old.md", "DONE.md",
                 "BRIEF.md", "CONVENTIONS.md", "RALPH_PROMPT.md", "RESEARCH.md",
-                "LESSONS.md", "FOUND.md", "FIELD_REPORT.md")
+                "LESSONS.md", "FOUND.md", "FIELD_REPORT.md", "ROLLBACK.md")
 FIELD_REPORT = "FIELD_REPORT.md"
+ROLLBACK_NOTE = "ROLLBACK.md"
+DIFF_NOTE_CHARS = 8000               # of the undone diff written into ROLLBACK.md
+
+# How a turn ends when nothing went wrong. Anything else, well short of its
+# time, is an early stop -- and becomes the twin's first job.
+NORMAL_ENDS = ("Time is up", "Stopped from the dashboard", "Stopped by hand",
+               "Single round", "Every item is ticked")
 PROVEN_KEPT = 20                     # proven versions remembered per agent
 
 # Start-up failures that are the machine's fault, not the code's. Stepping
@@ -109,7 +139,18 @@ FIELD_SIGNS = (
     ("rounds that broke start-up", "That round broke it"),
     ("items parked", "Parked"),
     ("invented attributes caught", "Invented "),
+    # A prompt the window cannot hold comes back from LM Studio as a 400 that
+    # aider words as a connection error, so it was counted above as the
+    # engine dying -- and the twin went looking for an engine problem.
+    ("requests refused as too big for the window (aider retries each)",
+     "exceeds the available context size"),
+    ("files pulled into a round because a reply named them",
+     "it's best to only add files that need changes"),
+    ("prompts the guard kept from being sent", GUARD_REFUSED),
+    ("files the guard kept out of a round", "Orthros guard: not adding"),
 )
+OVERSIZE = re.compile(r"request \((\d+) tokens\) exceeds the available context size "
+                      r"\((\d+) tokens\)")
 NOTES_FILES = ("orthros_tasks.md", "janus_tasks.md")
 
 
@@ -119,6 +160,52 @@ def notes_file(folder):
         if os.path.isfile(os.path.join(folder, name)):
             return os.path.join(folder, name)
     return os.path.join(folder, NOTES_FILES[0])
+
+
+OPEN_ITEM = re.compile(r"^[ \t]*[-*][ \t]*\[ \][ \t]*(.+?)[ \t]*$", re.MULTILINE)
+DONE_ITEM = re.compile(r"^[ \t]*[-*][ \t]*\[[xX]\][ \t]*(.+?)[ \t]*$", re.MULTILINE)
+PARKED_ITEM = re.compile(r"^[ \t]*[-*][ \t]*\[!\]", re.MULTILINE)
+TASKS_HEADING = re.compile(r"^##[ \t]+Tasks[ \t]*\n", re.MULTILINE)
+
+
+def park_item(path, item, reason):
+    """Mark one open item `- [!]`, the way the agents park their own. True if it was there."""
+    body = read_text(path)
+    match = re.search(r"^([ \t]*[-*][ \t]*)\[ \]([ \t]*%s[ \t]*)$" % re.escape(item), body,
+                      re.MULTILINE)
+    if not match:
+        return False
+    body = (body[:match.start()] + match.group(1) + "[!]" + match.group(2)
+            + "\n  - *Parked by Orthros*: " + reason + body[match.end():])
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(body)
+    return True
+
+
+def add_first(path, text):
+    """Put one open item at the top of the `## Tasks` section -- the next round takes it.
+
+    The end of the list when there is no such heading. Nothing when there is
+    no task list at all: an agent that keeps none is not one to steer.
+    """
+    body = read_text(path)
+    if not body:
+        return False
+    line = "- [ ] %s\n" % " ".join(text.split())
+    match = TASKS_HEADING.search(body)
+    if match:
+        spot = match.end()
+        while body[spot:spot + 1] == "\n":
+            spot += 1
+        body = body[:spot] + line + ("\n" if body[spot:spot + 1] not in ("-", "*") else "") \
+            + body[spot:]
+    else:
+        body = body.rstrip() + "\n\n" + line
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(body)
+    return True
+
+
 STATUS_FILE = ".localcoder-status.json"
 STOP_FILE = ".localcoder-stop"
 MANAGED_MARKER = ".localcoder-managed"
@@ -154,6 +241,15 @@ def agent_folder(root, name):
 
 def now():
     return time.time()
+
+
+def clock_left(seconds):
+    seconds = max(0, int(seconds))
+    return "%d:%02d" % (seconds // 60, seconds % 60)
+
+
+def plural(count, word):
+    return "%d %s%s" % (count, word, "" if count == 1 else "s")
 
 
 def clock(ts=None):
@@ -249,10 +345,69 @@ def pid_alive(pid):
     return bool(ok) and code.value == 259                  # STILL_ACTIVE
 
 
+GPU_QUERY = "name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw"
+
+
+def gpu_reading():
+    """The first card's state from nvidia-smi, or None. Only numbers it reports.
+
+    utilization.gpu is the share of the last sample period in which a kernel
+    was running -- how busy the card is, not a count of cores in use; no
+    tool reports that per core.
+    """
+    try:
+        proc = subprocess.run(["nvidia-smi", "--query-gpu=" + GPU_QUERY,
+                               "--format=csv,noheader,nounits"],
+                              capture_output=True, text=True, timeout=10,
+                              creationflags=CREATE_NO_WINDOW if os.name == "nt" else 0)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None
+    cells = [c.strip() for c in proc.stdout.strip().splitlines()[0].split(",")]
+
+    def num(text):
+        try:
+            return float(text)
+        except ValueError:
+            return None
+
+    if len(cells) < 6:
+        return None
+    return {"name": cells[0], "util": num(cells[1]), "mem_used": num(cells[2]),
+            "mem_total": num(cells[3]), "temp": num(cells[4]), "power": num(cells[5])}
+
+
+ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+
+def read_from(path, offset, limit=65536):
+    """(text, next offset) from byte `offset`, whole lines only, escapes removed."""
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(offset)
+            chunk = handle.read(limit)
+    except OSError:
+        return "", offset
+    if len(chunk) == limit and b"\n" in chunk:
+        chunk = chunk[:chunk.rindex(b"\n") + 1]
+    text = ANSI.sub("", chunk.decode("utf-8", "replace")).replace("\r", "")
+    return text, offset + len(chunk)
+
+
 def kill_tree(pid):
-    if pid and pid_alive(pid):
-        subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)],
-                       capture_output=True, timeout=60)
+    if not pid or not pid_alive(pid):
+        return
+    if os.name != "nt":
+        # Off Windows there is no taskkill; --simulate runs there, and a force
+        # stop used to take Orthros down with FileNotFoundError.
+        try:
+            os.kill(pid, 9)
+        except OSError:
+            pass
+        return
+    subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)],
+                   capture_output=True, timeout=60)
 
 
 def processes_under(folder):
@@ -351,16 +506,25 @@ class Orthros:
         self.state.setdefault("events", [])
         self.state.setdefault("next", self.settings["first"])
         self.state.setdefault("idle_streak", 0)
+        self.state.setdefault("tries", {})       # "<folder>|<item>": turns that died on it
+        self.state.setdefault("directions", [])  # the operator's, waiting for a safe moment
+        self.state.setdefault("chat", [])
         self.state["paused"] = True          # never resume unattended on restart
         self.state.setdefault("running", None)
         stale = self.state["running"]
         if stale and not pid_alive(stale.get("pid")):
-            # It finished while Orthros was not looking; its peer is next.
+            # It finished while Orthros was not looking; its peer is next. The
+            # turn itself is judged when Orthros is started -- dropping it here
+            # used to lose its proof, and the changes it made never carried over.
+            self.state["unjudged"] = stale
             self.state["running"] = None
             self.state["next"] = PEER[stale["agent"]]
         self.phase, self.message = "idle", ""
         self.stop_mode = ""                  # "", "pause", "now", "force"
         self.proc = None
+        self.backoff_until = 0               # a machine failure's wait before retrying
+        self.gpu = None                      # the latest nvidia-smi reading, for the page
+        self.gpu_history = []
 
     # ---------------------------------------------------------------- state
 
@@ -373,8 +537,14 @@ class Orthros:
             self.state["events"] = (self.state["events"] + [[now(), text, kind]])[-60:]
             self.save()
         line = "%s  %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), text)
+        path = os.path.join(self.root, "orthros.log")
         try:
-            with open(os.path.join(self.root, "orthros.log"), "a", encoding="utf-8") as handle:
+            if os.path.getsize(path) > LOG_CAP:
+                os.replace(path, path + ".1")
+        except OSError:
+            pass
+        try:
+            with open(path, "a", encoding="utf-8") as handle:
                 handle.write(line)
         except OSError:
             pass
@@ -419,6 +589,10 @@ class Orthros:
                     if "%~dp0" in match.group(2) else os.path.expandvars(value)
         env.update(LC_WORKSPACE=target, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8",
                    LC_UNLOAD_ON_EXIT="1", LC_STOP_SERVER_ON_EXIT="1")
+        if self.settings.get("aider_guard", True) and os.path.isdir(GUARD_DIR):
+            env["PYTHONPATH"] = os.pathsep.join(p for p in (GUARD_DIR, env.get("PYTHONPATH"))
+                                                if p)
+            env["ORTHROS_AIDER_GUARD"] = "1"
         return env
 
     @staticmethod
@@ -457,7 +631,21 @@ class Orthros:
             minutes *= max(0.75, min(1.25, other["tokens"] / float(me["tokens"])))
         return int(max(base * 0.5, min(base * 1.5, minutes)))
 
+    def prune_logs(self):
+        """Keep the newest turn logs; a run of weeks would otherwise fill the disk."""
+        keep = int(self.settings.get("keep_logs") or 0)
+        try:
+            names = sorted(f for f in os.listdir(self.logs) if f.endswith(".log"))
+        except OSError:
+            return
+        for name in (names[:-keep] if keep else []):
+            try:
+                os.remove(os.path.join(self.logs, name))
+            except OSError:
+                pass
+
     def launch(self, name, minutes, token):
+        self.prune_logs()
         folder = self.folders[name]
         stamp = time.strftime("%Y%m%d-%H%M%S")
         log_path = os.path.join(self.logs, "%s-%s.log" % (stamp, name))
@@ -484,6 +672,7 @@ class Orthros:
         peer = self.folders[PEER[name]]
         for n in NAMES:                      # whatever either agent did to its config
             self.fix_workspace_line(n)
+        self.apply_directions(from_loop=True)   # before the commits, so they are kept
         own_sha = commit_all(self.folders[name], "Orthros: %s as it starts its turn" % name)
         pre = commit_all(peer, "Orthros: before %s works on it" % name)
         self.install_requirements(name)
@@ -559,6 +748,7 @@ class Orthros:
             "tokens": (st.get("tokens_in", 0) or 0) + (st.get("tokens_out", 0) or 0),
             "reason": st.get("ended_reason") or "", "log": log_path,
             "own": own_sha, "pre": pre, "post": post,
+            "item": st.get("item") or "", "minutes": minutes,
         }
         with self.lock:
             self.state["running"] = None
@@ -690,6 +880,16 @@ class Orthros:
         dies at "bad allocation" a minute later, and how everything else on
         the machine gets killed with it.
         """
+        disk = int(self.settings.get("min_free_disk_mb") or 0)
+        try:
+            free_disk = shutil.disk_usage(self.root).free // 1048576
+        except OSError:
+            free_disk = None
+        if disk and free_disk is not None and free_disk < disk:
+            self.pause("Only %d MB of disk left where Orthros keeps its logs and the agents' "
+                       "history; a turn needs %d MB. Free some space, then press Start."
+                       % (free_disk, disk), error=True)
+            return False
         want = int(self.settings.get("min_free_mb") or 0)
         if not want or self.simulate:
             return True
@@ -705,7 +905,7 @@ class Orthros:
                            "culprits." % (free, want))
                 self.set_phase("handover", "waiting for memory before starting %s" % name)
             if waited >= 600:
-                self.pause("Still only %d MB of memory free after ten minutes, and a turn "
+                self.pause(loud=True, message="Still only %d MB of memory free after ten minutes, and a turn "
                            "needs %d MB. Close some programs, or give Windows a bigger page "
                            "file, then press Start." % (free, want))
                 return False
@@ -760,6 +960,14 @@ class Orthros:
             lines.append("Least memory free during the turn: %d MB." % result["lowest_free_mb"])
         if counts:
             lines.append("Trouble: " + "; ".join(counts) + ".")
+        sizes = [(int(a), int(b)) for a, b in OVERSIZE.findall(text)]
+        if sizes:
+            lines.append("Diagnosis: LM Studio refused prompts of up to %s tokens against a "
+                         "%s-token window. The engine did not die -- the rounds sent more "
+                         "than the window holds (often files aider added because a reply "
+                         "named them). Fix what a round sends, not the engine handling."
+                         % ("{:,}".format(max(a for a, _ in sizes)),
+                            "{:,}".format(sizes[0][1])))
         rates = [float(m) for m in re.findall(r"([\d.]+) tok/sec", text)]
         if rates:
             lines.append("Typical speed: %.0f tok/sec." % sorted(rates)[len(rates) // 2])
@@ -804,6 +1012,7 @@ class Orthros:
         if not result["launched"]:
             return self.launch_failed(name, result)
         me["good_failures"] = 0
+        me["env_failures"] = 0
 
         me["sessions"] += 1
         me["seconds"] += result["seconds"]
@@ -817,21 +1026,39 @@ class Orthros:
         if good:
             self.state["idle_streak"] = 0
             me["weak_streak"] = 0
+            me["spared"] = False
             self.prove(name, result["own"])    # this version has proven itself
             self.carry_over(name)
         else:
             self.state["idle_streak"] += 1
             me["weak_streak"] += 1
             if me["weak_streak"] >= 2 and not self.is_good(name):
-                self.rollback(name, "two sessions in a row did no useful work since the "
-                                    "last changes to it")
+                trouble = self.outside_trouble(result)
+                if trouble and not me.get("spared"):
+                    # On 2026-09-23 A was rolled back for two idle turns that
+                    # were lost to oversized prompts built from B's task list.
+                    # The rollback undid B's work and changed nothing: the
+                    # proven version failed the same way. One more turn first,
+                    # with the item it died on parked (count_tries).
+                    me["spared"] = True
+                    me["weak_streak"] = 0
+                    self.event("not rolling %s back yet: its last turns were lost to %s, "
+                               "which may not be its code's doing" % (name, trouble))
+                else:
+                    me["spared"] = False
+                    self.rollback(name, "two sessions in a row did no useful work since the "
+                                        "last changes to it")
+        self.count_tries(name, result, good)
+        self.note_early_stop(name, result)
         if result["post"] != result["pre"]:
             self.agent(peer_name)["pending"].append([result["pre"], result["post"]])
         self.state["next"] = peer_name
         self.save()
+        for folder in self.folders.values():
+            git(folder, "gc", "--auto", "--quiet", timeout=600)   # weeks of commits add up
         limit = int(self.settings.get("pause_after_idle") or 0)
         if limit and self.state["idle_streak"] >= limit:
-            self.pause("%d sessions in a row kept nothing. Paused -- look at the logs "
+            self.pause(loud=True, message="%d sessions in a row kept nothing. Paused -- look at the logs "
                        "before starting again." % self.state["idle_streak"])
 
     def launch_failed(self, name, result):
@@ -850,8 +1077,23 @@ class Orthros:
         self.event("%s failed to start (exit %s)" % (name, result["exit"]), "bad")
         self.state["next"] = name                # its turn still, once it can run
         if any(sign in why for sign in ENV_SIGNS):
-            self.pause("%s could not start, and the output says the machine is the problem, "
-                       "not the code:\n%s" % (name, why), error=True)
+            # The machine, not the code -- and machines recover: LM Studio
+            # finishes updating, a game closes, a driver comes back. Wait and
+            # try again a few times, longer each time, before giving up.
+            waits = list(self.settings.get("env_retry_minutes") or [])
+            me["env_failures"] = me.get("env_failures", 0) + 1
+            if me["env_failures"] <= len(waits):
+                wait = int(waits[me["env_failures"] - 1])
+                self.backoff_until = now() + wait * 60
+                self.event("%s could not start because of the machine; trying again in %d "
+                           "minute(s) (%d of %d): %s" % (name, wait, me["env_failures"],
+                                                         len(waits), why.splitlines()[-1][:120]),
+                           "bad")
+            else:
+                me["env_failures"] = 0
+                self.pause("%s could not start, %d times now, and the output says the machine "
+                           "is the problem, not the code:\n%s"
+                           % (name, len(waits) + 1, why), error=True)
         elif not self.is_good(name):
             self.retreat(name, "it failed to start:\n" + why)
         elif me["good_failures"] < 1:
@@ -863,6 +1105,84 @@ class Orthros:
                        "This is LM Studio or the machine. Last output:\n%s" % (name, why),
                        error=True)
         self.save()
+
+    @staticmethod
+    def outside_trouble(result):
+        """What, other than the agent's code, a weak turn was lost to. '' if nothing."""
+        text = read_text(result.get("log") or "")
+        if OVERSIZE.search(text) or GUARD_REFUSED in text:
+            return "prompts too big for the context window"
+        if "engine" in (result.get("reason") or "").lower():
+            return "the engine"
+        return ""
+
+    def count_tries(self, name, result, good):
+        """NR_OF_TRIES: park an item that turn after turn dies on.
+
+        After fstandhartinger/ralph-wiggum, which counts the attempts on each
+        spec and flags it as stuck past a limit. The agents park an item
+        within a turn; nothing counted across turns. So on 2026-09-23 the
+        same top item on B's list ended two of A's turns in a row, identically,
+        and would have ended every one after -- the rounds that could have
+        parked it were never charged to it.
+        """
+        limit = int(self.settings.get("park_after_tries") or 0)
+        folder = PEER[name]
+        tries = self.state.setdefault("tries", {})
+        mine = [k for k in tries if k.startswith(folder + "|")]
+        if good or not result["launched"]:
+            for k in mine:
+                del tries[k]
+            return
+        item = (result.get("item") or "").strip()
+        if not limit or not item or item not in OPEN_ITEM.findall(
+                read_text(notes_file(self.folders[folder]))):
+            return
+        key = "%s|%s" % (folder, item)
+        for k in mine:
+            if k != key:
+                del tries[k]                 # a different item: the count starts again
+        tries[key] = tries.get(key, 0) + 1
+        if tries[key] < limit:
+            return
+        why = ("%d turns in a row ended on this item without progress (last: %s). "
+               "Split it smaller, or rewrite it so one round can finish it."
+               % (tries[key], (result.get("reason") or "?")[:120]))
+        if park_item(notes_file(self.folders[folder]), item, why):
+            self.event("parked the item %s's turns keep dying on: %s" % (name, item[:70]), "bad")
+        del tries[key]
+
+    def note_early_stop(self, name, result):
+        """A turn that ended itself early becomes the twin's first job.
+
+        The field report already says how the turn ended, but as one line
+        among many, read only when planning. An early stop is the most
+        expensive thing that happens here -- the rest of the turn is thrown
+        away -- so its cause goes to the top of the list the twin works from,
+        with the words to search for.
+        """
+        reason = " ".join((result.get("reason") or "").split())
+        planned = (result.get("minutes") or 0) * 60
+        if (not result["launched"] or not reason or reason.startswith(NORMAL_ENDS)
+                or (planned and result["seconds"] >= planned * 0.8)):
+            return
+        path = notes_file(self.folders[name])
+        signature = reason[:60]
+        if any(signature in item for item in OPEN_ITEM.findall(read_text(path))):
+            return                           # already on the list, not yet done
+        trouble = self.outside_trouble(result)
+        hint = (" The log shows prompts refused as too big for the window, so look at what "
+                "a round sends before looking at the engine." if trouble.startswith("prompts")
+                else "")
+        words = " ".join(reason.split()[:4]).strip(" .-")
+        text = ("Found by Orthros: %s's last turn stopped itself after %d of %d minutes, "
+                "ending with \"%s\".%s Find the code that says that (FIND: %s), work out why "
+                "it fired, and make the loop recover and carry on there instead -- with a "
+                "test that the session keeps going."
+                % (name, result["seconds"] // 60, planned // 60, reason[:160], hint, words))
+        if add_first(path, text):
+            self.event("%s stopped early; that is now first on %s's list for %s"
+                       % (name, name, PEER[name]))
 
     # ---------------------------------------------------------------- rollback and carry-over
 
@@ -923,17 +1243,41 @@ class Orthros:
             with open(os.path.join(folder, f), "w", encoding="utf-8") as handle:
                 handle.write(body)
         detail = " ".join(why.split())[:400]
+        self.write_rollback_note(folder, bad, tag, detail)
+        # The item used to say where the diff was -- `git diff ...` -- to a
+        # round that cannot run git. On 2026-09-23 B spent eight rounds and a
+        # whole turn writing notes about the diff it could not see. Now the
+        # diff is in the folder, and the item says what to do if it is not the
+        # culprit (the turns may have been lost to something else entirely).
         self.add_item(folder, "Found by Orthros: the last changes were rolled back",
-                      "The changes from %s's last turn were undone because %s -- they are "
-                      "kept in git tag `%s` (`git diff %s %s`). Find what went wrong there "
-                      "and make the useful part of that change again, smaller and safely."
-                      % (PEER[name], detail, tag, short(self.good(name)), tag))
+                      "The changes from %s's last turn were undone because %s. What was "
+                      "undone is in %s, as a diff -- there is no git command to run. Read it "
+                      "and make the useful part of that change again, smaller and safely. If "
+                      "nothing in it can have caused the problem, tick this item with a note "
+                      "saying so." % (PEER[name], detail, ROLLBACK_NOTE))
         commit_all(folder, "Orthros: rolled %s back to %s" % (name, short(self.good(name))))
         me["rollbacks"] += 1
         me["pending"] = []
         me["weak_streak"] = 0
         self.event("rolled %s back to %s (the failed version is tag %s)"
                    % (name, short(self.good(name)), tag), "bad")
+
+    def write_rollback_note(self, folder, bad, tag, why):
+        """ROLLBACK.md: the undone change, readable by a round that cannot run git."""
+        excludes = [":(exclude)%s" % f for f in MEMORY_FILES]
+        good = head(folder)                  # just reset to the proven version
+        _, stat = git(folder, "diff", "--stat", good, bad, "--", ".", *excludes)
+        _, diff = git(folder, "diff", "--unified=2", good, bad, "--", ".", *excludes)
+        if len(diff) > DIFF_NOTE_CHARS:
+            diff = diff[:DIFF_NOTE_CHARS] + "\n[... cut at %d characters ...]" % DIFF_NOTE_CHARS
+        body = ("# What the last rollback undid\n\nWritten by Orthros. It was undone because "
+                "%s.\nKept in full in git tag `%s`.\n\n```\n%s\n```\n\n```diff\n%s\n```\n"
+                % (why, tag, stat.strip() or "(no source changes)", diff.strip()))
+        try:
+            with open(os.path.join(folder, ROLLBACK_NOTE), "w", encoding="utf-8") as handle:
+                handle.write(body)
+        except OSError:
+            pass
 
     def add_item(self, folder, heading, text):
         path = notes_file(folder)
@@ -1006,9 +1350,19 @@ class Orthros:
                 self.wake.wait(5)
                 self.wake.clear()
                 continue
-            name = self.state["next"]
+            if now() < self.backoff_until:
+                self.set_phase("handover", "the machine was not ready; trying again in %s"
+                               % clock_left(self.backoff_until - now()))
+                self.wake.wait(5)
+                self.wake.clear()
+                continue
             try:
                 self.adopt_orphan()
+                if self.state["paused"]:
+                    continue                 # judging that turn paused Orthros
+                # Read after adopting: judging an adopted turn decides who is next,
+                # and reading it before meant the same agent ran twice in a row.
+                name = self.state["next"]
                 if not self.memory_is_free_enough(name) or not self.cleared_for_launch(name):
                     continue
                 result = self.run_turn(name)
@@ -1033,7 +1387,7 @@ class Orthros:
                 self.set_phase("handover", "starting %s" % self.state["next"])
                 self.event("handing over to %s" % self.state["next"], "handover")
 
-    def finish_orphan(self):
+    def finish_orphan(self, running):
         """Judge a turn that finished while Orthros was not running.
 
         Orthros can be killed -- by the operator, or by Windows when memory runs
@@ -1041,20 +1395,19 @@ class Orthros:
         work is committed and its status file is complete; all that is missing
         is the judgement. Without this, that turn is silently lost.
         """
-        running = self.state.get("running")
-        if not running or pid_alive(running.get("pid")):
-            return
-        peer = self.folders[PEER[running["agent"]]]
+        agent = running["agent"]
+        peer = self.folders[PEER[agent]]
         st = read_json(os.path.join(peer, STATUS_FILE), {}) or {}
+        self.release(agent)
+        self.state["next"] = PEER[agent]
         if not self.is_mine(st, running):
-            self.state["running"] = None
             self.save()
             return
         self.event("%s's turn finished while Orthros was not running; taking it into account now"
-                   % running["agent"])
-        post = commit_all(peer, "Orthros: after %s's turn" % running["agent"])
+                   % agent)
+        post = commit_all(peer, "Orthros: after %s's turn" % agent)
         result = {
-            "agent": running["agent"], "started": running["started"],
+            "agent": agent, "started": running["started"],
             "seconds": int(max(0, (st.get("ended") or now()) - running["started"])),
             "exit": None, "launched": st.get("phase") in LAUNCHED,
             "rounds": st.get("rounds", 0) or 0, "ticked": st.get("ticked", 0) or 0,
@@ -1062,40 +1415,87 @@ class Orthros:
             "tokens": (st.get("tokens_in", 0) or 0) + (st.get("tokens_out", 0) or 0),
             "reason": st.get("ended_reason") or "Orthros was not running at the end",
             "log": running["log"], "own": running["own"], "pre": running["pre"], "post": post,
-            "lowest_free_mb": None,
+            "lowest_free_mb": None, "item": st.get("item") or "",
+            "minutes": running.get("minutes") or 0,
         }
-        self.state["running"] = None
-        self.release(running["agent"])
         self.field_report(result)
         self.judge(result)
         self.save()
 
     def adopt_orphan(self):
-        """A session left running by an earlier Orthros: wait it out, then release."""
-        running = self.state.get("running")
-        if not running:
-            return
-        if not pid_alive(running.get("pid")):
-            return self.finish_orphan()
-        if pid_alive(running.get("pid")):
-            self.set_phase("running", "waiting for %s's session from before a restart"
-                           % running["agent"])
-            self.event("found %s still running from before; waiting for it" % running["agent"])
-            while pid_alive(running.get("pid")) and not self.stop_mode:
-                time.sleep(5)
-            if self.stop_mode == "force":
-                kill_tree(running.get("pid"))
-        self.release(running["agent"])
-        self.state["running"] = None
-        self.state["next"] = PEER[running["agent"]]
-        self.save()
+        """A turn from before a restart: wait it out if it is still going, then judge it.
 
-    def pause(self, message, error=False):
+        The wait is bounded. Windows reuses process ids, and waiting on one
+        that now belongs to something else would hold Orthros for ever.
+        """
+        running = self.state.get("running")
+        if running:
+            pid = running.get("pid")
+            if pid_alive(pid):
+                self.set_phase("running", "waiting for %s's session from before a restart"
+                               % running["agent"])
+                self.event("found %s still running from before; waiting for it"
+                           % running["agent"])
+                limit = running.get("started", now()) + 60 * (
+                    (running.get("minutes") or self.settings["session_minutes"])
+                    + self.settings["grace_minutes"] + 25)
+                while pid_alive(pid) and not self.stop_mode:
+                    if now() > limit:
+                        if pid in processes_under(self.folders[running["agent"]]):
+                            kill_tree(pid)
+                        else:
+                            self.event("stopped waiting for process %s: well past its time, "
+                                       "and it is no longer %s's" % (pid, running["agent"]))
+                        break
+                    time.sleep(5)
+                if self.stop_mode == "force":
+                    kill_tree(pid)
+            self.state["running"] = None
+            self.state["unjudged"] = running
+            self.save()
+        orphan = self.state.pop("unjudged", None)
+        if orphan:
+            self.finish_orphan(orphan)
+
+    def pause(self, message, error=False, loud=False):
+        """Stop handing over. An error, or `loud`, means a person is needed:
+        see surrender()."""
         with self.lock:
             self.state["paused"] = True
             self.save()
         self.set_phase("error" if error else "paused", message)
-        self.event(message.splitlines()[0], "bad" if error else "info")
+        self.event(message.splitlines()[0], "bad" if (error or loud) else "info")
+        if error or loud:
+            self.surrender(message)
+
+    def surrender(self, message):
+        """Give up out loud. Everything Orthros can do by itself has been tried.
+
+        A file at the top of the folder, which a person looking at it cannot
+        miss; the page turns red, retitles its tab and raises a desktop
+        notification if it was allowed to; and Windows beeps. Cleared on Start.
+        """
+        body = ("Orthros stopped at %s and needs you.\n\n%s\n\nThe page "
+                "(http://127.0.0.1:%s/) and orthros.log have the rest. Press Start when it is "
+                "dealt with; this file goes away then.\n"
+                % (time.strftime("%Y-%m-%d %H:%M"), message.strip(), self.settings.get("port")))
+        try:
+            with open(os.path.join(self.root, ALERT_FILE), "w", encoding="utf-8") as handle:
+                handle.write(body)
+        except OSError:
+            pass
+        with self.lock:
+            self.state["alert"] = [now(), message.strip()[:600]]
+            self.save()
+        if self.simulate:
+            return
+        try:
+            import winsound
+            for _ in range(3):
+                winsound.MessageBeep(0x30)          # MB_ICONEXCLAMATION
+                time.sleep(0.4)
+        except Exception:
+            print("\a", end="", flush=True)
 
     # ---------------------------------------------------------------- controls
 
@@ -1110,6 +1510,12 @@ class Orthros:
                 self.state["next"] = first
             self.prepare_folders()
             self.state["paused"] = False
+            self.state["alert"] = None
+            self.backoff_until = 0
+            try:
+                os.remove(os.path.join(self.root, ALERT_FILE))
+            except OSError:
+                pass
             self.stop_mode = ""
             self.save()
         self.set_phase("handover", "starting %s" % self.state["next"])
@@ -1133,6 +1539,228 @@ class Orthros:
                     "force": "force-stopping the running agent"}[mode])
         self.wake.set()
         return "ok"
+
+    # ---------------------------------------------------------------- telemetry
+
+    def watch_gpu(self):
+        """Poll the card for the page. Slows right down when there is no card to read."""
+        tick = 0
+        while True:
+            if self.simulate:
+                busy = bool(self.state.get("running")) and self.phase == "running"
+                wobble = (tick % 7) * 1.5
+                self.gpu = {"name": "simulated card", "util": (86 + wobble) if busy else 3.0,
+                            "mem_used": 17600.0 if busy else 900.0, "mem_total": 24576.0,
+                            "temp": 71.0 if busy else 38.0, "power": 310.0 if busy else 24.0}
+            else:
+                self.gpu = gpu_reading()
+            if self.gpu:
+                self.gpu_history = (self.gpu_history + [self.gpu.get("util") or 0])[-90:]
+            tick += 1
+            time.sleep(2 if self.gpu else 30)
+
+    def tail_log(self, agent, name, offset):
+        """New raw output of an agent's newest turn log, for the page's terminal."""
+        running = self.state.get("running") or {}
+        path = running.get("log") if running.get("agent") == agent else ""
+        if not path:
+            try:
+                names = sorted(f for f in os.listdir(self.logs)
+                               if f.endswith("-%s.log" % agent))
+            except OSError:
+                names = []
+            path = os.path.join(self.logs, names[-1]) if names else ""
+        if not path or not os.path.isfile(path):
+            return {"file": "", "offset": 0, "text": "", "reset": True}
+        size = os.path.getsize(path)
+        reset = name != os.path.basename(path) or offset < 0 or offset > size
+        if reset:
+            offset = max(0, size - 24000)
+        text, offset = read_from(path, offset)
+        if reset and offset and "\n" in text:
+            text = text[text.index("\n") + 1:]      # start on a whole line
+        return {"file": os.path.basename(path), "offset": offset, "text": text,
+                "reset": reset, "live": running.get("agent") == agent}
+
+    # ---------------------------------------------------------------- the operator's chat
+
+    def chat(self, text, kind="ask", target="both"):
+        """One message from the page's chat box. Returns the reply.
+
+        `ask`: a question about how things stand, answered in a few plain
+        sentences from Orthros's own records -- which are exact, and need no
+        model: the card belongs to the agent that is running.
+
+        `direct`: new direction for the work. It becomes the first item on the
+        task list of the agent it is about (the twin works through that list),
+        and waits for the end of the running turn if that list is in use: the
+        agent rewrites it between rounds, and a rollback could lose it.
+        """
+        text = " ".join(str(text or "").split())[:600]
+        if not text:
+            return "Say something first."
+        if kind == "direct":
+            names = NAMES if target not in NAMES else (target,)
+            with self.lock:
+                for n in names:
+                    self.state["directions"].append({"agent": n, "text": text, "at": now()})
+                applied = self.apply_directions()
+            where = " and ".join(names)
+            if applied == len(names):
+                reply = ("Added to the top of %s's task list. The next round on it starts "
+                         "there." % where)
+            else:
+                reply = ("Queued for %s's task list. The list is in use by the running turn, "
+                         "so it goes in, at the top, as soon as that turn ends." % where)
+            self.event("operator direction for %s: %s" % (where, text[:80]), "start")
+        else:
+            reply = self.answer(text)
+        with self.lock:
+            self.state["chat"] = (self.state["chat"] + [[now(), "you", text],
+                                                        [now(), "orthros", reply]])[-40:]
+            self.save()
+        return reply
+
+    def apply_directions(self, from_loop=False):
+        """Write queued directions into lists no turn is using. Returns how many went in.
+
+        From the loop, just before a turn's commits, every list is free. From
+        the page, the list a turn is using -- or is about to, between turns --
+        is not: an uncommitted line there can be lost to the agent's rollback.
+        """
+        done = 0
+        with self.lock:
+            running = self.state.get("running")
+            busy = (None if from_loop else PEER[running["agent"]] if running
+                    else None if self.state["paused"] else PEER[self.state["next"]])
+            waiting = []
+            for d in self.state.get("directions", []):
+                if d["agent"] == busy:
+                    waiting.append(d)
+                    continue
+                if add_first(notes_file(self.folders[d["agent"]]),
+                             "From the operator: %s" % d["text"]):
+                    done += 1
+            self.state["directions"] = waiting
+            self.save()
+        return done
+
+    def answer(self, question):
+        """A few plain sentences on how things stand, picked by what was asked."""
+        q = question.lower()
+        head_line = self.status_line()
+        topics = (
+            (("temperature", "temp", "creative", "brainstorm", "precise"), self.say_temperature),
+            (("next", "plan", "todo", "to do", "queue", "upcoming", "going to"), self.say_next),
+            (("wrong", "problem", "error", "fail", "stuck", "why", "stop", "broke", "idle",
+              "trouble", "park"), self.say_trouble),
+            (("done", "did", "changed", "progress", "kept", "improv", "today", "so far",
+              "learn", "better"), self.say_progress),
+        )
+        for words, say in topics:
+            if any(w in q for w in words):
+                return head_line + "\n" + say()
+        return head_line + "\n" + self.say_progress(brief=True)
+
+    def status_line(self):
+        v = self.view()
+        run, live = v["running"], v["live"]
+        if run:
+            gone = int((live.get("elapsed") or 0) // 60)
+            item = (live.get("item") or live.get("detail") or "").strip()
+            return ("%s is working on %s: %s, round %s, %s kept and %s sent back so far, %d of "
+                    "%d minutes gone.%s" % (
+                        run["agent"], PEER[run["agent"]], live.get("phase") or "starting",
+                        live.get("round") or 0, live.get("accepted") or 0,
+                        live.get("rejected") or 0, gone, run["minutes"],
+                        (" Current item: %s" % item[:140]) if item else ""))
+        if v["phase"] == "error":
+            return "Orthros has stopped and needs you: %s" % (v["message"].splitlines() or ["?"])[0]
+        if v["paused"]:
+            why = (v["message"].splitlines() or [""])[0]
+            return "Orthros is paused%s. Press Start to carry on; %s goes next." % (
+                (": " + why) if why else "", v["next"])
+        return "Orthros is between turns (%s); %s goes next." % (v["message"] or v["phase"],
+                                                                v["next"])
+
+    def say_progress(self, brief=False):
+        out = []
+        for n in NAMES:
+            a = self.agent(n)
+            last = a.get("last") or {}
+            line = ("%s has had %s, kept %s, and has %s"
+                    % (n, plural(a["sessions"], "turn"), plural(a["kept"], "change"),
+                       plural(len(a["goods"]), "proven version")))
+            if a["rollbacks"]:
+                line += ", %d rolled back" % a["rollbacks"]
+            if last.get("started"):
+                line += ". Last turn: %d rounds, %d kept, ended \"%s\"" % (
+                    last.get("rounds") or 0, last.get("kept") or 0,
+                    (last.get("reason") or "?")[:90])
+            out.append(line + ".")
+            if not brief:
+                done = DONE_ITEM.findall(read_text(notes_file(self.folders[n])))[-3:]
+                if done:
+                    out.append("  Lately finished on %s: %s." % (
+                        n, "; ".join(d[:90] for d in done)))
+        return "\n".join(out)
+
+    def say_next(self):
+        out = []
+        for n in NAMES:
+            folder = self.folders[n]
+            items = OPEN_ITEM.findall(read_text(notes_file(folder)))
+            plan = re.findall(r"^##\s*\[ \]\s*(.+?)\s*$", read_text(os.path.join(folder, "PLAN.md")),
+                              re.MULTILINE)
+            line = "%s's list (%s works on it): " % (n, PEER[n])
+            line += ("%d open, next up: %s" % (len(items), "; ".join(i[:90] for i in items[:3]))
+                     if items else "empty, so the next round plans more work")
+            if plan:
+                line += ". Next milestone: %s" % plan[0][:80]
+            out.append(line + ".")
+        waiting = self.state.get("directions") or []
+        if waiting:
+            out.append("%d direction(s) from you are waiting for the running turn to end."
+                       % len(waiting))
+        return "\n".join(out)
+
+    def say_trouble(self):
+        out = []
+        v = self.view()
+        if v["phase"] in ("error", "paused") and v["message"]:
+            out.append("Why it stopped: %s" % v["message"].splitlines()[0][:200])
+        for n in NAMES:
+            last = self.agent(n).get("last") or {}
+            parked = len(PARKED_ITEM.findall(read_text(notes_file(self.folders[n]))))
+            bits = []
+            if last.get("reason"):
+                bits.append("last turn ended \"%s\"" % last["reason"][:100])
+            if parked:
+                bits.append("%d item(s) parked for a human on its list" % parked)
+            if bits:
+                out.append("%s: %s." % (n, "; ".join(bits)))
+        for key, count in (self.state.get("tries") or {}).items():
+            folder, _, item = key.partition("|")
+            out.append("%s's item \"%s\" has ended %d turn(s) in a row; it is parked "
+                       "after %s."
+                       % (folder, item[:70], count, self.settings.get("park_after_tries")))
+        bad = [e[1] for e in self.state["events"] if e[2] == "bad"][-3:]
+        if bad:
+            out.append("Recent problems: " + " | ".join(b[:110] for b in bad))
+        return "\n".join(out) or "Nothing is wrong that Orthros knows of."
+
+    def say_temperature(self):
+        env = self.agent_env("A")
+        code = env.get("LC_TEMP_CODE") or "0.2"
+        idea = env.get("LC_TEMP_BRAINSTORM") or "0.85"
+        split = "refill_temperature" in read_text(os.path.join(self.folders["A"],
+                                                                 "ralph_refill.py"))
+        return ("Yes, there is that lever. Rounds that write code run cold, at %s, for exact "
+                "edits. Rounds that plan or invent the next work run warm, at %s, for range. "
+                "%sThe reviewer runs at 0.1. Both numbers are LC_TEMP_CODE and "
+                "LC_TEMP_BRAINSTORM in each agent's config.cmd."
+                % (code, idea, "Of the planning rounds, checking finished work runs cold and "
+                   "breaking a milestone down runs in between. " if split else ""))
 
     # ---------------------------------------------------------------- the page's view
 
@@ -1170,6 +1798,9 @@ class Orthros:
                 "next": st["next"], "running": running, "live": live, "agents": agents,
                 "events": st["events"][-12:][::-1], "settings": self.settings,
                 "simulate": self.simulate, "stop_mode": self.stop_mode,
+                "chat": st.get("chat", [])[-20:], "directions": len(st.get("directions") or []),
+                "alert": st.get("alert"), "gpu": self.gpu, "gpu_history": self.gpu_history[-60:],
+                "backoff": max(0, int(self.backoff_until - now())),
                 "planned": {n: self.plan_minutes(n) for n in NAMES}}
 
 
@@ -1202,6 +1833,12 @@ def serve(orthros, port):
                 self.send(200, read_text(page), "text/html")
             elif url.path == "/api/state":
                 self.send(200, orthros.view())
+            elif url.path == "/api/tail":
+                try:
+                    offset = int(q.get("offset", "-1"))
+                except ValueError:
+                    offset = -1
+                self.send(200, orthros.tail_log(q.get("agent", "A"), q.get("file", ""), offset))
             elif url.path == "/api/log":
                 running = orthros.state.get("running") or {}
                 path = running.get("log") if running.get("agent") == q.get("agent") else ""
@@ -1227,6 +1864,10 @@ def serve(orthros, port):
                 elif url.path in ("/api/pause", "/api/stop", "/api/force"):
                     mode = {"/api/pause": "pause", "/api/stop": "now", "/api/force": "force"}
                     self.send(200, {"result": orthros.stop(mode[url.path])})
+                elif url.path == "/api/chat":
+                    reply = orthros.chat(body.get("text"), body.get("kind") or "ask",
+                                         body.get("target") or "both")
+                    self.send(200, {"reply": reply, "chat": orthros.state["chat"][-20:]})
                 elif url.path == "/api/settings":
                     if "session_minutes" in body:
                         orthros.settings["session_minutes"] = max(5, min(480, int(
@@ -1375,6 +2016,103 @@ def export(root, name):
     return 0
 
 
+def port_in_use(port):
+    import socket
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
+def split_patch(text):
+    """[(path, one file's part of the patch)], from `git diff` output."""
+    parts = re.split(r"(?m)^(?=diff --git )", text)
+    out = []
+    for part in parts:
+        match = re.match(r"diff --git a/(\S+) b/(\S+)", part)
+        if match:
+            out.append((match.group(2), part if part.endswith("\n") else part + "\n"))
+    return out
+
+
+def apply_patch(root, patch_path):
+    """Put the operator's own change into both live agents, and count it as proven.
+
+    agent\\ is only the template the agents were made from, and `--export`
+    overwrites it with an agent's code -- so a fix made there never reaches
+    the agents that are running. This applies a `git diff` of agent\\ (made
+    with --relative=agent) to each, file by file with a three-way merge. What
+    applies is checked with the same pre-launch checks Orthros uses, committed,
+    and recorded as the agent's newest proven version: the operator vouches
+    for it, and if it then fails to start, the usual retreat undoes it. What
+    does not apply is left out and listed.
+    """
+    settings = dict(DEFAULTS, **(read_json(os.path.join(root, "orthros.json"), {}) or {}))
+    if port_in_use(int(settings.get("port") or 8770)):
+        print("Orthros is running. Close its window first: it keeps its own copy of which "
+              "versions are proven, and would overwrite this.")
+        return 1
+    parts = split_patch(read_text(patch_path))
+    if not parts:
+        print("%s holds no file changes." % patch_path)
+        return 1
+    orthros = Orthros(root)
+    status = 0
+    for n in NAMES:
+        folder = orthros.folders[n]
+        if not os.path.isdir(os.path.join(folder, ".git")):
+            print("%s: not set up; skipped." % n)
+            continue
+        before = commit_all(folder, "Orthros: before the operator's patch")
+        applied, missed = [], []
+        for rel, part in parts:
+            fd, tmp = tempfile.mkstemp(suffix=".patch")
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(part)
+            ok, out = git(folder, "apply", "--whitespace=nowarn", tmp)
+            if not ok:
+                ok, out = git(folder, "apply", "--3way", "--whitespace=nowarn", tmp)
+            os.remove(tmp)
+            if ok:
+                applied.append(rel)
+                continue
+            missed.append("%s (%s)" % (rel, " ".join(out.split())[:100]))
+            git(folder, "reset", "-q", "--", rel)
+            if git(folder, "cat-file", "-e", "HEAD:%s" % rel)[0]:
+                git(folder, "checkout", "HEAD", "--", rel)
+            else:
+                try:
+                    os.remove(os.path.join(folder, rel))
+                except OSError:
+                    pass
+        if not applied:
+            print("%s: nothing applied. Left out: %s" % (n, "; ".join(missed)))
+            status = 1
+            continue
+        problems = orthros.preflight(n)
+        if problems:
+            git(folder, "reset", "--hard", "-q", before)
+            git(folder, "clean", "-fdq")
+            print("%s: the patched version fails its checks, so it was put back: %s"
+                  % (n, "; ".join(problems)[:300]))
+            status = 1
+            continue
+        sha = commit_all(folder, "Orthros: operator patch %s" % os.path.basename(patch_path))
+        me = orthros.agent(n)
+        if sha not in me["goods"]:
+            me["goods"].append(sha)
+            git(folder, "tag", "-f", "orthros/proven-%d" % len(me["goods"]), sha)
+        me["good"], me["pending"], me["weak_streak"] = sha, [], 0
+        print("%s: applied %d file(s), passed its checks, now proven at %s.%s"
+              % (n, len(applied), short(sha),
+                 (" Left out: " + "; ".join(missed)) if missed else ""))
+        if missed:
+            status = 1
+    orthros.save()
+    return status
+
+
 def write_evolution(root, state):
     """EVOLUTION.md: the story so far, for anyone following the project."""
     agents = state.get("agents") or {}
@@ -1404,11 +2142,16 @@ def main():
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--export", nargs="?", const="A", choices=NAMES,
                         help="copy an agent's newest proven version into agent\\ and exit")
+    parser.add_argument("--apply-patch", metavar="PATCH",
+                        help="apply a `git diff --relative=agent` of agent\\ to both live "
+                             "agents, check it, and count it as proven")
     args = parser.parse_args()
     if args.fake_agent:
         return fake_agent(args.minutes)
     if args.export:
         return export(HERE, args.export)
+    if args.apply_patch:
+        return apply_patch(HERE, args.apply_patch)
     if not args.simulate and not all(os.path.isdir(os.path.join(HERE, "OrthrosCode %s" % n, ".git"))
                                      for n in NAMES):
         print("The two agents are not set up yet. Run SETUP.bat first (see README.md).")
@@ -1428,10 +2171,22 @@ def main():
     print("Close this window to stop Orthros. A session in progress finishes on its own.")
     if not args.no_browser:
         webbrowser.open(url)
-    threading.Thread(target=orthros.loop, daemon=True).start()
+    loop = threading.Thread(target=orthros.loop, daemon=True)
+    loop.start()
+    if orthros.settings.get("gpu_telemetry", True):
+        threading.Thread(target=orthros.watch_gpu, daemon=True).start()
     try:
         while True:
-            time.sleep(3600)
+            time.sleep(15)
+            if not loop.is_alive():
+                # The loop catches what it can; this is for what it cannot.
+                # A dead loop thread leaves a page that looks alive and a
+                # machine that does nothing.
+                orthros.event("Orthros's loop stopped unexpectedly; starting it again", "bad")
+                orthros.pause("Orthros's own loop died and was restarted. Look at the console "
+                              "window for the traceback, then press Start.", error=True)
+                loop = threading.Thread(target=orthros.loop, daemon=True)
+                loop.start()
     except KeyboardInterrupt:
         return 0
 

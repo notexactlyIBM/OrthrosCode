@@ -6,10 +6,26 @@ session, so it is where the engine dies and where the reply runs out of room.
 """
 
 from ralph_common import (BRAINSTORM_ROUNDS, BRAINSTORM_UNTIL, MAX_REFILLS, more_refills, say)
+from ralph_prompts import compose_refill_prompt
 from ralph_rounds import refill_list
-from ralph_tasks import mark_decomposed, milestones, open_tasks
+from ralph_tasks import (drop_reparked, mark_decomposed, milestones, normalize_checkboxes,
+    normalize_plan, open_tasks, park_milestone)
 
 import status
+
+
+def refill_temperature(mode, code, brainstorm):
+    """How warm a refill round runs, by what it is for.
+
+    Planning and briefs invent: warm, for range. Checking finished work is
+    reading code for faults: cold, like writing it. Breaking a milestone
+    into steps is some of each.
+    """
+    if mode == "verify":
+        return code
+    if mode == "decompose":
+        return round((code + brainstorm) / 2, 2)
+    return brainstorm
 
 
 class RefillMixin:
@@ -20,8 +36,11 @@ class RefillMixin:
         Rather than hand back an hour of unused budget, ask for the next work
         and carry on.
         """
-        if self.single_shot or (MAX_REFILLS and self.refills >= MAX_REFILLS) or left < 120:
+        if self.single_shot or (MAX_REFILLS and self.refills >= MAX_REFILLS):
             self.stop("Every item is ticked. Done.")
+            return False
+        if left < 120:
+            self.stop("Time is up: under two minutes left, too little for a refill.")
             return False
         self.refills += 1
         say("-" * 62)
@@ -31,9 +50,10 @@ class RefillMixin:
                      else "round %d" % self.refills))
         say("-" * 62)
         before = len(open_tasks(self.notes_path))
-        # Warm for this. Inventing work at the temperature that writes good
-        # diffs returns the same four safe ideas every time.
-        self.set_temperature(self.temp_brainstorm)
+        # Warm for inventing work: at the temperature that writes good diffs
+        # it returns the same four safe ideas every time. Cold for checking.
+        mode = compose_refill_prompt(self.notes_path, self.refills)[2]
+        self.set_temperature(refill_temperature(mode, self.temp_code, self.temp_brainstorm))
         status.phase("planning", "looking for the next work")
         try:
             result, source, mode, milestone = refill_list(
@@ -43,6 +63,15 @@ class RefillMixin:
             self.set_temperature(self.temp_code)
         self.count_tokens(result)
         self.note("  %s: %s" % (mode, source))
+        # Items and milestones written in nearly the right form count.
+        fixed = (normalize_plan(self.plan_path) if mode == "plan"
+                 else normalize_checkboxes(self.notes_path))
+        if fixed:
+            self.note("  put %d loosely written %s into the usual form"
+                      % (fixed, "milestone(s)" if mode == "plan" else "item(s)"))
+        again = drop_reparked(self.notes_path)
+        if again:
+            self.note("  dropped %d item(s) that repeat ones already parked" % again)
         added = len(open_tasks(self.notes_path)) - before
         if added > 0:
             return self.refill_added(added, milestone, left)
@@ -54,6 +83,8 @@ class RefillMixin:
             if fresh:
                 self.note("Planned %d milestone(s). Breaking the first one down." % fresh)
                 self.refill_retries = 0
+                self.empty_refills = 0
+                self.mark_checkpoint()          # planning is progress too
                 return True
 
         # An empty refill used to mean one thing -- out of ideas -- and was
@@ -63,19 +94,42 @@ class RefillMixin:
             return self.refill_engine_died(result, left)
         if result.symptom == "context":
             return self.refill_out_of_room(result, left)
+        return self.refill_came_back_empty(result, mode, milestone, left)
+
+    def refill_came_back_empty(self, result, mode, milestone, left):
+        """A refill that ran and added nothing, or was killed on the clock. False to stop.
+
+        Both used to end the session on the spot -- one of them without even
+        saying why. Another brief is a different prompt and a different
+        answer, so try that; a milestone twice made nothing of is set aside.
+        """
+        self.empty_refills += 1
         if not result.ran:
-            self.note_tail(result, "The review round was killed after %ds"
+            self.note_tail(result, "The refill round was killed after %ds"
                            % self.iteration_timeout)
+        else:
+            self.note_tail(result, "The refill round finished but added nothing")
+        if milestone and mode == "decompose":
+            misses = self.milestone_misses[milestone] = self.milestone_misses.get(milestone, 0) + 1
+            if misses >= 2 and park_milestone(self.plan_path, milestone,
+                                              "two refills could not make items of it"):
+                self.note("  set the milestone aside: %s" % milestone[:60])
+        if self.empty_refills >= 4:
+            self.stop("Four refills in a row added nothing. Stopping.")
             return False
+        if more_refills(self.refills) and left > 180:
+            self.note("Trying the next brief.")
+            return True
         self.stop("It could not think of anything else. Stopping.")
-        self.note_tail(result, "The review round finished but added nothing")
         return False
 
     def refill_added(self, added, milestone, left):
+        """New items are on the list: reset the counters. Returns False to stop."""
         self.note("Added %d new item(s)." % added)
         self.refill_retries = 0
         self.empty_refills = 0
         self.engine_streak = 0     # it answered; the run is alive
+        self.mark_checkpoint()     # new work is progress: the next look starts here
         # Mark it done *here*, before anything below can jump back to the top
         # of the loop. Its items are on the list, which is the whole definition
         # of broken down. The brainstorm check used to return early past this,
@@ -98,6 +152,7 @@ class RefillMixin:
         return True
 
     def refill_engine_died(self, result, left):
+        """The engine went down during a refill. Returns False to stop."""
         self.engine_failures += 1
         self.engine_streak += 1
         self.note_tail(result, "The engine died during the review round")
@@ -133,6 +188,7 @@ class RefillMixin:
         return False
 
     def refill_out_of_room(self, result, left):
+        """A refill that ran out of room. Returns False to stop."""
         # Same distinction the working rounds make: a reply cut off at 42% of
         # the window did not outgrow the window. It outgrew the ceiling we set,
         # and shrinking that ceiling is what turned one failed review into
@@ -166,4 +222,5 @@ class RefillMixin:
         if more_refills(self.refills) and left > 180:
             self.note("Moving on to the next brief.")
             return True
+        self.stop("Out of time to try another brief after a refill ran out of room.")
         return False

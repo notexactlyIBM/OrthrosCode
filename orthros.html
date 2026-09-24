@@ -52,6 +52,23 @@ label { color: var(--dim); font-size: 13px; display: flex; gap: 6px; align-items
   border: 1px solid var(--line); background: var(--card); white-space: pre-wrap; font-size: 13px; }
 .banner.show { display: block; }
 .banner.error { border-color: var(--bad); }
+.banner.alarm { border: 2px solid var(--bad); color: var(--bad); font-weight: 600; animation: alarm 1.2s infinite; }
+@keyframes alarm { 50% { background: color-mix(in srgb, var(--bad) 14%, var(--card)); } }
+
+.row2 { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 12px; }
+.row2 .card { margin-top: 12px; }
+#gpu { width: 100%; height: 230px; display: block; }
+.gpustat { color: var(--dim); font-size: 12px; font-variant-numeric: tabular-nums; min-height: 18px; }
+.gpustat b { color: var(--ink); font-weight: 600; }
+.cardhead { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.cardhead h2 { margin: 0; }
+.cardhead .sp { flex: 1; }
+.cardhead select, .cardhead label { font-size: 12px; padding: 3px 6px; }
+.term { background: #0b0d10; color: #c9d1d9; font: 12px/1.45 ui-monospace, Consolas, "Cascadia Mono", monospace;
+  height: 268px; overflow: auto; margin: 0; padding: 10px 12px; border-radius: 8px; white-space: pre-wrap;
+  overflow-wrap: anywhere; border: 1px solid var(--line); }
+.termfile { color: var(--dim); font-size: 12px; font-family: ui-monospace, Consolas, monospace;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 45%; }
 
 .agents { display: grid; grid-template-columns: 1fr auto 1fr; gap: 12px; align-items: stretch; }
 .agent { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px;
@@ -94,6 +111,18 @@ label { color: var(--dim); font-size: 13px; display: flex; gap: 6px; align-items
 .k.start { background: var(--a); }
 .empty { color: var(--dim); font-size: 13px; }
 
+.chatlog { max-height: 280px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+.msg { max-width: 85%; padding: 8px 11px; border-radius: 10px; font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.msg.you { align-self: flex-end; background: var(--ink); color: var(--bg); }
+.msg.orthros { align-self: flex-start; background: var(--track); }
+.msg time { display: block; font-size: 11px; opacity: .6; margin-top: 2px; }
+.ask { display: flex; gap: 8px; flex-wrap: wrap; align-items: stretch; }
+.ask textarea { flex: 1 1 260px; min-width: 0; font: inherit; color: var(--ink); background: var(--card);
+  border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; resize: vertical; min-height: 38px; }
+.ask .btns { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.hint { color: var(--dim); font-size: 12px; margin-top: 8px; }
+
+@media (max-width: 800px) { .row2 { grid-template-columns: 1fr; } }
 @media (max-width: 700px) {
   .agents { grid-template-columns: 1fr; }
   .swap { transform: rotate(90deg); height: 20px; }
@@ -127,6 +156,34 @@ label { color: var(--dim); font-size: 13px; display: flex; gap: 6px; align-items
     <section class="agent" id="agentB" style="--c: var(--b)"></section>
   </div>
 
+  <div class="row2">
+    <section class="card">
+      <div class="cardhead"><h2>GPU</h2><span class="sp"></span></div>
+      <canvas id="gpu" aria-label="The GPU as a slowly turning lattice: the share of points lit is how busy the card is"></canvas>
+      <div class="gpustat" id="gpustat">waiting for readings…</div>
+    </section>
+    <section class="card">
+      <div class="cardhead"><h2>Raw output</h2><span class="termfile" id="termFile"></span><span class="sp"></span>
+        <select id="termAgent" title="Whose turn log to show"><option value="auto">running agent</option><option>A</option><option>B</option></select>
+        <label><input type="checkbox" id="termFollow" checked> follow</label></div>
+      <pre class="term" id="term" aria-live="off">No output yet.</pre>
+    </section>
+  </div>
+
+  <section class="card">
+    <h2>Talk to Orthros</h2>
+    <div class="chatlog" id="chatlog"><div class="empty">Ask how it is going, or suggest where the work should go next.</div></div>
+    <div class="ask">
+      <textarea id="chatText" rows="2" placeholder="e.g. how is it going?  /  what went wrong?  /  make research cache its results"></textarea>
+      <div class="btns">
+        <button class="primary" id="askBtn" title="A plain answer from Orthros's own records">Ask</button>
+        <button id="directBtn" title="Put this at the top of the chosen agent's task list">Suggest direction</button>
+        <label>for <select id="chatTarget"><option value="both">both</option><option>A</option><option>B</option></select></label>
+      </div>
+    </div>
+    <div class="hint" id="chatHint">Directions go first on the chosen agent's task list, which its twin works through. If a turn is using that list, they wait for the turn to end.</div>
+  </section>
+
   <section class="card">
     <h2>Balance</h2>
     <div class="share"><span>Time</span><div class="split" id="timeSplit"><i></i><i></i></div><span class="val" id="timeVal"></span></div>
@@ -150,7 +207,7 @@ const fmtT = (s) => { s = Math.max(0, Math.round(s || 0)); const h = Math.floor(
   return h ? `${h}h ${m}m` : `${m}m`; };
 const hhmm = (t) => new Date(t * 1000).toTimeString().slice(0, 5);
 const PHASES = { idle: "Idle", paused: "Paused", running: "Running", handover: "Handing over", error: "Needs attention" };
-let minutesTouched = false, swapTurn = 0, lastRunning = null;
+let minutesTouched = false, swapTurn = 0, lastRunning = null, lastAlert = null, lastState = null, gpuState = null;
 
 async function post(path, body) {
   try { const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
@@ -228,8 +285,19 @@ function render(d) {
   const pill = $("#pill"); pill.className = "pill " + d.phase;
   $("#phase").textContent = (PHASES[d.phase] || d.phase) + (d.simulate ? " (simulation)" : "");
   $("#sub").textContent = d.running ? `${d.running.agent} is improving ${d.running.agent === "A" ? "B" : "A"}` : "A improves B, B improves A";
-  const b = $("#banner"); const msg = d.message && (d.phase === "error" || d.phase === "paused") ? d.message : "";
-  b.textContent = msg; b.className = "banner" + (msg ? " show" : "") + (d.phase === "error" ? " error" : "");
+  const b = $("#banner"); const alert = d.alert && d.paused ? d.alert : null;
+  const msg = alert ? `Orthros needs you (${hhmm(alert[0])}): ${alert[1]}\nIt has written ORTHROS-NEEDS-YOU.txt too. Press Start once it is dealt with.`
+    : d.backoff ? `The machine was not ready. Trying again in ${fmtLeft(d.backoff)}.`
+    : d.message && (d.phase === "error" || d.phase === "paused") ? d.message : "";
+  b.textContent = msg; b.className = "banner" + (msg ? " show" : "") + (alert ? " alarm" : d.phase === "error" ? " error" : "");
+  document.title = alert ? "\u26a0 Orthros needs you" : d.running ? `Orthros \u00b7 ${d.running.agent} working` : "Orthros";
+  if (alert && alert[0] !== lastAlert) {
+    lastAlert = alert[0];
+    if ("Notification" in window && Notification.permission === "granted")
+      new Notification("Orthros needs you", { body: alert[1].slice(0, 200) });
+  }
+  gpuState = d.gpu; renderGpuStat(d);
+  lastState = d;
   const active = !d.paused || !!d.running;
   $("#start").disabled = active; $("#first").disabled = active;
   $("#pause").disabled = !active || !!d.stop_mode; $("#stop").disabled = !d.running || d.stop_mode === "now" || d.stop_mode === "force";
@@ -245,9 +313,139 @@ function render(d) {
   const A = d.agents.A, B = d.agents.B;
   split($("#timeSplit"), $("#timeVal"), A.seconds, B.seconds, fmtT);
   split($("#tokSplit"), $("#tokVal"), A.tokens, B.tokens, fmtN);
+  renderChat(d.chat || [], d.directions || 0);
   $("#events").innerHTML = d.events.length ? d.events.map(([t, text, kind]) =>
     `<li><time>${hhmm(t)}</time><span class="k ${esc(kind)}"></span><span>${esc(text)}</span></li>`).join("")
     : '<li class="empty">Nothing yet. Press Start.</li>';
+}
+
+// ------------------------------------------------------------------ GPU view
+// A lattice of points turning slowly. The share of points lit is the card's
+// utilization as nvidia-smi reports it (how much of the time kernels are
+// running) -- a picture of how busy it is, not a count of cores. The lit
+// points shift as it works, faster when tokens are flowing, and the tinted
+// plane rises with memory in use.
+const N = 7, PTS = [];
+for (let x = 0; x < N; x++) for (let y = 0; y < N; y++) for (let z = 0; z < N; z++)
+  PTS.push([x / (N - 1) * 2 - 1, y / (N - 1) * 2 - 1, z / (N - 1) * 2 - 1]);
+const ORDER = PTS.map((_, i) => i);
+for (let i = ORDER.length - 1, seed = 7; i > 0; i--) { seed = (seed * 16807) % 2147483647;
+  const j = seed % (i + 1); [ORDER[i], ORDER[j]] = [ORDER[j], ORDER[i]]; }
+const EDGES = [[0,1],[1,3],[3,2],[2,0],[4,5],[5,7],[7,6],[6,4],[0,4],[1,5],[2,6],[3,7]];
+const CORNERS = [0, 1].flatMap((x) => [0, 1].flatMap((y) => [0, 1].map((z) => [x * 2 - 1, y * 2 - 1, z * 2 - 1])));
+const still = matchMedia("(prefers-reduced-motion: reduce)");
+let angle = 0.6, phase = 0, lastT = 0;
+const cvs = $("#gpu"), ctx = cvs.getContext("2d");
+
+function color(name, alpha) {
+  const c = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  if (alpha === undefined || !c.startsWith("#")) return c;
+  const n = parseInt(c.length === 4 ? c.slice(1).split("").map((h) => h + h).join("") : c.slice(1), 16);
+  return `rgba(${n >> 16 & 255},${n >> 8 & 255},${n & 255},${alpha})`;
+}
+
+function drawGpu(t) {
+  requestAnimationFrame(drawGpu);
+  if (document.hidden) { lastT = t; return; }
+  const dt = Math.min(100, t - (lastT || t)); lastT = t;
+  const g = gpuState || {}, util = Math.max(0, Math.min(100, g.util || 0));
+  const tps = (lastState && lastState.live && lastState.live.tok_per_sec) || 0;
+  if (!still.matches) angle += dt * 0.00011;                 // about a minute a turn
+  phase += dt * (0.0015 + util / 100 * 0.004 + Math.min(tps, 60) * 0.0002);
+  const dpr = window.devicePixelRatio || 1, w = cvs.clientWidth, h = cvs.clientHeight;
+  if (cvs.width !== Math.round(w * dpr) || cvs.height !== Math.round(h * dpr)) {
+    cvs.width = Math.round(w * dpr); cvs.height = Math.round(h * dpr); }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, w, h);
+  const ca = Math.cos(angle), sa = Math.sin(angle), tilt = 0.42, ct = Math.cos(tilt), st = Math.sin(tilt);
+  const scale = Math.min(w, h) * 0.3, cx = w / 2, cy = h / 2;
+  const project = ([x, y, z]) => { const x1 = x * ca + z * sa, z1 = -x * sa + z * ca;
+    const y1 = y * ct - z1 * st, z2 = y * st + z1 * ct, p = 3.4 / (3.4 + z2);
+    return [cx + x1 * scale * p, cy - y1 * scale * p, z2, p]; };
+  // memory: a tinted plane that rises with what is in use
+  const mem = g.mem_total ? Math.max(0, Math.min(1, g.mem_used / g.mem_total)) : 0;
+  if (mem) { const yy = mem * 2 - 1, quad = [[-1, yy, -1], [1, yy, -1], [1, yy, 1], [-1, yy, 1]].map(project);
+    ctx.beginPath(); quad.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)); ctx.closePath();
+    ctx.fillStyle = color("--b", 0.13); ctx.fill(); }
+  const corners = CORNERS.map(project);
+  ctx.strokeStyle = color("--line"); ctx.lineWidth = 1;
+  for (const [a, b] of EDGES) { ctx.beginPath(); ctx.moveTo(corners[a][0], corners[a][1]); ctx.lineTo(corners[b][0], corners[b][1]); ctx.stroke(); }
+  const lit = new Set(), n = Math.round(util / 100 * PTS.length), shift = Math.floor(phase) * 37;
+  for (let i = 0; i < n; i++) lit.add(ORDER[(i + shift) % PTS.length]);
+  const shown = PTS.map((p, i) => [...project(p), lit.has(i)]).sort((a, b) => b[2] - a[2]);
+  const on = color("--a"), off = color("--dim", 0.35);
+  for (const [x, y, z, p, isLit] of shown) {
+    ctx.globalAlpha = isLit ? 0.55 + 0.45 * (1 - (z + 1.8) / 3.6) : 0.7;
+    ctx.fillStyle = isLit ? on : off;
+    ctx.beginPath(); ctx.arc(x, y, (isLit ? 2.6 : 1.3) * p, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+requestAnimationFrame(drawGpu);
+
+function renderGpuStat(d) {
+  const g = d.gpu, el = $("#gpustat");
+  if (!g) { el.textContent = "No readings: nvidia-smi was not found or did not answer."; return; }
+  const gb = (m) => m == null ? "?" : (m / 1024).toFixed(1);
+  const bits = [`<b>${Math.round(g.util || 0)}%</b> busy`, `${gb(g.mem_used)} of ${gb(g.mem_total)} GB`];
+  if (g.temp != null) bits.push(`${Math.round(g.temp)}°C`);
+  if (g.power != null) bits.push(`${Math.round(g.power)} W`);
+  if (d.live && d.live.tok_per_sec) bits.push(`${d.live.tok_per_sec} tok/s`);
+  el.innerHTML = `${esc(g.name || "GPU")} · ` + bits.join(" · ");
+}
+
+// ------------------------------------------------------------------ raw output
+// Read-only: the running turn's log as it is written -- what the agent and
+// aider print, the model's replies included. Nothing typed here goes anywhere.
+let term = { agent: null, file: "", offset: -1, text: "" }, termBusy = false;
+async function pollTerm() {
+  if (termBusy || document.hidden) return;
+  const pick = $("#termAgent").value;
+  const agent = pick !== "auto" ? pick : (lastState && lastState.running ? lastState.running.agent
+    : lastState ? (lastState.agents.A.last && lastState.agents.B.last &&
+      (lastState.agents.B.last.started || 0) > (lastState.agents.A.last.started || 0) ? "B" : "A") : "A");
+  if (agent !== term.agent) term = { agent, file: "", offset: -1, text: "" };
+  termBusy = true;
+  try {
+    const r = await (await fetch(`/api/tail?agent=${agent}&file=${encodeURIComponent(term.file)}&offset=${term.offset}`)).json();
+    if (r.reset) term.text = "";
+    term.file = r.file; term.offset = r.offset;
+    $("#termFile").textContent = r.file ? `${r.file}${r.live ? " · live" : ""}` : `no log yet for ${agent}`;
+    if (r.text || r.reset) {
+      term.text = (term.text + r.text).slice(-160000);
+      const box = $("#term"), atEnd = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
+      box.textContent = term.text || "No output yet.";
+      if ($("#termFollow").checked && (atEnd || r.reset)) box.scrollTop = box.scrollHeight;
+    }
+  } catch (e) { /* the state poll reports a dead Orthros */ }
+  termBusy = false;
+}
+$("#termAgent").addEventListener("change", () => { term.agent = null; pollTerm(); });
+setInterval(pollTerm, 1000);
+
+let chatShown = "";
+function renderChat(chat, waiting) {
+  const key = JSON.stringify(chat) + waiting;
+  if (key === chatShown) return;
+  chatShown = key;
+  const log = $("#chatlog");
+  const atEnd = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+  log.innerHTML = chat.length ? chat.map(([t, who, text]) =>
+    `<div class="msg ${who === "you" ? "you" : "orthros"}">${esc(text)}<time>${hhmm(t)}</time></div>`).join("")
+    : '<div class="empty">Ask how it is going, or suggest where the work should go next.</div>';
+  if (waiting) log.innerHTML += `<div class="empty">${waiting} direction${waiting > 1 ? "s" : ""} waiting for the running turn to end.</div>`;
+  if (atEnd) log.scrollTop = log.scrollHeight;
+}
+
+async function sendChat(kind) {
+  const box = $("#chatText"), text = box.value.trim();
+  if (!text) { box.focus(); return; }
+  $("#askBtn").disabled = $("#directBtn").disabled = true;
+  const r = await post("/api/chat", { text, kind, target: $("#chatTarget").value });
+  $("#askBtn").disabled = $("#directBtn").disabled = false;
+  if (r.error) { $("#chatHint").textContent = "Could not send: " + r.error; return; }
+  box.value = "";
+  renderChat(r.chat || [], 0); $("#chatlog").scrollTop = $("#chatlog").scrollHeight;
+  tick();
 }
 
 async function tick() {
@@ -257,10 +455,15 @@ async function tick() {
 
 $("#minutes").addEventListener("input", () => { minutesTouched = true; });
 $("#minutes").addEventListener("change", () => post("/api/settings", { session_minutes: +$("#minutes").value }));
-$("#start").onclick = async () => { await post("/api/start", { first: $("#first").value, minutes: +$("#minutes").value }); minutesTouched = false; tick(); };
+$("#start").onclick = async () => {
+  // Asked here, on a click, so that a surrender at 3am can reach the desktop.
+  if ("Notification" in window && Notification.permission === "default") Notification.requestPermission(); await post("/api/start", { first: $("#first").value, minutes: +$("#minutes").value }); minutesTouched = false; tick(); };
 $("#pause").onclick = async () => { await post("/api/pause"); tick(); };
 $("#stop").onclick = async () => { await post("/api/stop"); tick(); };
 $("#force").onclick = async () => { if (confirm("Kill the running agent now? Its current round is lost.")) { await post("/api/force"); tick(); } };
+$("#askBtn").onclick = () => sendChat("ask");
+$("#directBtn").onclick = () => sendChat("direct");
+$("#chatText").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat("ask"); } });
 tick(); setInterval(tick, 2000);
 </script>
 </body>

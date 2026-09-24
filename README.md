@@ -13,8 +13,7 @@ break one are rolled back.
 
 Everything runs on your machine, and every step is a git commit you can read.
 
-![Image]([https://i.imgur.com/zQBjZMC.jpeg](https://i.imgur.com/OtYb2lp.jpeg))
-
+![Image](https://i.imgur.com/OtYb2lp.jpeg)
 ## At a glance
 
 - **Two modes.** *Work on a task* builds a project you describe. *Improve each

@@ -33,6 +33,7 @@ task list and stops; the loop answers before the next round:
     OUTLINE: <file>        every class and def line in it         -> FOUND.md
     DOCS: <module>         an installed library's own docs        -> FOUND.md
     DIGEST: <file> -- <question>   a file too big to send, in parts -> FOUND.md
+    TESTS: <test_file>     one test file run on its own           -> FOUND.md
 
 The list is `REQUESTS` in `ralph_tools.py`; each round's prompt gets every
 request on it that `RALPH_PROMPT.md` does not already mention.

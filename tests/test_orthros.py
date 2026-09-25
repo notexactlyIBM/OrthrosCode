@@ -114,6 +114,11 @@ class TestJudging(Sandbox):
         self.o.judge(self.result("A"))
         self.assertEqual(self.notes("A").count("stopped itself"), 1)
 
+    def test_a_practice_that_ends_early_is_not_an_early_stop(self):
+        self.o.note_early_stop("A", self.result(
+            "A", kind="practice", reason="It could not think of anything else. Stopping."))
+        self.assertNotIn("stopped itself", self.notes("A"))
+
     def test_a_full_turn_is_not_an_early_stop(self):
         self.o.judge(self.result("A", seconds=45 * 60, reason="Time is up after 45 minutes."))
         self.assertNotIn("stopped itself", self.notes("A"))

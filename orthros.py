@@ -108,9 +108,12 @@ GUARD_REFUSED = "Orthros guard: prompt too big"
 # The task list, plan and ledger an agent keeps about the one it works on.
 # They live in the folder being worked on but belong to the worker, so a
 # rollback of the code keeps them, and they are never carried across.
+# STOPS.md was missing and the 2026-09-25 export copied one into agent\;
+# LESSONS.summary.md is written by fold_old_lessons from that day on.
 MEMORY_FILES = ("orthros_tasks.md", "janus_tasks.md", "PLAN.md", "PROGRESS.md", "PROGRESS.old.md", "DONE.md",
                 "BRIEF.md", "CONVENTIONS.md", "RALPH_PROMPT.md", "RESEARCH.md",
-                "LESSONS.md", "FOUND.md", "FIELD_REPORT.md", "ROLLBACK.md", "GISTS.md")
+                "LESSONS.md", "LESSONS.summary.md", "STOPS.md", "FOUND.md", "FIELD_REPORT.md",
+                "ROLLBACK.md", "GISTS.md")
 FIELD_REPORT = "FIELD_REPORT.md"
 ROLLBACK_NOTE = "ROLLBACK.md"
 DIFF_NOTE_CHARS = 8000               # of the undone diff written into ROLLBACK.md
@@ -1296,6 +1299,11 @@ class Orthros:
         """
         reason = " ".join((result.get("reason") or "").split())
         planned = (result.get("minutes") or 0) * 60
+        # A practice that ends early has usually finished the exercise, and
+        # its hidden-test score already says how it went. Made a to-do for
+        # the twin, it asks for a fix to the loop for doing its job.
+        if result.get("kind") == "practice":
+            return
         if (not result["launched"] or not reason or reason.startswith(NORMAL_ENDS)
                 or (planned and result["seconds"] >= planned * 0.8)):
             return

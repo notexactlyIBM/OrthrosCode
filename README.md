@@ -322,6 +322,7 @@ becomes the record of how the agents evolved.
 | `DOCS: module` | an installed library's own documentation, offline |
 | `RESEARCH: question` | a web search and page fetch, in `RESEARCH.md` |
 | `DIGEST: file -- question` | a file too big for a round, read in parts, answer in `FOUND.md` |
+| `TESTS: test_file` | one of the project's test files run on its own, its output in `FOUND.md` |
 | **Locate** | an item naming no file asks which files first, from an outline of every module |
 | **Gists** | `GISTS.md`: every module in a few lines, for planning rounds |
 | **Warming retries** | each try at an item runs warmer, so the tries differ |

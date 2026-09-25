@@ -12,10 +12,13 @@ from ralph_checks import ensure_ignored, find_entry_point, full_check, keep_file
 from ralph_common import (ARCHIVE_FILE, BRIEF_FILE, CHECKPOINT_MINUTES, LOG_FILE, PLAN_FILE,
     PROMPT_FILE, RESEARCH_FILE, _env_int, read_text, say)
 from ralph_prompts import ensure_prompt, seed_sections
-from ralph_tools import FOUND_FILE
+from ralph_tools import FOUND_FILE, fold_old_lessons
 from ralph_tasks import (add_items, archive_done, done_count, ensure_conventions, extract_brief,
     find_notes_file, milestones, open_tasks, parked_count, progress_regressions,
     progress_summary, trim_notes)
+
+
+LESSONS_KEPT = _env_int("LC_RALPH_KEEP_LESSONS", 40)
 
 
 def last_line(text, first=False):
@@ -49,6 +52,11 @@ class SetupMixin:
         saved = trim_notes(notes_path)
         if saved:
             say("    trimmed %d bytes of old notes out of the task list" % saved)
+        # LESSONS.md goes whole into every refill round (ralph_rounds.py), and
+        # fold_old_lessons, written for this on 2026-09-24, was never called.
+        if fold_old_lessons(ws, keep=LESSONS_KEPT):
+            say("    folded lessons older than the newest %d into LESSONS.summary.md"
+                % LESSONS_KEPT)
 
         # Split the task list by who needs what, before anything is sent. The
         # queue goes in every round; the changelog and the brief go only to the

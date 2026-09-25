@@ -159,15 +159,21 @@ class OutcomeMixin:
         return False
 
     def _record_failure(self, result, ticked=0, touched=False):
-        """Record a lesson for a failed or inspection-only round. False to stop."""
+        """Record a lesson for a failed or inspection-only round.
+
+        The kind is remembered so the next round's prompt puts lessons of the
+        same kind first (relevant_lessons); it was recorded but never read.
+        """
         if result.symptom == "context" and not result.crowded:
             record_lesson(self.workspace,
                           "Reply was cut off at the ceiling with room to spare.",
                           kind="reply-cut-off")
+            self.last_failure_kind = "reply-cut-off"
         if ticked > 0 and not touched:
             record_lesson(self.workspace,
                           "Ticked without code change: %s" % self.current_task[:120],
                           kind="inspection-only")
+            self.last_failure_kind = "inspection-only"
 
     def park_stalled(self):
         """Three rounds with nothing to show: park the item. False to stop.

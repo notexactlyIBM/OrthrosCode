@@ -4,7 +4,8 @@ import os
 import tempfile
 import unittest
 
-from ralph_prompts import relevant_lessons, _lesson_kind
+from ralph_prompts import relevant_lessons
+from ralph_tools import lesson_kind as _lesson_kind
 
 
 class TestLessonKind(unittest.TestCase):
@@ -19,6 +20,10 @@ class TestLessonKind(unittest.TestCase):
     def test_unrelated_mention_not_matched(self):
         line = "- 2026-09-25 Parked: the reply-cut-off issue was discussed"
         self.assertEqual(_lesson_kind(line), "Parked")
+
+    def test_a_line_without_a_kind_has_none(self):
+        line = "- 2026-09-25 In `foo` (bar.py), the reply: cut off"
+        self.assertEqual(_lesson_kind(line), "")
 
 
 class TestKindBoost(unittest.TestCase):

@@ -98,6 +98,15 @@ class TestLoop(unittest.TestCase):
         self.assertEqual(status.read(self.ws).get("phase"), "finished")
         self.assertTrue(os.path.isfile(os.path.join(self.ws, "PROGRESS.md")))
 
+    def test_old_lessons_are_folded_before_the_first_round(self):
+        write_text(os.path.join(self.ws, "LESSONS.md"), "# Lessons\n\n" + "".join(
+            "- 2026-09-24 Parked: lesson %d\n" % i for i in range(60)))
+        self.run_quietly(self.session(review=lambda task, diff: ("accept", "fine")))
+        lessons = read_text(os.path.join(self.ws, "LESSONS.md"))
+        self.assertNotIn("lesson 19\n", lessons)
+        self.assertIn("lesson 20\n", lessons)
+        self.assertIn("Parked: 20", read_text(os.path.join(self.ws, "LESSONS.summary.md")))
+
     def test_dead_engine_stops_cleanly(self):
         self.env["FAKE_MODE"] = "dead"
         s = self.session()

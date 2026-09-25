@@ -119,7 +119,8 @@ class SendMixin:
     def send_round(self, task):
         """Build the prompt and the file list, run aider, record the numbers."""
         round_prompt = compose_round_prompt(self.workspace, self.prompt_path, self.broken,
-                                            cut_off=self.was_cut_off, task=task)
+                                            cut_off=self.was_cut_off, task=task,
+                                            last_failure_kind=self.last_failure_kind)
         # Only the files this item names, so a multi-module project does not
         # pay for all of itself on every round.
         self.set_temperature(attempt_temperature(self.rounds_on_task, self.temp_code,

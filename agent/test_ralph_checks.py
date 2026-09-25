@@ -12,17 +12,29 @@ if HERE not in sys.path:
 
 
 class TestSmokeRun(unittest.TestCase):
-    def test_silent_noop_is_unhealthy(self):
-        """A script that exits 0 but prints nothing is not a healthy start."""
+    def test_a_quiet_clean_exit_is_healthy(self):
+        """doctest.testmod() prints nothing when every example passes."""
         from ralph_checks import smoke_run
         with tempfile.TemporaryDirectory() as tmp:
-            script = os.path.join(tmp, "silent.py")
+            script = os.path.join(tmp, "quiet.py")
             with open(script, "w") as f:
-                f.write("import sys\nsys.exit(0)\n")
+                f.write('def add(a, b):\n    """\n    >>> add(1, 2)\n    3\n    """\n'
+                        '    return a + b\n\n\nif __name__ == "__main__":\n'
+                        '    import doctest\n    doctest.testmod()\n')
+            with mock.patch("ralph_checks.find_project_python", return_value=sys.executable):
+                ok, msg = smoke_run(tmp, script, seconds=5)
+            self.assertTrue(ok, msg)
+
+    def test_a_traceback_is_a_crash(self):
+        from ralph_checks import smoke_run
+        with tempfile.TemporaryDirectory() as tmp:
+            script = os.path.join(tmp, "broken.py")
+            with open(script, "w") as f:
+                f.write("undefined_name()\n")
             with mock.patch("ralph_checks.find_project_python", return_value=sys.executable):
                 ok, msg = smoke_run(tmp, script, seconds=5)
             self.assertFalse(ok)
-            self.assertIn("no output", msg)
+            self.assertIn("NameError", msg)
 
     def test_normal_exit_is_healthy(self):
         """A script that exits 0 and prints something is healthy."""

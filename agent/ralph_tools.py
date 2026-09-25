@@ -311,16 +311,20 @@ def lessons_path(workspace):
     return os.path.join(workspace, LESSONS_FILE)
 
 
-def _lesson_kind(line):
-    """The failure kind at the start of a lesson line, or 'unknown'."""
-    parts = line.strip().lstrip("-").strip().split(None, 2)
-    if len(parts) >= 2 and re.match(r"^\d{4}-\d{2}-\d{2}$", parts[0]):
-        token = parts[1]
-        if token.endswith(":"):
-            return token[:-1] or "unknown"
-        if len(parts) >= 3 and parts[2].startswith(":"):
-            return token or "unknown"
-    return "unknown"
+# "- 2026-09-25 Reviewer rejected: In `add` ..." -> "Reviewer rejected". Short,
+# so a lesson with no kind does not make one of its first clause.
+LESSON_KIND = re.compile(r"^- \d{4}-\d{2}-\d{2} ([A-Za-z][\w -]{0,30}?): ")
+
+
+def lesson_kind(line):
+    """The kind a lesson line starts with, after its date, or '' if none.
+
+    One parser for both uses: ranking lessons of the latest failure first
+    (ralph_prompts.py) and counting folded ones (fold_old_lessons). They had
+    one each, and the folding one counted "Reviewer rejected" as unknown.
+    """
+    match = LESSON_KIND.match(line.strip())
+    return match.group(1) if match else ""
 
 
 def _summary_counts(path):
@@ -372,7 +376,7 @@ def fold_old_lessons(workspace, keep=25):
 
     counts = _summary_counts(os.path.join(workspace, "LESSONS.summary.md"))
     for line in old_lines:
-        kind = _lesson_kind(line)
+        kind = lesson_kind(line) or "unknown"
         counts[kind] = counts.get(kind, 0) + 1
     _write_summary(os.path.join(workspace, "LESSONS.summary.md"), counts)
 

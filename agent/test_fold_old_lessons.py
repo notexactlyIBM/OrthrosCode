@@ -27,6 +27,14 @@ class TestFoldOldLessons(unittest.TestCase):
             for kind in ("old-kind-0", "old-kind-1", "old-kind-2"):
                 self.assertIn("%s: " % kind, summary)
 
+    def test_a_two_word_kind_is_counted_as_itself(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            for i in range(30):
+                record_lesson(workspace, "Reviewer rejected: item %d -- wrong" % i)
+            fold_old_lessons(workspace)
+            summary = open(os.path.join(workspace, "LESSONS.summary.md"), encoding="utf-8").read()
+            self.assertIn("- Reviewer rejected: 5", summary)
+
 
 if __name__ == "__main__":
     unittest.main()

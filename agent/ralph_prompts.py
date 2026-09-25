@@ -4,7 +4,7 @@ import os
 import re
 from ralph_common import (HEADING_LINE, PLAN_FILE, PROMPT_FILE, RESEARCH_FILE, ROUND_FILE,
     SEED_HEADINGS, TASK_DONE_LINE, TERSE, read_text, say, write_text)
-from ralph_tools import lessons_path, unlisted_requests
+from ralph_tools import lesson_kind, lessons_path, unlisted_requests
 from ralph_tasks import (brief_path, next_milestone, open_tasks, progress_regressions,
     progress_summary)
 
@@ -441,20 +441,6 @@ def _identifiers(text):
     return found
 
 
-_KIND_RE = re.compile(r"^- \d{4}-\d{2}-\d{2} (.+?): ")
-
-
-def _lesson_kind(line):
-    """The kind prefix of a lesson line, or '' if none.
-
-    A line like '- 2026-09-25 reply-cut-off: In ...' has kind 'reply-cut-off'.
-    Only the first word after the date counts, so a lesson that merely
-    mentions the kind later in its body is not matched.
-    """
-    m = _KIND_RE.match(line)
-    return m.group(1) if m else ""
-
-
 def relevant_lessons(workspace, task, most=5, last_failure_kind=""):
     """Score LESSONS.md lines by shared identifiers with `task`, return top `most`.
 
@@ -475,7 +461,7 @@ def relevant_lessons(workspace, task, most=5, last_failure_kind=""):
 
     def sort_key(pair):
         index, line = pair
-        tier = 0 if (last_failure_kind and _lesson_kind(line) == last_failure_kind) else 1
+        tier = 0 if (last_failure_kind and lesson_kind(line) == last_failure_kind) else 1
         return (tier, -score(line), -index)
 
     indexed = list(enumerate(lines))
@@ -483,7 +469,8 @@ def relevant_lessons(workspace, task, most=5, last_failure_kind=""):
     return [line for _, line in indexed[:most]]
 
 
-def compose_round_prompt(workspace, prompt_path, broken, cut_off=False, task=None):
+def compose_round_prompt(workspace, prompt_path, broken, cut_off=False, task=None,
+                         last_failure_kind=""):
     """The standing prompt, plus whatever the last round's output actually did.
 
     This is the only feedback the model gets about its own work -- every round
@@ -491,7 +478,8 @@ def compose_round_prompt(workspace, prompt_path, broken, cut_off=False, task=Non
     it will tick the box and move on.
 
     `task` is the current item's text; when given, lessons are ranked by
-    relevance to it rather than simply by recency.
+    relevance to it rather than simply by recency. Lessons of
+    `last_failure_kind`, the session's latest recorded failure, come first.
     """
     body = read_text(prompt_path)
     more = unlisted_requests(body)
@@ -521,7 +509,7 @@ def compose_round_prompt(workspace, prompt_path, broken, cut_off=False, task=Non
         for path, err in broken:
             head.append("    %s: %s" % (os.path.basename(path), err))
         head += [""]
-    lessons = relevant_lessons(workspace, task)
+    lessons = relevant_lessons(workspace, task, last_failure_kind=last_failure_kind)
     if lessons:
         head += ["# Lessons from earlier rounds -- do not repeat these", ""] + lessons + [""]
     if head:

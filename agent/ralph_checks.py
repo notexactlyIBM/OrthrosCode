@@ -109,9 +109,10 @@ def smoke_run(workspace, entry, seconds=6):
         proc.kill()
         proc.communicate()
         return True, ""
+    # A clean exit with nothing printed is healthy too. Failing it (tried
+    # 2026-09-24) flags every `if __name__ == "__main__": doctest.testmod()`
+    # or quiet batch script as crashing on startup, and rolls back each round.
     if proc.returncode == 0:
-        if not (out or "").strip():
-            return False, "exited 0 but produced no output -- a silent no-op is not a healthy start"
         return True, ""
     # A non-zero exit is not the same as a crash, and treating it as one only
     # ever worked because the only program this had checked was a game, which

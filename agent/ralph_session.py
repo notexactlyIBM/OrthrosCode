@@ -83,6 +83,7 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin):
         self.engine_failures = 0  # rounds lost to the engine since the last checkpoint
         self.engine_streak = 0    # consecutive rounds lost to the engine
         self.was_cut_off = False  # last round ran out of room part-way through
+        self.last_failure_kind = ""  # kind of the latest lesson recorded, ranked first
         self.lean = False         # the last prompt was refused as too big: send less
         self.fat_rounds = 0       # rounds lost to the prompt, not the reply
         self.brainstormed = 0     # generation rounds run back to back

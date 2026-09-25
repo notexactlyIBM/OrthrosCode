@@ -210,6 +210,13 @@ class TestLoopWithGit(unittest.TestCase):
         self.assertIn("repeat ones already parked", log)
         self.assertEqual(read_text(self.notes).count("- [!] In `add`"), 1)
 
+    def test_every_round_goes_in_the_ledger(self):
+        import ralph_ledger
+        self.run_session(lambda task, diff: ("reject", "not what was asked"))
+        went = dict(ralph_ledger.outcomes(os.path.join(self.ws, ralph_ledger.LEDGER_FILE), 0))
+        self.assertGreaterEqual(went.get("rejected by reviewer", 0), 2)
+        self.assertNotIn(ralph_ledger.LEDGER_FILE, self.git("status", "--short").stdout)
+
     def test_refill_then_work_rounds_tick_all_items(self):
         write_fake_aider(self.fake, "refilling_once")
         s = self.run_session(lambda task, diff: ("accept", "fine"))

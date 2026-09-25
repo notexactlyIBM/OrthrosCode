@@ -32,6 +32,7 @@ import os
 import random
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -115,6 +116,19 @@ MEMORY_FILES = ("orthros_tasks.md", "janus_tasks.md", "PLAN.md", "PROGRESS.md", 
                 "LESSONS.md", "LESSONS.summary.md", "STOPS.md", "FOUND.md", "FIELD_REPORT.md",
                 "ROLLBACK.md", "GISTS.md")
 FIELD_REPORT = "FIELD_REPORT.md"
+# One row per round from both agents (agent/ralph_ledger.py). Read here with
+# its own query, not by importing the agents' code, which they rewrite.
+LEDGER = "ledger.sqlite"
+ROUND_OUTCOMES = """SELECT CASE
+         WHEN symptom != '' THEN 'lost: ' || symptom
+         WHEN failed > 0 AND applied = 0 THEN 'edit did not apply'
+         WHEN broken != '' THEN 'broke a check'
+         WHEN caught != '' THEN 'caught by a check'
+         WHEN verdict = 'reject' THEN 'rejected by reviewer'
+         WHEN kept = 1 THEN 'kept'
+         ELSE 'no change'
+       END AS outcome, COUNT(*) AS n
+FROM rounds WHERE agent = ? AND at >= ? GROUP BY outcome ORDER BY n DESC, outcome"""
 ROLLBACK_NOTE = "ROLLBACK.md"
 DIFF_NOTE_CHARS = 8000               # of the undone diff written into ROLLBACK.md
 
@@ -612,7 +626,9 @@ class Orthros:
                 env[match.group(1)] = os.path.normpath(os.path.expandvars(value)) \
                     if "%~dp0" in match.group(2) else os.path.expandvars(value)
         env.update(LC_WORKSPACE=target, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8",
-                   LC_UNLOAD_ON_EXIT="1", LC_STOP_SERVER_ON_EXIT="1")
+                   LC_UNLOAD_ON_EXIT="1", LC_STOP_SERVER_ON_EXIT="1",
+                   ORTHROS_LEDGER=os.path.join(self.root, LEDGER), ORTHROS_AGENT=name,
+                   ORTHROS_KIND=kind)
         if tuned and self.settings.get("auto_tune", True):
             env.update({k: str(v) for k, v in self.tuner.settings().items() if k.startswith("LC_")})
         if kind != "self":
@@ -1072,6 +1088,9 @@ class Orthros:
                          "named them). Fix what a round sends, not the engine handling."
                          % ("{:,}".format(max(a for a, _ in sizes)),
                             "{:,}".format(sizes[0][1])))
+        went = self.round_outcomes(name, result["started"])
+        if went:
+            lines.append("Where the rounds went: %s." % ", ".join("%s %d" % o for o in went))
         rates = [float(m) for m in re.findall(r"([\d.]+) tok/sec", text)]
         if rates:
             lines.append("Typical speed: %.0f tok/sec." % sorted(rates)[len(rates) // 2])
@@ -1083,6 +1102,20 @@ class Orthros:
         if record:
             lines.append("General coding lately: " + record)
         self.field_note(name, "\n".join("- " + l for l in lines), when, bullets=True)
+
+    def round_outcomes(self, name, since):
+        """[(outcome, rounds)] for one agent's rounds since `since`, from the ledger."""
+        path = os.path.join(self.root, LEDGER)
+        if not os.path.isfile(path):
+            return []
+        try:
+            db = sqlite3.connect(path, timeout=10)
+            try:
+                return [tuple(r) for r in db.execute(ROUND_OUTCOMES, (name, since))]
+            finally:
+                db.close()
+        except sqlite3.Error:
+            return []
 
     def coding_record(self, name):
         """The measure that matters: practice scores and task turns, newest last."""

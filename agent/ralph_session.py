@@ -15,6 +15,7 @@ import time
 import traceback
 
 import ralph_common as common
+import ralph_ledger as ledger
 import status
 from ralph_checks import code_fingerprint, find_project_python, full_check
 from ralph_common import LOG_FILE, ROUNDS_IF_SMALL, TRANSCRIPT_FILE, say
@@ -83,6 +84,7 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin):
         self.engine_failures = 0  # rounds lost to the engine since the last checkpoint
         self.engine_streak = 0    # consecutive rounds lost to the engine
         self.was_cut_off = False  # last round ran out of room part-way through
+        self.temperature = None   # the last one set, if it could be
         self.last_failure_kind = ""  # kind of the latest lesson recorded, ranked first
         self.lean = False         # the last prompt was refused as too big: send less
         self.fat_rounds = 0       # rounds lost to the prompt, not the reply
@@ -150,6 +152,7 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin):
             return
         try:
             self._set_temperature(value)
+            self.temperature = value        # for the ledger
         except Exception as exc:
             self.note("  could not set temperature %.2f: %s" % (value, exc))
 
@@ -358,6 +361,7 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin):
         # check before this asks whether the code is well formed; none can ask
         # whether it does what the item said.
         rejected_now = False
+        verdict, why = "", ""
         diff = round_diff(ws, self.edit_files) if touched and not self.broken else ""
         moved = put_main_last(self.edit_files, diff) if diff else []
         if moved:
@@ -404,9 +408,12 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin):
 
         # Only ever commit a round that left the code runnable, so `git
         # revert` never lands on a broken snapshot.
-        if self.commit and touched and not self.broken:
+        kept = bool(self.commit and touched and not self.broken)
+        if kept:
             self.commit("LocalCoder ralph: round %d" % self.rounds)
             self.refresh_files()
+        self.ledger_round(result, touched, verdict, why, caught, after_done - before_done,
+                          kept, diff)
 
         handle_tool_requests(ws, notes_path, find_project_python(ws), ask=self.ask)
         status.update(ticked=done_count(notes_path) - self.started_done,
@@ -423,6 +430,30 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin):
                 and not self.checkpoint():
             return False
         return True
+
+    def ledger_round(self, result, touched, verdict, why, caught, ticked, kept, diff):
+        """One row in the ledger for this round (ralph_ledger.py). Never raises."""
+        if verdict not in ("accept", "reject"):
+            verdict = "unclear" if verdict else ("skipped" if not diff else "")
+        try:
+            self._ledger_row(result, touched, verdict, why, caught, ticked, kept, diff)
+        except Exception as exc:          # bookkeeping must not cost a round
+            self.note("  could not write the ledger: %s" % exc)
+
+    def _ledger_row(self, result, touched, verdict, why, caught, ticked, kept, diff):
+        ledger.record(self.workspace, agent=os.environ.get("ORTHROS_AGENT", ""),
+                      workspace=os.path.basename(os.path.normpath(self.workspace)),
+                      kind=os.environ.get("ORTHROS_KIND", "self"),
+                      item=self.current_task or "", attempt=self.rounds_on_task,
+                      temperature=self.temperature, tokens_in=result.sent or 0,
+                      tokens_out=result.got or 0,
+                      seconds=self.pace[-1][0] if self.pace else 0,
+                      symptom=result.symptom or "", applied=result.applied or 0,
+                      failed=result.failed or 0, touched=int(bool(touched)),
+                      broken=last_line(self.broken[0][1])[:200] if self.broken else "",
+                      caught="; ".join(caught)[:300], verdict=verdict,
+                      reason=(why or "")[:300], ticked=max(0, ticked), kept=int(kept),
+                      diff=diff)
 
     # ------------------------------------------------------------------ files
 

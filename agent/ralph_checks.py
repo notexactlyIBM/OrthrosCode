@@ -10,6 +10,7 @@ import shutil
 import subprocess
 
 import status
+from ralph_ledger import LEDGER_FILE
 from ralph_common import (FILE_TOKEN_CAP, LOG_FILE, ROUND_FILE,
     TRANSCRIPT_FILE, read_text, write_text)
 
@@ -413,7 +414,7 @@ def ensure_ignored(workspace):
     body = read_text(path)
     wanted = (ROUND_FILE, LOG_FILE, TRANSCRIPT_FILE, "*.tmp",
               status.STATUS_FILE, status.STOP_FILE,
-              TRANSCRIPT_FILE + ".1", "venv/", "__pycache__/")
+              TRANSCRIPT_FILE + ".1", "venv/", "__pycache__/", LEDGER_FILE + "*")
     missing = [p for p in wanted if p not in body]
     if not missing:
         return

@@ -12,6 +12,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -154,6 +155,26 @@ class TestJudging(Sandbox):
         report = orthros.read_text(os.path.join(self.o.folders["A"], "FIELD_REPORT.md"))
         self.assertIn("The engine did not die", report)
         self.assertIn("32,958", report)
+
+    def test_field_report_says_where_this_turns_rounds_went(self):
+        # Written by the agents' own module, read by Orthros's own query: the
+        # two must agree on the table.
+        spec = importlib.util.spec_from_file_location(
+            "ralph_ledger", os.path.join(ROOT, "agent", "ralph_ledger.py"))
+        ledger = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ledger)
+        env = self.o.agent_env("A")
+        self.assertEqual(env["ORTHROS_AGENT"], "A")
+        blank = dict(symptom="", failed=0, applied=1, broken="", caught="", verdict="")
+        with mock.patch.dict(os.environ, {"ORTHROS_LEDGER": env["ORTHROS_LEDGER"]}):
+            ledger.record(self.root, agent="A", at=50, kept=1, **blank)     # an older turn
+            ledger.record(self.root, agent="A", at=150, kept=1, **blank)
+            ledger.record(self.root, agent="A", at=160, kept=0,
+                          **dict(blank, verdict="reject"))
+            ledger.record(self.root, agent="B", at=170, kept=1, **blank)   # the twin's
+        self.o.field_report(self.result("A", started=100))
+        report = orthros.read_text(os.path.join(self.o.folders["A"], "FIELD_REPORT.md"))
+        self.assertIn("Where the rounds went: kept 1, rejected by reviewer 1.", report)
 
 
 class TestRollbackNote(Sandbox):

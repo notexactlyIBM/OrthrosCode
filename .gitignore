@@ -20,6 +20,8 @@ orthros.log
 .janus-state.json
 janus.json
 janus.log
+# One row per round from both agents (agent/ralph_ledger.py).
+ledger.sqlite*
 
 __pycache__/
 *.pyc

@@ -32,6 +32,28 @@ class TestBuildAiderCommand(unittest.TestCase):
         self.assertIn("--message-file", cmd)
         self.assertEqual(cmd[cmd.index("--message-file") + 1], "/tmp/prompt.md")
 
+    def test_yes_always_in_loop_mode_only(self):
+        cmd_loop = self._build(loop_mode=True)
+        self.assertIsNotNone(cmd_loop)
+        self.assertIn("--yes-always", cmd_loop)
+        cmd_chat = self._build(loop_mode=False)
+        self.assertIsNotNone(cmd_chat)
+        self.assertNotIn("--yes-always", cmd_chat)
+
+    def test_includes_linter_and_test_cmd_in_loop_mode(self):
+        with patch("supervisor_aider.venv_python", return_value="python.exe"), \
+             patch("supervisor_aider.module_available", return_value=True), \
+             patch("supervisor_aider.write_model_settings", return_value="/tmp/s.yml"), \
+             patch("supervisor_aider.find_linter", return_value="flake8"), \
+             patch("supervisor_aider.find_test_cmd", return_value="pytest"):
+            cmd = build_aider_command("test-model", "/tmp/meta.json",
+                                      use_git=True, ui="terminal", loop_mode=True)
+        self.assertIsNotNone(cmd)
+        self.assertIn("--lint-cmd", cmd)
+        self.assertEqual(cmd[cmd.index("--lint-cmd") + 1], "flake8")
+        self.assertIn("--test-cmd", cmd)
+        self.assertEqual(cmd[cmd.index("--test-cmd") + 1], "pytest")
+
 
 if __name__ == "__main__":
     unittest.main()

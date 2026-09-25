@@ -20,6 +20,18 @@ from ralph_common import read_text, write_text
 from ralph_refill import refill_temperature
 from ralph_session import Session
 
+
+def write_fake_aider(path, mode):
+    """Write the fake aider script for the given mode to path."""
+    scripts = {
+        "basic": FAKE_AIDER,
+        "refilling": REFILLING_AIDER,
+        "lazy": LAZY_AIDER,
+        "do_nothing": DO_NOTHING_AIDER,
+    }
+    write_text(path, scripts[mode])
+
+
 FAKE_AIDER = '''import os, re, sys
 args = sys.argv[1:]
 files = [args[i + 1] for i, a in enumerate(args) if a == "--file"]
@@ -43,7 +55,7 @@ class TestLoop(unittest.TestCase):
         self.ws = os.path.join(self.dir, "ws")
         os.makedirs(self.ws)
         self.fake = os.path.join(self.dir, "fake_aider.py")
-        write_text(self.fake, FAKE_AIDER)
+        write_fake_aider(self.fake, "basic")
         self.notes = os.path.join(self.ws, "tasks.md")
         write_text(self.notes, "# Tasks\n\n- [ ] In `add`, handle None\n"
                                "- [ ] In `sub`, handle None\n")
@@ -58,8 +70,9 @@ class TestLoop(unittest.TestCase):
         shutil.rmtree(self.dir, ignore_errors=True)
 
     def session(self, **options):
+        minutes = options.pop("minutes", 3)
         return Session([sys.executable, self.fake, "--edit-format", "diff"], self.ws, self.env,
-                       minutes=3, single_shot=False, edit_files=[self.code], entry_hint="none",
+                       minutes=minutes, single_shot=False, edit_files=[self.code], entry_hint="none",
                        iteration_timeout=30, **options)
 
     def run_quietly(self, session):
@@ -121,7 +134,7 @@ class TestLoopWithGit(unittest.TestCase):
         self.ws = os.path.join(self.dir, "ws")
         os.makedirs(self.ws)
         self.fake = os.path.join(self.dir, "fake_aider.py")
-        write_text(self.fake, REFILLING_AIDER)
+        write_fake_aider(self.fake, "refilling")
         self.notes = os.path.join(self.ws, "tasks.md")
         write_text(self.notes, "# Tasks\n\n- [x] done already\n")
         self.code = os.path.join(self.ws, "calc.py")
@@ -161,6 +174,12 @@ class TestLoopWithGit(unittest.TestCase):
         # The same two ideas again are not new work: dropped, then it stops.
         self.assertIn("repeat ones already parked", log)
         self.assertEqual(read_text(self.notes).count("- [!] In `add`"), 1)
+
+    def test_refill_then_work_rounds_tick_all_items(self):
+        self.run_session(lambda task, diff: ("accept", "fine"))
+        notes = read_text(self.notes)
+        self.assertNotIn("- [ ]", notes)
+        self.assertIn("# touched", read_text(self.code))
 
 
 class TestLocateInALoop(TestLoop):
@@ -228,7 +247,7 @@ print("Tokens: 1k sent, 100 received.")
 
 class TestCaughtWithoutAReviewer(TestLoopWithGit):
     def test_a_placeholder_edit_is_undone_by_the_automatic_checks(self):
-        write_text(self.fake, LAZY_AIDER)
+        write_fake_aider(self.fake, "lazy")
         write_text(self.notes, "# Tasks\n\n- [ ] In `add`, handle None\n")
         self.git("add", "-A")
         self.git("commit", "-qm", "items")
@@ -243,6 +262,25 @@ class TestCaughtWithoutAReviewer(TestLoopWithGit):
         self.assertEqual(read_text(self.code), original)
         self.assertEqual(s.caught, 1)
         self.assertIn("automatic check", read_text(self.notes))
+
+
+DO_NOTHING_AIDER = '''import sys
+print("Tokens: 1k sent, 100 received.")
+'''
+
+
+class TestDeadEndRecovery(TestLoop):
+    def test_three_dead_ends_in_a_row_do_not_stop_the_session(self):
+        write_fake_aider(self.fake, "do_nothing")
+        write_text(self.notes, "# Tasks\n\n"
+                               "- [ ] In `add`, handle None\n"
+                               "- [ ] In `sub`, handle None\n"
+                               "- [ ] In `add`, handle zero\n"
+                               "- [ ] In `sub`, handle zero\n")
+        s = self.session(minutes=5)
+        self.assertEqual(self.run_quietly(s), 0)
+        self.assertNotIn("Three items in a row", s.stop_reason)
+        self.assertGreaterEqual(s.rounds, 9)
 
 
 class TestRefillTemperature(unittest.TestCase):

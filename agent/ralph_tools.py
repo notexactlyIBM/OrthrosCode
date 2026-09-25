@@ -30,6 +30,7 @@ CALLERS_ASK = re.compile(r"^\s*CALLERS:\s*([A-Za-z_][\w.]*)\s*$", re.MULTILINE)
 DOCS_ASK = re.compile(r"^\s*DOCS:\s*([A-Za-z_][\w.]*)\s*$", re.MULTILINE)
 DEF_ASK = re.compile(r"^\s*DEF:\s*([A-Za-z_][\w.]*)\s*$", re.MULTILINE)
 OUTLINE_ASK = re.compile(r"^\s*OUTLINE:\s*(.+?)\s*$", re.MULTILINE)
+TESTS_ASK = re.compile(r"^\s*TESTS:\s*([A-Za-z_][\w.]*)\s*$", re.MULTILINE)
 FOUND_FILE = "FOUND.md"
 LESSONS_FILE = "LESSONS.md"
 SKILLS_FILE = "SKILLS.md"
@@ -48,6 +49,7 @@ REQUESTS = (
     ("OUTLINE:", "OUTLINE: <file>        every class and def line in it       -> FOUND.md"),
     ("DOCS:", "DOCS: <module>         an installed library's documentation -> FOUND.md"),
     ("DIGEST:", "DIGEST: <file> -- <question>   a file too big to send, read in parts -> FOUND.md"),
+    ("TESTS:", "TESTS: <test_file>     one test file run on its own         -> FOUND.md"),
 )
 
 
@@ -67,6 +69,8 @@ DOCS_LINES = 120
 
 def code_search(workspace, text, limit=FIND_LIMIT):
     """Lines containing `text` (case-insensitive), as ['file:line: code']."""
+    if limit <= 0:
+        return []
     needle = text.lower()
     hits = []
     for folder, dirs, names in os.walk(workspace):
@@ -136,16 +140,19 @@ def define_search(workspace, name, limit=FIND_LIMIT):
 
 
 def outline_file(workspace, filename):
-    """Every class and def line in one file, with line numbers, no limit."""
+    """Every class and def line in one file, with line numbers, capped at 80."""
     filename = filename.strip().strip("`\"'").replace("\\", "/")
     path = filename if os.path.isabs(filename) else os.path.join(workspace, filename)
     if not os.path.isfile(path):
-        return []
+        return ["(file not found: %s)" % filename]
     rel = os.path.relpath(path, workspace)
     pat = re.compile(r"^\s*(?:async\s+)?(?:class|def)\s+\w+")
-    return ["%s:%d: %s" % (rel, number, line.strip()[:140])
-            for number, line in enumerate(read_text(path).splitlines(), 1)
-            if pat.search(line)]
+    lines = ["%s:%d: %s" % (rel, number, line.strip()[:140])
+             for number, line in enumerate(read_text(path).splitlines(), 1)
+             if pat.search(line)]
+    if len(lines) > 80:
+        lines = lines[:80] + ["... truncated"]
+    return lines
 
 
 def library_docs(workspace, name, python, lines=DOCS_LINES):
@@ -160,6 +167,29 @@ def library_docs(workspace, name, python, lines=DOCS_LINES):
     # pydoc bolds with backspaces; what is left is plain text.
     kept = [l.rstrip() for l in text.splitlines()][:lines]
     return "\n".join(kept) or "no documentation found for %s" % name
+
+
+def run_tests(workspace, module, python):
+    """Run one of the project's test files with unittest, return the combined output.
+
+    Only a `test_*.py` in this folder. The name comes from the model, and
+    `python -m unittest <name>` imports whatever it is given; the loop runs
+    no command a round suggests, and this is not to become one.
+    """
+    path = os.path.join(workspace, *module.split(".")) + ".py"
+    if not module.split(".")[-1].startswith("test_") or not os.path.isfile(path):
+        return "(no test file %s.py in this folder)" % module.replace(".", "/")
+    try:
+        proc = subprocess.run(
+            [python, "-m", "unittest", module, "-v"],
+            cwd=workspace,
+            capture_output=True, text=True, timeout=60,
+            encoding="utf-8", errors="replace",
+        )
+        output = (proc.stdout or "") + (proc.stderr or "")
+        return output.strip() or "(no output)"
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return "test run failed: %s" % exc
 
 
 def handle_tool_requests(workspace, notes_path, python, ask=None):
@@ -215,6 +245,13 @@ def handle_tool_requests(workspace, notes_path, python, ask=None):
         body = body.replace(match.group(0), "  - *Looked up*: %s (see %s)" % (name, FOUND_FILE), 1)
         say("    docs: %s" % name)
         handled.append("DOCS")
+    for match in list(TESTS_ASK.finditer(body)):
+        module = match.group(1)
+        output = run_tests(workspace, module, python)
+        sections.append("## TESTS: %s\n\n%s\n" % (module, output))
+        body = body.replace(match.group(0), "  - *Tested*: %s (see %s)" % (module, FOUND_FILE), 1)
+        say("    tests: %s" % module)
+        handled.append("TESTS")
     for match in list(DIGEST_ASK.finditer(body)):
         name, question = parse_request(match.group(1))
         path = inside(workspace, name)
@@ -274,15 +311,88 @@ def lessons_path(workspace):
     return os.path.join(workspace, LESSONS_FILE)
 
 
-def record_lesson(workspace, text):
+def _lesson_kind(line):
+    """The failure kind at the start of a lesson line, or 'unknown'."""
+    parts = line.strip().lstrip("-").strip().split(None, 2)
+    if len(parts) >= 2 and re.match(r"^\d{4}-\d{2}-\d{2}$", parts[0]):
+        token = parts[1]
+        if token.endswith(":"):
+            return token[:-1] or "unknown"
+        if len(parts) >= 3 and parts[2].startswith(":"):
+            return token or "unknown"
+    return "unknown"
+
+
+def _summary_counts(path):
+    """Existing LESSONS.summary.md counts by kind, preserving file order."""
+    counts = {}
+    if not os.path.isfile(path):
+        return counts
+    for line in read_text(path).splitlines():
+        if not line.strip().startswith("- "):
+            continue
+        body = line.strip()[2:].strip()
+        if ":" not in body:
+            continue
+        kind, _, rest = body.partition(":")
+        kind = kind.strip() or "unknown"
+        try:
+            count = int(rest.strip())
+        except ValueError:
+            count = 1
+        counts[kind] = counts.get(kind, 0) + count
+    return counts
+
+
+def _write_summary(path, counts):
+    """Write one compressed bullet per kind, keeping existing summary order."""
+    lines = ["# Lesson summary", ""]
+    for kind, count in counts.items():
+        lines.append("- %s: %d" % (kind, count))
+    write_text(path, "\n".join(lines).rstrip("\n") + "\n")
+    return counts
+
+
+def fold_old_lessons(workspace, keep=25):
+    """Move lesson lines older than the newest `keep` into LESSONS.summary.md.
+
+    The summary keeps one compressed count per failure kind and merges with
+    any previous summary, so earlier folded kinds are not lost.
+    """
+    path = lessons_path(workspace)
+    if not os.path.isfile(path):
+        return False
+    lines = read_text(path).splitlines()
+    lesson_indexes = [i for i, line in enumerate(lines) if line.startswith("- ")]
+    if len(lesson_indexes) <= keep:
+        return False
+    old_lines = [lines[i] for i in lesson_indexes[:-keep]]
+    if not old_lines:
+        return False
+
+    counts = _summary_counts(os.path.join(workspace, "LESSONS.summary.md"))
+    for line in old_lines:
+        kind = _lesson_kind(line)
+        counts[kind] = counts.get(kind, 0) + 1
+    _write_summary(os.path.join(workspace, "LESSONS.summary.md"), counts)
+
+    drop = set(lesson_indexes[:-keep])
+    write_text(path, "\n".join(line for i, line in enumerate(lines) if i not in drop).rstrip("\n") + "\n")
+    return True
+
+
+def record_lesson(workspace, text, kind=""):
     """Append one dated line to LESSONS.md, unless the same lesson is recent.
 
     Kept to one line and 200 characters: these are read back into every round,
     and a paragraph per mistake would soon cost more than the mistakes.
+    When `kind` is given the line begins with `kind:` so it can be matched.
     """
     text = " ".join(str(text).split())[:200]
     if not text:
         return False
+    if kind:
+        text = "%s: %s" % (kind, text)
     path = lessons_path(workspace)
     body = read_text(path)
     recent = [l.split(" ", 2)[-1] for l in body.splitlines()[-20:] if l.startswith("- ")]

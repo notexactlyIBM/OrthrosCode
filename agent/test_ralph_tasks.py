@@ -78,12 +78,13 @@ class TestTaskList(Temp):
         self.assertIn("[!]", read_text(self.notes))
         self.assertEqual(open_tasks(self.notes), [])
 
-    def test_remember_review_keeps_one_reason(self):
+    def test_remember_review_keeps_last_two_reasons(self):
         remember_review(self.notes, "In `add`, handle None", "first reason")
         remember_review(self.notes, "In `add`, handle None", "second reason")
         body = read_text(self.notes)
+        self.assertIn("first reason", body)
         self.assertIn("second reason", body)
-        self.assertEqual(body.count("*Review*"), 1)
+        self.assertEqual(body.count("*Review*"), 2)
 
     def test_write_text_leaves_no_temp_file(self):
         self.assertTrue(write_text(self.notes, "x"))
@@ -111,6 +112,25 @@ class TestPlanAndProgress(Temp):
             record_progress(self.notes, [10, ticked, 3, 1000, "1", "runs", "-"])
         self.assertTrue(any("items finished per round" in r
                             for r in progress_regressions(self.notes)))
+
+
+class TestRememberReview(unittest.TestCase):
+    def test_keeps_last_two_reasons(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            notes = os.path.join(tmp, "tasks.md")
+            with open(notes, "w", encoding="utf-8") as f:
+                f.write("# Tasks\n\n- [ ] Do the thing\n")
+            task = "Do the thing"
+            remember_review(notes, task, "first reason")
+            remember_review(notes, task, "second reason")
+            remember_review(notes, task, "third reason")
+            with open(notes, encoding="utf-8") as f:
+                body = f.read()
+            self.assertIn("second reason", body)
+            self.assertIn("third reason", body)
+            self.assertNotIn("first reason", body)
+            reviews = [line for line in body.splitlines() if "*Review*:" in line]
+            self.assertEqual(len(reviews), 2)
 
 
 if __name__ == "__main__":

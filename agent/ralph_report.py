@@ -26,6 +26,9 @@ class ReportMixin:
         self.mark_print = code_fingerprint(self.edit_files)
         self.mark_rounds = self.rounds
         self.engine_failures = 0
+        self.mark_rejected = getattr(self, "rejected", 0)
+        self.mark_fat = getattr(self, "fat_rounds", 0)
+        self.mark_engine = self.engine_failures
 
     def pace_summary(self):
         """Typical round, in numbers, so 'it feels slow' can be checked.
@@ -58,6 +61,10 @@ class ReportMixin:
         self.note("  CHECKPOINT  |  %d min in" % int((time.time() - self.started) // 60))
         self.note("  %d rounds, %d items ticked, %+d lines of code" % (did, ticked, grew))
         self.note("  it %s" % ("is BROKEN" if self.broken else "still runs"))
+        self.note("  since last checkpoint: %d rejected, %d refused as too big, %d lost to the engine"
+                  % (getattr(self, "rejected", 0) - getattr(self, "mark_rejected", 0),
+                     getattr(self, "fat_rounds", 0) - getattr(self, "mark_fat", 0),
+                     self.engine_failures - getattr(self, "mark_engine", 0)))
         if self.pace:
             self.note("  %s" % self.pace_summary())
 

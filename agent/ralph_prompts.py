@@ -4,7 +4,7 @@ import os
 import re
 from ralph_common import (HEADING_LINE, PLAN_FILE, PROMPT_FILE, RESEARCH_FILE, ROUND_FILE,
     SEED_HEADINGS, TASK_DONE_LINE, TERSE, read_text, say, write_text)
-from ralph_tools import recent_lessons, unlisted_requests
+from ralph_tools import lessons_path, unlisted_requests
 from ralph_tasks import (brief_path, next_milestone, open_tasks, progress_regressions,
     progress_summary)
 
@@ -355,6 +355,15 @@ def rules(heading):
     return (TERSE_REFILL_RULES if TERSE else REFILL_RULES) % heading
 
 
+def _refill_lessons(notes_path, task):
+    """Relevant lessons for a refill round, under a heading. Empty if none."""
+    workspace = os.path.dirname(notes_path)
+    lessons = relevant_lessons(workspace, task, most=5)
+    if not lessons:
+        return ""
+    return "\n# Lessons that fit\n\n" + "\n".join(lessons) + "\n"
+
+
 def compose_refill_prompt(notes_path, refills):
     """One refill round's prompt. Returns (text, label, mode, milestone).
 
@@ -378,12 +387,14 @@ def compose_refill_prompt(notes_path, refills):
         brief = "\n\n".join("## %s\n%s" % (t, b) for t, b in seeds[:3]) or \
             "No standing brief. Plan from the code and what the project needs."
         return (PLAN_PROMPT % (PLAN_FILE, RESEARCH_FILE, brief, PLAN_FILE)
-                + history_note(notes_path) + tests_note(notes_path),
+                + history_note(notes_path) + tests_note(notes_path)
+                + _refill_lessons(notes_path, "planning the next milestones"),
                 "planning the next milestones", mode, None)
 
     if mode == "verify":
         return (VERIFY_PROMPT + "\n" + rules("Found by checking the work")
-                + exemplars(notes_path) + history_note(notes_path),
+                + exemplars(notes_path) + history_note(notes_path)
+                + _refill_lessons(notes_path, "checking what is already ticked"),
                 "checking what is already ticked", mode, None)
 
     if mode == "brief":
@@ -396,12 +407,14 @@ def compose_refill_prompt(notes_path, refills):
                  "this round's brief -- read it as the operator telling you where the\n"
                  "next batch of work comes from, and turn it into items.\n\n"
                  "---\n%s\n---\n\n" % (title, guidance))
-        return (text + rules(heading) + exemplars(notes_path),
+        return (text + rules(heading) + exemplars(notes_path)
+                + _refill_lessons(notes_path, title),
                 title, mode, None)
 
     title, body = pending
     return (DECOMPOSE_PROMPT % (title, body)
-            + "\n" + rules(title) + exemplars(notes_path),
+            + "\n" + rules(title) + exemplars(notes_path)
+            + _refill_lessons(notes_path, title),
             "milestone: %s" % title, mode, title)
 
 
@@ -412,6 +425,62 @@ def ensure_prompt(workspace):
         write_text(path, DEFAULT_PROMPT)
         say("    wrote %s -- what to build and how to work, both editable" % PROMPT_FILE)
     return path
+
+
+def _identifiers(text):
+    """Backticked names, file names, and snake_case identifiers from `text`.
+
+    Only words that look like code: a backticked identifier, a recognised
+    file name, or a snake_case word.  Ordinary English words never match.
+    """
+    found = set()
+    found.update(re.findall(r"`([A-Za-z_][\w.]*)`", text))
+    found.update(re.findall(r"\b[\w]+\.(?:py|md|cmd|bat|html|txt|json|toml|cfg)\b", text))
+    found.update(re.findall(r"\b[a-zA-Z]\w*_\w+\b", text))
+    found.discard("")
+    return found
+
+
+_KIND_RE = re.compile(r"^- \d{4}-\d{2}-\d{2} (.+?): ")
+
+
+def _lesson_kind(line):
+    """The kind prefix of a lesson line, or '' if none.
+
+    A line like '- 2026-09-25 reply-cut-off: In ...' has kind 'reply-cut-off'.
+    Only the first word after the date counts, so a lesson that merely
+    mentions the kind later in its body is not matched.
+    """
+    m = _KIND_RE.match(line)
+    return m.group(1) if m else ""
+
+
+def relevant_lessons(workspace, task, most=5, last_failure_kind=""):
+    """Score LESSONS.md lines by shared identifiers with `task`, return top `most`.
+
+    Identifiers are backticked names, file names, and snake_case function
+    names -- not ordinary English words.
+
+    When `last_failure_kind` is given, lessons whose kind prefix matches it
+    are ranked above all others regardless of identifier score.
+    """
+    lines = [l for l in read_text(lessons_path(workspace)).splitlines() if l.startswith("- ")]
+    if not lines:
+        return []
+
+    identifiers = _identifiers(task) if task else set()
+
+    def score(line):
+        return sum(1 for ident in identifiers if ident in line)
+
+    def sort_key(pair):
+        index, line = pair
+        tier = 0 if (last_failure_kind and _lesson_kind(line) == last_failure_kind) else 1
+        return (tier, -score(line), -index)
+
+    indexed = list(enumerate(lines))
+    indexed.sort(key=sort_key)
+    return [line for _, line in indexed[:most]]
 
 
 def compose_round_prompt(workspace, prompt_path, broken, cut_off=False, task=None):
@@ -452,7 +521,7 @@ def compose_round_prompt(workspace, prompt_path, broken, cut_off=False, task=Non
         for path, err in broken:
             head.append("    %s: %s" % (os.path.basename(path), err))
         head += [""]
-    lessons = recent_lessons(workspace, task=task)
+    lessons = relevant_lessons(workspace, task)
     if lessons:
         head += ["# Lessons from earlier rounds -- do not repeat these", ""] + lessons + [""]
     if head:

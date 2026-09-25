@@ -14,8 +14,8 @@ import ralph_tools
 from ralph_common import read_text, write_text
 from ralph_inventions import phantom_attributes, used_before_set
 from ralph_prompts import compose_round_prompt
-from ralph_tools import (FOUND_FILE, REQUESTS, code_search, handle_tool_requests, record_lesson,
-                         recent_lessons)
+from ralph_tools import (FOUND_FILE, REQUESTS, code_search, define_search, handle_tool_requests,
+                         outline_file, record_lesson, recent_lessons)
 
 SAMPLE = '''import threading
 
@@ -136,6 +136,22 @@ class TestTools(Temp):
         self.assertNotIn("return target()", found)
         self.assertNotIn("DEF: target\n", read_text(self.notes))
 
+    def test_define_search_whole_word_only(self):
+        write_text(os.path.join(self.dir, "mod.py"),
+                   "def addition(a, b):\n    return a + b\n\ndef add(a, b):\n    return a + b\n")
+        hits = define_search(self.dir, "add")
+        self.assertEqual(len(hits), 1)
+        self.assertIn("def add", hits[0])
+        self.assertNotIn("addition", hits[0])
+
+    def test_outline_capped_at_80(self):
+        body = "\n".join("def func_%d():\n    pass\n" % i for i in range(100))
+        write_text(os.path.join(self.dir, "big.py"), body)
+        lines = outline_file(self.dir, "big.py")
+        self.assertEqual(len(lines), 81)
+        self.assertEqual(lines[-1], "... truncated")
+        self.assertIn("def func_0", lines[0])
+
     def test_outline_request(self):
         write_text(os.path.join(self.dir, "mod.py"), "import os\n\nclass Foo:\n    def bar(self):\n        return 1\n")
         write_text(self.notes, read_text(self.notes) + "OUTLINE: mod.py\n")
@@ -163,6 +179,54 @@ class TestTools(Temp):
         record_lesson(self.dir, "the database query was too slow")
         result = recent_lessons(self.dir, task="database query")
         self.assertIn("database query", result[0])
+
+
+class TestTestsRequest(unittest.TestCase):
+    def test_tests_request_writes_ran_to_found(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            test_module = os.path.join(workspace, "test_ralph_tools.py")
+            with open(test_module, "w") as f:
+                f.write("import unittest\n\n"
+                        "class TestX(unittest.TestCase):\n"
+                        "    def test_ok(self):\n"
+                        "        self.assertTrue(True)\n")
+            notes_path = os.path.join(workspace, "tasks.md")
+            with open(notes_path, "w") as f:
+                f.write("# Tasks\n\nTESTS: test_ralph_tools\n")
+            handled = handle_tool_requests(workspace, notes_path, sys.executable)
+            self.assertIn("TESTS", handled)
+            found_path = os.path.join(workspace, "FOUND.md")
+            self.assertTrue(os.path.isfile(found_path))
+            with open(found_path, encoding="utf-8") as f:
+                content = f.read()
+            self.assertIn("Ran", content)
+
+    def test_only_a_test_file_in_this_folder_is_run(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            notes_path = os.path.join(workspace, "tasks.md")
+            with open(notes_path, "w") as f:
+                f.write("# Tasks\n\nTESTS: json\nTESTS: test_missing\n")
+            handle_tool_requests(workspace, notes_path, sys.executable)
+            with open(os.path.join(workspace, "FOUND.md"), encoding="utf-8") as f:
+                content = f.read()
+            self.assertEqual(content.count("no test file"), 2)
+            self.assertNotIn("Ran", content)
+
+
+class TestOutlineFileNotFound(unittest.TestCase):
+    def test_outline_missing_file_says_not_found(self):
+        with tempfile.TemporaryDirectory() as ws:
+            notes = os.path.join(ws, "tasks.md")
+            with open(notes, "w", encoding="utf-8") as f:
+                f.write("- [ ] Do something\n")
+                f.write("  OUTLINE: missing.py\n")
+            handle_tool_requests(ws, notes, python="python")
+            found = os.path.join(ws, "FOUND.md")
+            self.assertTrue(os.path.isfile(found), "FOUND.md was not written")
+            with open(found, encoding="utf-8") as f:
+                lines = f.read().splitlines()
+            heading = next(i for i, l in enumerate(lines) if l == "## OUTLINE: missing.py")
+            self.assertIn("file not found: missing.py", lines[heading + 2])
 
 
 if __name__ == "__main__":

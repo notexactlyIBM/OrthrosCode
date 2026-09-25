@@ -110,6 +110,8 @@ def smoke_run(workspace, entry, seconds=6):
         proc.communicate()
         return True, ""
     if proc.returncode == 0:
+        if not (out or "").strip():
+            return False, "exited 0 but produced no output -- a silent no-op is not a healthy start"
         return True, ""
     # A non-zero exit is not the same as a crash, and treating it as one only
     # ever worked because the only program this had checked was a game, which
@@ -172,12 +174,13 @@ def import_check(workspace, files, seconds=20):
     exist when code is loaded: a missing dependency, a name imported from a
     module that does not have it, a circular import, an error in top-level code.
 
-    One interpreter per folder, importing every module in turn, rather than one
-    per module: this runs after every round, and starting a dozen Pythons that
-    each load the same dependencies was most of what the check cost. If that
-    one process hangs or dies without reporting, each module is tried on its
-    own instead, and one that runs something long when imported is given the
-    benefit of the doubt, the same as a program that keeps running.
+    One interpreter per folder, importing every module in a single -c
+    expression, rather than one per module: this runs after every round, and
+    starting a dozen Pythons that each load the same dependencies was most of
+    what the check cost. If that one process hangs or dies without reporting,
+    each module is tried on its own instead, and one that runs something long
+    when imported is given the benefit of the doubt, the same as a program
+    that keeps running.
     """
     fingerprint = code_fingerprint(files)
     if _IMPORT_CACHE["fingerprint"] == fingerprint:
@@ -287,11 +290,12 @@ def test_check(workspace, seconds=240):
     detail = ""
     test_name = ""
     if failing:
+        # "FAIL: test_add (test_calc.TestCalc)" -- the method name is the
+        # second token, before the parenthesised class.
+        tokens = failing[0].split()
+        if len(tokens) >= 2:
+            test_name = tokens[1].split("(")[0].strip()
         start = out.index(failing[0])
-        for line in reversed(out[:start]):
-            if "test_" in line:
-                test_name = line.split()[-1].split("(")[0].strip()
-                break
         block = out[start + 1:]
         for line in block:
             if line.startswith(("FAIL:", "ERROR:")):
@@ -308,9 +312,13 @@ def test_check(workspace, seconds=240):
                                                   "  File", "    File")) and not set(line) <= set("-")):
                     detail = line
                     break
-    parts = [failing[0]] if failing else out[-3:]
-    if test_name and test_name not in parts[0]:
-        parts.insert(0, test_name)
+    parts = []
+    if test_name:
+        parts.append(test_name)
+    if failing:
+        parts.append(failing[0])
+    else:
+        parts.extend(out[-3:])
     if detail:
         parts.append(detail)
     if len(failing) > 1:

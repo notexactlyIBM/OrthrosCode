@@ -467,6 +467,10 @@ def build_aider_command(model_id, metadata_path, use_git, ui, loop_mode=False, p
         # the model suggests -- pip installs, deletes, anything -- in a folder
         # nobody is watching. Edits only.
         cmd.append("--no-suggest-shell-commands")
+        # Auto-accept file edits so an unattended round never blocks on a
+        # confirmation prompt. Safe here because shell commands are disabled
+        # above; only edit confirmations remain to accept.
+        cmd.append("--yes-always")
         # Read the round's prompt from a file instead of waiting for an
         # interactive message: the ralph loop writes the composed prompt
         # there before each aider invocation.

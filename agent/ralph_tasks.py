@@ -343,19 +343,25 @@ def add_items(notes_path, heading, items):
 
 
 def remember_review(notes_path, task_text, reason):
-    """Put the reviewer's reason under the item, so the next try has it.
+    """Put the reviewer's last two reasons under the item, so the next try has them.
 
     This is how the two agents compare notes: the reviewer writes on the item,
-    and the worker reads the item. Only the latest reason is kept -- a stack
-    of old verdicts would crowd out the one that matters.
+    and the worker reads the item. The two most recent reasons are kept --
+    the latest says what went wrong this time, the one before it says what
+    the previous fix tried to address, and together they show whether the
+    same mistake is being repeated.
     """
     body = read_text(notes_path)
-    pattern = re.compile(r"^([ \t]*[-*][ \t]*\[ \][ \t]*%s[ \t]*)\n(?:[ \t]+- \*Review\*:[^\n]*\n)?"
+    pattern = re.compile(r"^([ \t]*[-*][ \t]*\[ \][ \t]*%s[ \t]*)\n((?:[ \t]+- \*Review\*:[^\n]*\n){0,2})"
                          % re.escape(task_text), re.MULTILINE)
     match = pattern.search(body)
     if not match:
         return False
+    existing = [line for line in match.group(2).splitlines(keepends=True) if line.strip()]
+    previous = existing[0] if existing else ""
     note = "  - *Review*: rejected last try -- %s\n" % reason.strip()[:200]
+    if previous:
+        note += previous
     return write_text(notes_path, body[:match.start()] + match.group(1) + "\n" + note
                       + body[match.end():])
 

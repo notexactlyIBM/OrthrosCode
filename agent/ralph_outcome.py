@@ -132,7 +132,7 @@ class OutcomeMixin:
                 # full of these looks productive and changes nothing.
                 self.suspect += 1
                 self.note("  ...but no code changed. Ticked on inspection alone.")
-                record_lesson(self.workspace, "Ticked without code change: %s" % self.current_task[:120])
+                self._record_failure(result, ticked=ticked, touched=touched)
             self.stalled = 0
             self.dead_ends = 0
         elif split > 0:
@@ -157,6 +157,17 @@ class OutcomeMixin:
                 self.note_tail(result, "No symptom to name")
             return True
         return False
+
+    def _record_failure(self, result, ticked=0, touched=False):
+        """Record a lesson for a failed or inspection-only round. False to stop."""
+        if result.symptom == "context" and not result.crowded:
+            record_lesson(self.workspace,
+                          "Reply was cut off at the ceiling with room to spare.",
+                          kind="reply-cut-off")
+        if ticked > 0 and not touched:
+            record_lesson(self.workspace,
+                          "Ticked without code change: %s" % self.current_task[:120],
+                          kind="inspection-only")
 
     def park_stalled(self):
         """Three rounds with nothing to show: park the item. False to stop.
@@ -185,11 +196,11 @@ class OutcomeMixin:
             # is three in a row as it says -- it used to count every park in
             # the session, and a long run stopped at its third, hours apart.
             self.dead_ends += 1
-            if self.dead_ends < 3:
-                return True
-            self.stop("Three items in a row went nowhere. Stopping -- this is")
-            self.note("the model or the machine, not the list.")
-            return False
+            if self.dead_ends >= 3:
+                self.note("Three items in a row went nowhere. Resetting and carrying on --")
+                self.note("the next item gets a fresh budget.")
+                self.dead_ends = 0
+            return True
         self.stop("Three rounds with nothing to show, and the item could not")
         self.note("be parked. Stopping so it does not spin for the budget.")
         return False

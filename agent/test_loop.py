@@ -26,6 +26,7 @@ def write_fake_aider(path, mode):
     scripts = {
         "basic": FAKE_AIDER,
         "refilling": REFILLING_AIDER,
+        "refilling_once": REFILLING_ONCE_AIDER,
         "lazy": LAZY_AIDER,
         "do_nothing": DO_NOTHING_AIDER,
     }
@@ -125,6 +126,31 @@ else:
 print("Tokens: 1.2k sent, 300 received.")
 '''
 
+# Refills once, then finds nothing more, so the session ends on its own. With
+# the endless refiller an all-accepted session only stopped when the clock
+# did: 274 rounds and 60 s of wall time for one test, twice (2026-09-25).
+REFILLING_ONCE_AIDER = r'''import os, re, sys
+marker = os.path.join(os.path.dirname(os.path.abspath(__file__)), "refilled")
+args = sys.argv[1:]
+files = [args[i + 1] for i, a in enumerate(args) if a == "--file"]
+notes = files[0]
+body = open(notes, encoding="utf-8").read()
+if notes.endswith("PLAN.md"):
+    open(notes, "a", encoding="utf-8").write("\n## [ ] Handle None\n\nMake them safe.\n")
+elif "- [ ]" not in body:
+    if not os.path.exists(marker):
+        open(marker, "w").close()
+        open(notes, "a", encoding="utf-8").write(
+            "\n- [ ] In `add`, handle None\n- [ ] In `sub`, handle None\n")
+else:
+    open(notes, "w", encoding="utf-8").write(re.sub(r"- \[ \]", "- [x]", body, count=1))
+    for f in files[1:]:
+        if f.endswith(".py"):
+            open(f, "a", encoding="utf-8").write("# touched\n")
+            print("Applied edit to %s" % os.path.basename(f))
+print("Tokens: 1.2k sent, 300 received.")
+'''
+
 
 class TestLoopWithGit(unittest.TestCase):
     """The rollback is real here: `git checkout -- .`, as in a managed folder."""
@@ -176,10 +202,14 @@ class TestLoopWithGit(unittest.TestCase):
         self.assertEqual(read_text(self.notes).count("- [!] In `add`"), 1)
 
     def test_refill_then_work_rounds_tick_all_items(self):
-        self.run_session(lambda task, diff: ("accept", "fine"))
+        write_fake_aider(self.fake, "refilling_once")
+        s = self.run_session(lambda task, diff: ("accept", "fine"))
         notes = read_text(self.notes)
         self.assertNotIn("- [ ]", notes)
+        self.assertIn("- [x] In `add`, handle None", notes)
+        self.assertIn("- [x] In `sub`, handle None", notes)
         self.assertIn("# touched", read_text(self.code))
+        self.assertNotIn("Time is up", s.stop_reason)   # ended on its own, not the clock
 
 
 class TestLocateInALoop(TestLoop):

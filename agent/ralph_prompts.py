@@ -4,7 +4,7 @@ import os
 import re
 from ralph_common import (HEADING_LINE, PLAN_FILE, PROMPT_FILE, RESEARCH_FILE, ROUND_FILE,
     SEED_HEADINGS, TASK_DONE_LINE, TERSE, read_text, say, write_text)
-from ralph_tools import recent_lessons
+from ralph_tools import recent_lessons, unlisted_requests
 from ralph_tasks import (brief_path, next_milestone, open_tasks, progress_regressions,
     progress_summary)
 
@@ -425,6 +425,10 @@ def compose_round_prompt(workspace, prompt_path, broken, cut_off=False, task=Non
     relevance to it rather than simply by recency.
     """
     body = read_text(prompt_path)
+    more = unlisted_requests(body)
+    if more:
+        body = (body.rstrip("\n") + "\n\nThese are answered too -- one line in the task list, "
+                "then stop; the answer comes with the next round:\n\n" + "\n".join(more) + "\n")
     head = []
     if cut_off:
         # A round that ran out of room stops mid-sentence, and the next one

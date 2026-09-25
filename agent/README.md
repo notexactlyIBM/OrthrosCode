@@ -26,9 +26,16 @@ Every setting lives in `config.cmd`, with the reasons next to it.
 A round cannot call tools while it answers, so it writes a request into the
 task list and stops; the loop answers before the next round:
 
-    RESEARCH: <question>   web search and fetch            -> RESEARCH.md
-    FIND: <text>           every matching line in the code  -> FOUND.md
-    DOCS: <module>         an installed library's own docs  -> FOUND.md
+    RESEARCH: <question>   web search and fetch                  -> RESEARCH.md
+    FIND: <text>           every matching line in the code        -> FOUND.md
+    CALLERS: <function>    every line that calls it               -> FOUND.md
+    DEF: <name>            where a function or class is defined   -> FOUND.md
+    OUTLINE: <file>        every class and def line in it         -> FOUND.md
+    DOCS: <module>         an installed library's own docs        -> FOUND.md
+    DIGEST: <file> -- <question>   a file too big to send, in parts -> FOUND.md
+
+The list is `REQUESTS` in `ralph_tools.py`; each round's prompt gets every
+request on it that `RALPH_PROMPT.md` does not already mention.
 
 ## How a session works
 
@@ -37,10 +44,16 @@ item, check it, tick it, exit. The task list in the working folder is the
 memory; the model starts every round with an empty head.
 
 After each round the change is parsed, linted, imported and tested, and read
-by a second, independent request that keeps or rejects it. A round that breaks start-up or
+by a second, independent request that keeps or rejects it -- shown the diff,
+what the checks have already settled, and the code the item names as it now
+stands. A round that breaks start-up or
 is rejected is rolled back, and the reason is written under the item. Kept
 rounds are committed. When the list runs dry it plans milestones, breaks them
 into items, and checks earlier work -- until the clock runs out.
+
+Every ten minutes a checkpoint looks up. Changes sent back and items parked
+are the loop working through a hard list, and it carries on; only rounds
+that produce nothing at all stop it early.
 
 ## The code
 
@@ -58,13 +71,13 @@ into items, and checks earlier work -- until the clock runs out.
 | `ralph_send.py` | what one round is sent: its files, its reading, the numbers it came back with |
 | `ralph_locate.py` | asks which files an item needs when it names none (after Agentless) |
 | `ralph_gists.py` | GISTS.md: every module in a few lines, for planning (after ReadAgent) |
-| `ralph_scan.py` | after each round, checks that cost no tokens: project-wide lint and call signatures, placeholders, conflict markers, lost tests |
+| `ralph_scan.py` | after each round, checks that cost no tokens: project-wide lint and call signatures, placeholders, conflict markers, lost tests; a test file's `if __name__ == "__main__":` block put back at its end |
 | `ralph_digest.py` | `DIGEST:` reads a file too big for a round in parts (after Chain-of-Agents) |
 | `ralph_prompts.py` | everything the model is told |
 | `ralph_tasks.py` | task list, plan (`PLAN.md`), progress ledger (`PROGRESS.md`) |
 | `ralph_checks.py` | parse, import, start, and keep files small enough for a round |
 | `ralph_inventions.py` | attributes the code reads that nothing creates |
-| `ralph_tools.py` | `RESEARCH:`, `FIND:` and `DOCS:` requests; `LESSONS.md` |
+| `ralph_tools.py` | the requests a round can make (`REQUESTS`); `LESSONS.md` |
 | `research.py` | web search and page fetch, answers `RESEARCH:` lines |
 | `split.py` | mechanical refactoring: moves a class or method into its own module |
 | `status.py` | the status file the dashboards read |

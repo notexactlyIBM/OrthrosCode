@@ -1,17 +1,20 @@
 """Tests for the tools rounds ask for, lessons, and the invented-attribute checks."""
 
 import contextlib
+import inspect
 import io
 import os
+import re
 import shutil
 import sys
 import tempfile
 import unittest
 
+import ralph_tools
 from ralph_common import read_text, write_text
 from ralph_inventions import phantom_attributes, used_before_set
 from ralph_prompts import compose_round_prompt
-from ralph_tools import (FOUND_FILE, code_search, handle_tool_requests, record_lesson,
+from ralph_tools import (FOUND_FILE, REQUESTS, code_search, handle_tool_requests, record_lesson,
                          recent_lessons)
 
 SAMPLE = '''import threading
@@ -78,6 +81,21 @@ class TestInheritedFromOutside(Temp):
                            "    def test_it(self):\n"
                            "        self.assertEqual(self.thing, 1)\n")
         self.assertEqual(phantom_attributes([sample]), [])
+
+
+class TestRequestsAreAdvertised(Temp):
+    def test_every_request_handled_is_one_the_rounds_are_told_of(self):
+        handled = set(re.findall(r'handled\.append\("(\w+)"\)', inspect.getsource(ralph_tools)))
+        self.assertIn("CALLERS", handled)
+        self.assertEqual(handled - {word.rstrip(":") for word, _ in REQUESTS}, set())
+
+    def test_the_round_prompt_adds_only_what_the_mission_leaves_out(self):
+        prompt = os.path.join(self.dir, "RALPH_PROMPT.md")
+        write_text(prompt, "# How to work\n\n    FIND: <text>   every line with it -> FOUND.md\n")
+        body = read_text(compose_round_prompt(self.dir, prompt, []))
+        for word, _ in REQUESTS:
+            self.assertIn(word, body)
+        self.assertEqual(body.count("FIND:"), 1)
 
 
 class TestTools(Temp):

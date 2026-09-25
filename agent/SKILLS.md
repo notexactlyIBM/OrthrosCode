@@ -7,8 +7,9 @@ heading that says what it does and why. Read it where it is used:
 
 **Add a tool a round can ask for.** In ralph_tools.py add a regex like
 `FIND_ASK`, handle it in `handle_tool_requests` by writing the answer into
-FOUND.md and replacing the request line with a note. Then add one line
-describing it to RALPH_PROMPT.md under "How to work".
+FOUND.md and replacing the request line with a note. Then add its line to
+`REQUESTS` there: that is how rounds hear of it, and a test fails a request
+that is handled but not listed.
 
 **Grow a module past ~9,000 tokens? Split it.** Make a new module holding
 the function and the imports it needs, import it back where it was used,
@@ -56,7 +57,9 @@ signature -- so change a signature, change its callers in the same round.
 Write code out in full: a placeholder such as `# ... rest unchanged` where
 code used to be is undone at once. Never delete a test or take out an
 assertion. The reviewer then reads the diff, and a second read looks for the
-bug; say in the item's `Done when:` what the change must do.
+bug. Both are shown what the item names in backticks as it stands after the
+round, so name the function the change is in; say in the item's `Done when:`
+what the change must do.
 
 **Keep a round inside the context window.** A round sends the task list, the
 files `files_for_task` picks from the item's backticked names, SKILLS.md and

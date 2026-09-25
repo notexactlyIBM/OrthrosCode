@@ -19,6 +19,9 @@ Each finding is `(kind, message)`: kind "reject" undoes the round like a
 rejection by the reviewer, with the message written under the item; kind
 "warn" is passed to the reviewer as evidence. Every check prefers missing
 something to crying wolf: a false alarm costs a good round.
+
+One slip is put right instead of reported (put_main_last): a test class
+added below `if __name__ == "__main__":`.
 """
 
 import ast
@@ -189,6 +192,63 @@ def diff_findings(diff, task):
 def marker_findings(files):
     return [("reject", "%s: a merge-conflict marker is left in the file" % os.path.basename(f))
             for f in files if os.path.isfile(f) and MARKER.search(read_text(f))]
+
+
+# ---------------------------------------------------------------- main last
+
+DIFF_FILE = re.compile(r"^(?:\+\+\+ b/|NEW FILE )(.+?):?\s*$", re.M)
+
+
+def _main_guard(node):
+    """Is this top-level statement `if __name__ == "__main__":`?"""
+    test = getattr(node, "test", None)
+    return (isinstance(node, ast.If) and isinstance(test, ast.Compare)
+            and isinstance(test.left, ast.Name) and test.left.id == "__name__"
+            and len(test.comparators) == 1 and isinstance(test.comparators[0], ast.Constant)
+            and test.comparators[0].value == "__main__")
+
+
+def main_block_last(path):
+    """Put a file's `if __name__ == "__main__":` block back at its end.
+
+    A class added below the block still runs under `unittest discover`, which
+    is how the tests run here, but not when the file is run by hand -- and on
+    2026-09-24 the reviewers sent back three rounds for it. Moving the block
+    is mechanical, so it is done here for nothing instead of costing a round.
+    Extra copies of the block go; blocks that differ are left for a reader.
+    Line endings are kept as they were. True if the file changed.
+    """
+    try:
+        with open(path, encoding="utf-8", newline="") as handle:
+            body = handle.read()
+        tree = ast.parse(body)
+    except (OSError, SyntaxError, ValueError):
+        return False
+    guards = [node for node in tree.body if _main_guard(node)]
+    if not guards or (len(guards) == 1 and tree.body[-1] is guards[0]):
+        return False
+    # Split on "\n" alone, as the parser counts lines: splitlines() also
+    # breaks at form feeds and the like, and would cut the wrong lines.
+    lines = body.split("\n")
+    blocks = ["\n".join(lines[g.lineno - 1:g.end_lineno]).strip() for g in guards]
+    if len(set(blocks)) > 1:
+        return False
+    for guard in reversed(guards):
+        del lines[guard.lineno - 1:guard.end_lineno]
+    eol = "\r\n" if "\r\n" in body else "\n"
+    try:
+        with open(path, "w", encoding="utf-8", newline="") as handle:
+            handle.write("\n".join(lines).rstrip() + eol * 3 + blocks[-1] + eol)
+    except OSError:
+        return False
+    return True
+
+
+def put_main_last(files, diff):
+    """main_block_last for each test file this round's diff touches. Returns those moved."""
+    touched = {os.path.basename(name) for name in DIFF_FILE.findall(diff or "")}
+    return [f for f in files if os.path.basename(f).startswith("test_")
+            and os.path.basename(f) in touched and main_block_last(f)]
 
 
 # ---------------------------------------------------------------- all of it

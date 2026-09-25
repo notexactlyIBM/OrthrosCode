@@ -23,6 +23,7 @@ from ralph_refill import RefillMixin
 from ralph_report import ReportMixin
 from ralph_send import SendMixin
 from ralph_rounds import round_diff
+from ralph_scan import put_main_last
 from ralph_tools import handle_tool_requests, record_lesson
 from ralph_setup import SetupMixin, last_line
 from ralph_tasks import done_count, open_tasks, park_task, remember_review, triage
@@ -357,6 +358,11 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin):
         # whether it does what the item said.
         rejected_now = False
         diff = round_diff(ws, self.edit_files) if touched and not self.broken else ""
+        moved = put_main_last(self.edit_files, diff) if diff else []
+        if moved:
+            self.note("  put `if __name__ == \"__main__\":` back at the end of %s"
+                      % ", ".join(os.path.basename(f) for f in moved))
+            diff = round_diff(ws, self.edit_files)
         findings = self.scan_round(diff) if diff else []
         caught = [m for kind, m in findings if kind == "reject"]
         if (self.review or caught) and touched and not self.broken:

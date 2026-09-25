@@ -10,8 +10,10 @@ import tempfile
 import unittest
 
 import supervisor_aider
-from ralph_common import write_text
-from ralph_scan import baseline, call_mismatches, diff_findings, marker_findings, scan
+from ralph_common import read_text, write_text
+from ralph_scan import (baseline, call_mismatches, diff_findings, main_block_last,
+                        marker_findings, put_main_last, scan)
+from ralph_send import named_code, review_context
 
 
 class Temp(unittest.TestCase):
@@ -103,6 +105,56 @@ class TestScan(Temp):
         self.assertTrue(any(k == "reject" and "undefined name" in m for k, m in found))
 
 
+class TestMainLast(Temp):
+    TESTS = ('import unittest\n\n\nclass TestA(unittest.TestCase):\n    def test_a(self):\n'
+             '        pass\n\n\nif __name__ == "__main__":\n    unittest.main()\n')
+    ADDED = "\n\nclass TestB(unittest.TestCase):\n    def test_b(self):\n        pass\n"
+
+    def raw(self, name, body):
+        path = os.path.join(self.dir, name)
+        with open(path, "w", encoding="utf-8", newline="") as handle:
+            handle.write(body)
+        return path
+
+    def test_a_class_added_below_the_block_is_moved_above_it(self):
+        path = self.raw("test_game.py", self.TESTS + self.ADDED)
+        diff = "+++ b/test_game.py\n+class TestB(unittest.TestCase):\n"
+        self.assertEqual(put_main_last([path, self.lib], diff), [path])
+        body = read_text(path)
+        self.assertTrue(body.rstrip().endswith("unittest.main()"))
+        self.assertLess(body.index("class TestB"), body.index("__main__"))
+        self.assertEqual(body.count("__main__"), 1)
+        compile(body, path, "exec")
+
+    def test_a_second_copy_of_the_block_is_dropped(self):
+        path = self.raw("test_game.py", self.TESTS.replace(
+            "\n\nclass TestA", '\n\nif __name__ == "__main__":\n    unittest.main()\n\n\nclass TestA'))
+        self.assertTrue(main_block_last(path))
+        self.assertEqual(read_text(path).count("__main__"), 1)
+
+    def test_line_endings_are_kept(self):
+        for eol in ("\n", "\r\n"):
+            path = self.raw("test_game.py", (self.TESTS + self.ADDED).replace("\n", eol))
+            self.assertTrue(main_block_last(path))
+            with open(path, "rb") as handle:
+                text = handle.read().decode("utf-8")
+            self.assertEqual(text.count("\r\n"), text.count("\n") if eol == "\r\n" else 0)
+
+    def test_blocks_that_differ_are_left_for_a_reader(self):
+        path = self.raw("test_game.py", self.TESTS + '\n\nif __name__ == "__main__":\n'
+                                                     '    unittest.main(verbosity=2)\n')
+        self.assertFalse(main_block_last(path))
+
+    def test_only_test_files_the_round_touched(self):
+        path = self.raw("test_game.py", self.TESTS + self.ADDED)
+        self.assertEqual(put_main_last([path], "+++ b/lib.py\n+x = 1\n"), [])
+        self.assertEqual(put_main_last([path], "NEW FILE test_game.py:\nimport unittest\n"), [path])
+
+    def test_a_block_already_last_is_not_touched(self):
+        self.assertFalse(main_block_last(self.raw("test_game.py", self.TESTS)))
+        self.assertFalse(main_block_last(self.lib))
+
+
 class TestSecondLook(unittest.TestCase):
     def setUp(self):
         self.real = supervisor_aider._chat
@@ -145,6 +197,38 @@ class TestSecondLook(unittest.TestCase):
         self.script("VERDICT: REJECT\nREASON: it deletes the parser")
         supervisor_aider.review_change("area", "+x", notes=["big.py: 40 lines removed"])
         self.assertIn("big.py: 40 lines removed", self.asked[0])
+
+    def test_what_the_diff_cannot_show_reaches_all_three_reads(self):
+        self.script("VERDICT: ACCEPT\nREASON: fine",
+                    "BUG: line 2 calls re.finditer but re is never imported",
+                    "VERDICT: ACCEPT\nREASON: re is imported in lines the diff does not show")
+        verdict, _ = supervisor_aider.review_change("area", "+x", context="\nre is imported\n")
+        self.assertEqual(verdict, "accept")
+        self.assertEqual(len(self.asked), 3)
+        self.assertTrue(all("re is imported" in prompt for prompt in self.asked))
+
+
+class TestReviewContext(Temp):
+    def test_the_code_an_item_names_is_shown_as_it_stands(self):
+        found = named_code("In `area` (lib.py), default the height to 1", [self.app, self.lib])
+        self.assertEqual([(os.path.basename(p), n) for p, n, _ in found], [("lib.py", "area")])
+        self.assertIn("return width * height", found[0][2])
+
+    def test_a_method_is_found_inside_its_class(self):
+        path = self.file("shape.py", "class Shape:\n    def grow(self, by):\n        return by * 2\n")
+        found = named_code("In `Shape.grow`, double it", [path])
+        self.assertEqual(found[0][1], "Shape.grow")
+        self.assertTrue(found[0][2].lstrip().startswith("def grow"))
+
+    def test_nothing_named_shows_nothing_and_the_limit_holds(self):
+        self.assertEqual(named_code("Tidy the README", [self.lib]), [])
+        self.assertEqual(named_code("In `area`, round it", [self.lib], limit=10), [])
+
+    def test_pyflakes_is_only_claimed_when_it_ran(self):
+        self.assertIn("pyflakes", review_context("In `area`, x", [self.lib], linted=True))
+        text = review_context("In `area`, x", [self.lib], linted=False)
+        self.assertNotIn("pyflakes", text)
+        self.assertIn("def area", text)
 
 
 if __name__ == "__main__":

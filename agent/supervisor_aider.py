@@ -289,7 +289,7 @@ def _verdict(prompt, timeout):
     return "", reason
 
 
-def review_change(task, diff, timeout=300, notes=()):
+def review_change(task, diff, timeout=300, notes=(), context=""):
     """A second agent's verdict on one round's change. Returns (verdict, reason).
 
     verdict is "accept", "reject", or "" when no clear answer came back -- in
@@ -305,6 +305,10 @@ def review_change(task, diff, timeout=300, notes=()):
     the assumption there is one -- a different question gets a different
     answer from the same model. A bug it names is put to a third, neutral read
     before the change is thrown away, so one false alarm cannot cost a round.
+
+    `context` is what the diff cannot show -- what the checks have already
+    settled, and the code the item names as it stands now. All three reads
+    get it, straight after the diff.
     """
     if not diff.strip():
         return "", "nothing to review"
@@ -312,15 +316,16 @@ def review_change(task, diff, timeout=300, notes=()):
     if notes:
         seen = ("\nThe automatic checks noticed (not errors by themselves, but look):\n"
                 + "\n".join("- %s" % n for n in notes[:6]) + "\n")
-    verdict, reason = _verdict(REVIEW_PROMPT % (task, diff) + seen, timeout)
+    shown = diff + context
+    verdict, reason = _verdict(REVIEW_PROMPT % (task, shown) + seen, timeout)
     if verdict != "accept" or REVIEW_PASSES < 2:
         return verdict, reason
-    text, _ = _chat(BUG_HUNT % (task, diff), 3000, timeout)
+    text, _ = _chat(BUG_HUNT % (task, shown), 3000, timeout)
     bug = re.search(r"BUG:\s*(.+)", text or "")
     if not bug or len(bug.group(1).strip()) < 20:
         return verdict, reason
     claim = bug.group(1).strip()[:300]
-    second, why = _verdict(CONFIRM % (task, diff, claim), timeout)
+    second, why = _verdict(CONFIRM % (task, shown, claim), timeout)
     if second == "reject":
         return "reject", "a second look found: %s" % (why or claim)[:200]
     return verdict, reason

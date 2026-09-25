@@ -19,6 +19,8 @@ class ReportMixin:
 
     def mark_checkpoint(self):
         self.next_checkpoint = time.time() + CHECKPOINT_MINUTES * 60
+        self.mark_sent_back = self.rejected + self.reverted
+        self.mark_parked = parked_count(self.notes_path)
         self.mark_done = done_count(self.notes_path)
         self.mark_size = code_lines(self.edit_files)
         self.mark_print = code_fingerprint(self.edit_files)
@@ -78,6 +80,22 @@ class ReportMixin:
                 self.note("  Nothing moved, but %d round(s) lost the engine."
                           % self.engine_failures)
                 self.note("  That is the machine, not the list. Carrying on.")
+                say("+" + "-" * 60 + "+")
+                say()
+                self.mark_checkpoint()
+                return True
+            # Changes made and sent back, items parked: the loop doing its job
+            # on a hard list. On 2026-09-24 B's turns ended here twice, after 32
+            # and 28 of 67 minutes, every round's change turned down -- and the
+            # lost turns were then held against the changes A had just made.
+            # An item that keeps failing is parked by the rounds themselves,
+            # and three parked in a row ends the run (park_stalled).
+            sent_back = self.rejected + self.reverted - self.mark_sent_back
+            parked = parked_count(self.notes_path) - self.mark_parked
+            if sent_back > 0 or parked > 0:
+                self.note("  Nothing kept, but %d change(s) made and sent back, %d item(s) parked:"
+                          % (max(0, sent_back), max(0, parked)))
+                self.note("  the loop is working through a hard list. Carrying on.")
                 say("+" + "-" * 60 + "+")
                 say()
                 self.mark_checkpoint()

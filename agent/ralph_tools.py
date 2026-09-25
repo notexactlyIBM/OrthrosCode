@@ -34,6 +34,27 @@ FOUND_FILE = "FOUND.md"
 LESSONS_FILE = "LESSONS.md"
 SKILLS_FILE = "SKILLS.md"
 
+# One line per request, as rounds are told of it. A tool is only any use once
+# the model knows it is there, and the only place that said so was the mission
+# in the twin's folder -- notes, not code, so a tool built into this agent
+# never reached the rounds it runs. On 2026-09-24 an item was planned to build
+# CALLERS:, which was already here. compose_round_prompt adds each request
+# the mission does not mention; a test fails any handled here but not listed.
+REQUESTS = (
+    ("RESEARCH:", "RESEARCH: <question>   a web search and page fetch          -> RESEARCH.md"),
+    ("FIND:", "FIND: <text>           every line in this project with it   -> FOUND.md"),
+    ("CALLERS:", "CALLERS: <function>    every line that calls it             -> FOUND.md"),
+    ("DEF:", "DEF: <name>            where a function or class is defined -> FOUND.md"),
+    ("OUTLINE:", "OUTLINE: <file>        every class and def line in it       -> FOUND.md"),
+    ("DOCS:", "DOCS: <module>         an installed library's documentation -> FOUND.md"),
+    ("DIGEST:", "DIGEST: <file> -- <question>   a file too big to send, read in parts -> FOUND.md"),
+)
+
+
+def unlisted_requests(prompt):
+    """The REQUESTS lines `prompt` does not mention yet, indented as a list."""
+    return ["    " + line for word, line in REQUESTS if word not in prompt]
+
 SEARCH_EXTS = (".py", ".md", ".cmd", ".bat", ".html", ".txt", ".json", ".toml", ".cfg")
 SKIP_DIRS = {"venv", ".git", "__pycache__", "node_modules", "logs", ".venv"}
 FIND_LIMIT = 40

@@ -106,7 +106,9 @@ flowchart TD
    running is killed. Only then does the other agent start.
 5. **Judgement.** An agent that started and did useful work has proven its
    version, and the changes its twin made to it are carried into the twin as
-   well. One that did not steps back to its last proven version.
+   well. One that did not start steps back to its last proven version, and so
+   do changes that cost it two weak turns in a row. A weak turn on a proven
+   version counts against nothing: there is nothing new to blame.
 6. **Report.** Rounds, kept and rejected changes, errors, speed and scores go
    into the field report its twin reads when planning.
 
@@ -312,10 +314,11 @@ becomes the record of how the agents evolved.
 |---|---|
 | **Linter** | flake8's error rules, inside each round, so the model fixes its own slips at once |
 | **Tests** | a unittest suite, after every edit, every round and before launch |
-| **Automatic checks** | after every round, at no token cost: lint and call signatures across the whole project (only what the round added counts), placeholders where code was cut, conflict markers, deleted tests. A round they catch is undone |
-| **Reviewer** | a separate, cold request that reads each diff against its item, told what the automatic checks noticed |
-| **Second look** | when the reviewer keeps a change, another read assumes there is a bug and hunts for it; a bug it names is confirmed by a third read before the change is undone |
+| **Automatic checks** | after every round, at no token cost: lint and call signatures across the whole project (only what the round added counts), placeholders where code was cut, conflict markers, deleted tests. A round they catch is undone. A test class added below `if __name__ == "__main__":` is put right instead |
+| **Reviewer** | a separate, cold request that reads each diff against its item, told what the automatic checks noticed and have already settled, and shown the code the item names as it stands after the round -- so a name imported above the diff, or a part an earlier round already did, is not held against the change |
+| **Second look** | when the reviewer keeps a change, another read assumes there is a bug and hunts for it; a bug it names is confirmed by a third read before the change is undone. Both see what the reviewer saw |
 | `FIND: text` | every line in the project containing it, in `FOUND.md` next round |
+| `CALLERS:`, `DEF:`, `OUTLINE:` | every call to a function, where a name is defined, a file's classes and defs -- in `FOUND.md`. Every request the loop answers is added to each round's prompt |
 | `DOCS: module` | an installed library's own documentation, offline |
 | `RESEARCH: question` | a web search and page fetch, in `RESEARCH.md` |
 | `DIGEST: file -- question` | a file too big for a round, read in parts, answer in `FOUND.md` |
@@ -338,7 +341,7 @@ becomes the record of how the agents evolved.
 | **Rollback** | Folders are committed before each turn. An agent that fails to start is reset, and its failed version kept as a git tag. |
 | **Proven history** | Every proven version is remembered. A change that turns out fatal after being copied into both is stepped back past, as far as the baseline if need be. |
 | **Prompts that fit** | A guard loaded into the agents' Pythons keeps aider from pulling files into a round past what the window holds, or sending a prompt the window cannot take. A refused prompt is never mistaken for a crashed engine. |
-| **Recover, then stop out loud** | Machine failures are retried after 2, 5 and 15 minutes; an item that ends two turns in a row is parked; an early stop becomes the twin's first item. When nothing more can be done, Orthros stops and says so. |
+| **Recover, then stop out loud** | Machine failures are retried after 2, 5 and 15 minutes; an item that ends two turns in a row is parked; changes sent back and items parked count as a turn working, not as a stall; an early stop becomes the twin's first item. When nothing more can be done, Orthros stops and says so. |
 | **Settings on trial** | A tuned setting is kept only after a clean turn; one that fails is withdrawn for good. |
 | **Fair turns** | Turns alternate, and their length leans towards an even split of time and tokens. |
 

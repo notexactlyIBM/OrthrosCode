@@ -5,16 +5,17 @@ for one round to read whole: the file list for the item, the documents it may
 consult, the command line, and the per-round telemetry.
 """
 
+import ast
 import os
 import re
 import time
 
 import status
-from ralph_common import LOCATE, SCAN, say
+from ralph_common import LOCATE, SCAN, read_text, say
 from ralph_locate import locate
 from ralph_scan import baseline, scan
 from ralph_prompts import compose_round_prompt, design_guide
-from ralph_rounds import build_round_command, files_for_task, run_round
+from ralph_rounds import SYMBOL, build_round_command, files_for_task, run_round
 from ralph_tools import FOUND_FILE, SKILLS_FILE
 
 
@@ -39,6 +40,78 @@ def attempt_temperature(attempt, code, brainstorm, step=0.25):
     retry mostly writes the same rejected change again.
     """
     return round(min(max(code, brainstorm), code + step * max(0, attempt - 1)), 2)
+
+
+# The reviewers read one round's diff and nothing else. On 2026-09-24 about
+# half the changes they sent back were sound: a second read "found" imports
+# missing that sat above the lines shown, a round adding the test its item
+# asked for was turned down for not changing a function an earlier round had
+# already changed, and another for not changing one that already did what
+# the item wanted. So they are told what the checks have settled, and shown
+# the code the item names as it stands now.
+SETTLED = ("\nAlready settled by the automatic checks, before any reader: it parses, it starts "
+           "or imports cleanly, and any tests pass.%s The diff shows only the lines that "
+           "changed and a few around them, so a name it uses without showing where it comes "
+           "from is defined or imported in lines not shown -- that is not a fault.\n")
+LINTED = " pyflakes read every file whole after the change and found no name it left undefined."
+NAMED_CODE_CHARS = 6000
+
+
+def named_code(task, files, limit=NAMED_CODE_CHARS):
+    """[(file, name, source)]: what the item names in backticks, as it is now.
+
+    `f` finds a function or class, `Class.method` a method. Test files are
+    looked in last, and each name is shown once. Stops short of `limit`
+    characters, so a whole big class never crowds out the diff.
+    """
+    names = []
+    for symbol in SYMBOL.findall(task or ""):
+        if symbol not in names:
+            names.append(symbol)
+    found, used = [], 0
+    for path in sorted(files, key=lambda p: os.path.basename(p).startswith("test_")):
+        if not names or not path.endswith(".py") or not os.path.isfile(path):
+            continue
+        body = read_text(path)
+        try:
+            tree = ast.parse(body)
+        except (SyntaxError, ValueError):
+            continue
+        lines = body.splitlines(keepends=True)
+        for name in list(names):
+            node = _definition(tree.body, name.split("."))
+            if node is None:
+                continue
+            names.remove(name)
+            start = min([node.lineno] + [d.lineno for d in node.decorator_list])
+            source = "".join(lines[start - 1:node.end_lineno])
+            if used + len(source) <= limit:
+                found.append((path, name, source))
+                used += len(source)
+    return found
+
+
+def _definition(nodes, parts):
+    for node in nodes:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) \
+                and node.name == parts[0]:
+            if len(parts) == 1:
+                return node
+            return _definition(node.body, parts[1:]) if isinstance(node, ast.ClassDef) else None
+    return None
+
+
+def review_context(task, files, linted):
+    """What the reviewers are told beyond the diff (see SETTLED)."""
+    text = SETTLED % (LINTED if linted else "")
+    shown = named_code(task, files)
+    if shown:
+        text += ("\nFor reference, the code the item names as it stands after this change. "
+                 "Earlier rounds on the item may already have done part of it: whether the "
+                 "item is done is judged by this code, and faults are looked for in the diff.\n")
+        for path, name, source in shown:
+            text += "\n%s, `%s`:\n\n%s\n" % (os.path.basename(path), name, source.rstrip())
+    return text
 
 
 class SendMixin:
@@ -147,11 +220,15 @@ class SendMixin:
             return []
 
     def second_opinion(self, task, diff, notes):
-        """The reviewer's verdict, told what the automatic checks noticed."""
+        """The reviewer's verdict, told what the automatic checks noticed and
+        settled, and shown the code the item names (review_context)."""
+        linted = bool(SCAN) and (getattr(self, "scan_before", {}) or {}).get("lint") is not None
+        extra = {"context": review_context(task, self.edit_files, linted)}
         if notes:
-            try:
-                return self.review(task, diff, notes=notes)
-            except TypeError:
-                pass
+            extra["notes"] = notes
+        try:
+            return self.review(task, diff, **extra)
+        except TypeError:
+            pass
         return self.review(task, diff)
 

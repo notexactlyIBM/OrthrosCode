@@ -1142,7 +1142,14 @@ class Orthros:
             self.carry_over(name)
         else:
             self.state["idle_streak"] += 1
-            me["weak_streak"] += 1
+            if self.is_good(name, result["own"]):
+                # A weak turn on a proven version says nothing about changes
+                # made after it. On 2026-09-24 B idled once on its proven
+                # version and once on the changes A had just made to it, and
+                # those changes were rolled back for "two sessions in a row".
+                me["weak_streak"] = 0
+            else:
+                me["weak_streak"] += 1
             if me["weak_streak"] >= 2 and not self.is_good(name):
                 trouble = self.outside_trouble(result)
                 if trouble and not me.get("spared"):
@@ -2327,7 +2334,13 @@ def apply_patch(root, patch_path):
                 os.remove(tmp)
                 if ok:
                     break
-                git(folder, "checkout", "-q", "--", ".")   # a failed 3-way leaves markers
+                # A failed 3-way leaves markers in this file: put it alone
+                # back. This was `checkout -- .`, which put back every file
+                # applied before it as well -- in each patch up to 2026-09-24,
+                # README.md and SKILLS.md, undone by config.cmd's clash with the
+                # agents' own settings and reported as applied all the same.
+                git(folder, "reset", "-q", "--", rel)
+                git(folder, "checkout", "-q", "--", rel)
             if ok:
                 applied.append(rel)
                 continue

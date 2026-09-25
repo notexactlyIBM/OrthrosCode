@@ -131,6 +131,17 @@ class TestJudging(Sandbox):
         self.o.judge(self.result("A", log_text=text))
         self.assertEqual(self.o.agent("A")["rollbacks"], 1)
 
+    def test_a_weak_turn_on_a_proven_version_does_not_count_against_later_changes(self):
+        stop = "Nothing moved in 10 minutes. Stopping."
+        self.o.judge(self.result("A", reason=stop))              # on its proven baseline
+        folder = self.o.folders["A"]
+        self.write(folder, "agent.py", "def f():\n    return 5\n")      # B's change to A
+        orthros.commit_all(folder, "B's change to A")
+        self.o.judge(self.result("A", reason=stop))
+        self.assertEqual(self.o.agent("A")["rollbacks"], 0)      # one weak turn on the change
+        self.o.judge(self.result("A", reason=stop))
+        self.assertEqual(self.o.agent("A")["rollbacks"], 1)      # two: now it goes
+
     def test_field_report_names_oversize_prompts(self):
         text = ("litellm.APIConnectionError: ... request (32958 tokens) exceeds the available "
                 "context size (32768 tokens), try increasing it\n")
@@ -336,6 +347,24 @@ class TestApplyPatch(Sandbox):
             self.assertEqual(orthros.apply_patch(self.root, os.path.join(self.root, "cmd.patch")), 0)
         with open(os.path.join(self.o.folders["A"], "config.cmd"), "rb") as handle:
             self.assertEqual(handle.read(), b"@echo off\r\nset \"X=1\"\r\nset \"Y=2\"\r\n")
+
+    def test_a_file_that_fails_does_not_undo_the_files_before_it(self):
+        for n in orthros.NAMES:
+            self.write(self.o.folders[n], "NOTES.md", "one\n")
+            orthros.commit_all(self.o.folders[n], "notes")
+        patch = ("diff --git a/NOTES.md b/NOTES.md\n--- a/NOTES.md\n+++ b/NOTES.md\n"
+                 "@@ -1 +1,2 @@\n one\n+two\n"
+                 "diff --git a/agent.py b/agent.py\n--- a/agent.py\n+++ b/agent.py\n"
+                 "@@ -1,2 +1,2 @@\n def f():\n-    return 99\n+    return 7\n")
+        self.write(self.root, "mixed.patch", patch)
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(orthros.apply_patch(self.root, os.path.join(self.root, "mixed.patch")),
+                             1)
+        self.assertIn("Left out: agent.py", out.getvalue())
+        for n in orthros.NAMES:
+            folder = self.o.folders[n]
+            self.assertEqual(orthros.read_text(os.path.join(folder, "NOTES.md")), "one\ntwo\n")
+            self.assertTrue(orthros.git(folder, "diff", "--quiet", "HEAD")[0])   # and committed
 
     def test_a_file_that_does_not_apply_is_left_out(self):
         patch = ("diff --git a/agent.py b/agent.py\n--- a/agent.py\n+++ b/agent.py\n"

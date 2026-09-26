@@ -32,6 +32,9 @@ if "THIS ROUND: THE TEST ONLY" in message:
         "import unittest\nimport calc\n\n\nclass TestDouble(unittest.TestCase):\n"
         "    def test_double(self):\n"
         "        self.assertEqual(%s)\n" % check)
+    if test_kind == "and_old":
+        path = os.path.join(here, "test_old.py")
+        open(path, "w").write(open(path).read().replace("(1, 1)", "(1, 1 + 0)"))
     if test_kind == "and_code":
         open(os.path.join(here, "calc.py"), "a").write("\n\ndef double(x):\n    return 2 * x\n")
     # A habit worth guarding against: ticking the item anyway.
@@ -152,6 +155,17 @@ class TestTestFirstLoop(unittest.TestCase):
         self.run_session("and_code", "nothing_useful")
         self.assertIn("changed code, not only a test", self.log)
         self.assertNotIn("return 2 * x", read_text(self.code))
+
+    def test_a_test_round_that_edits_an_old_test_is_sent_back(self):
+        old = os.path.join(self.ws, "test_old.py")
+        write_text(old, "import unittest\n\n\nclass TestOld(unittest.TestCase):\n"
+                        "    def test_one(self):\n        self.assertEqual(1, 1)\n")
+        self.git("add", "-A")
+        self.git("commit", "-qm", "old test")
+        self.run_session("and_old", "right")
+        self.assertIn("changed an existing test (test_old.TestOld.test_one)", self.log)
+        self.assertIn("(1, 1)", read_text(old))
+        self.assertIn("(1, 1)", self.committed("test_old.py"))
 
     def test_code_that_never_passes_leaves_no_failing_test_behind(self):
         s = self.run_session("fails", "nothing_useful")

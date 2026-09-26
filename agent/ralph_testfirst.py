@@ -272,9 +272,14 @@ class TestFirstMixin:
         if untick(self.notes_path, task):
             self.note("  ticked it in the test round; opened again.")
 
+        # The tests already there are what every other change is held to. A
+        # test round that edits one would carry the edit in with its own test.
+        altered = sorted(t for t, source in ids_before.items() if ids_after.get(t) != source)
         why = ""
         if changed_code:
             why = "the test round changed code, not only a test"
+        elif altered:
+            why = "the test round changed an existing test (%s)" % altered[0]
         elif not new:
             broken = [n for n, (_, after) in changed.items() if after and not _methods(after)]
             why = ("%s does not parse" % broken[0]) if broken else \

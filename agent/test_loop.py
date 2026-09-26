@@ -17,7 +17,7 @@ import subprocess
 
 import ralph_ledger
 import status
-from ralph_common import read_text, write_text
+from ralph_common import read_text, write_text, session_test
 from ralph_refill import refill_temperature
 from ralph_session import Session
 
@@ -55,6 +55,7 @@ print("Tokens: 1.2k sent, 300 received.")
 '''
 
 
+@session_test
 class LoopBase(unittest.TestCase):
     """A workspace, a fake aider and a session to run. No tests of its own, so
     the classes built on it do not each run the same tests again -- which,
@@ -181,6 +182,7 @@ print("Tokens: 1.2k sent, 300 received.")
 '''
 
 
+@session_test
 class GitLoopBase(unittest.TestCase):
     """The rollback is real here: `git checkout -- .`, as in a managed folder."""
 

@@ -56,6 +56,8 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin, Tes
         # every round (aider 0.86.2, base_coder.get_read_only_files_content).
         self.child_env = dict(child_env or {})
         self.child_env.setdefault("PYTHONHASHSEED", "0")
+        # aider's own test runs inside a round: the quick suite (ralph_common).
+        self.child_env.setdefault("LC_QUICK_TESTS", "1")
         self.minutes = minutes
         self.single_shot = single_shot
         self.notes_hint = notes_hint

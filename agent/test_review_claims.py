@@ -15,7 +15,7 @@ import unittest
 
 import status
 import supervisor_aider
-from ralph_common import read_text, write_text
+from ralph_common import read_text, write_text, session_test
 from ralph_scan import check_claims, lint
 from ralph_session import Session
 
@@ -110,6 +110,7 @@ print("Tokens: 1k sent, 100 received.")
 '''
 
 
+@session_test
 class TestTheLoopWeighsClaims(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()

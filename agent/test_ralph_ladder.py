@@ -12,7 +12,7 @@ from collections import namedtuple
 
 import ralph_ledger
 import status
-from ralph_common import read_text, write_text
+from ralph_common import read_text, write_text, session_test
 from ralph_ladder import next_rung, outcome, rung_command
 from ralph_session import Session
 
@@ -90,6 +90,7 @@ print("Tokens: 1k sent, 100 received.")
 '''
 
 
+@session_test
 class TestTheLadderInALoop(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()

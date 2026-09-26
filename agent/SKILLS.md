@@ -26,6 +26,9 @@ The whole suite must still finish in seconds.
 `class Test...(unittest.TestCase)`. Use `tempfile` for any files. No network,
 no LM Studio, no sleeping: the whole suite runs after every edit and must
 take seconds. Never delete or weaken a test to make a change pass.
+A test that runs a whole `Session` gets `@session_test` (from ralph_common)
+on its class: those start dozens of processes and run before each turn, not
+after each round.
 
 **Change what the model is told.** Prompts that LocalCoder writes are
 constants in ralph_prompts.py. The standing prompt for a folder is its

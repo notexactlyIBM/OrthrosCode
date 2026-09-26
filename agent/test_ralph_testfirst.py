@@ -13,7 +13,7 @@ from unittest import mock
 
 import ralph_ledger
 import status
-from ralph_common import read_text, write_text
+from ralph_common import read_text, write_text, session_test
 from ralph_session import Session
 from ralph_testfirst import acceptance, test_file_for, test_is_broken, untick
 
@@ -105,6 +105,7 @@ class TestAcceptance(unittest.TestCase):
             self.assertFalse(untick(notes, "missing"))
 
 
+@session_test
 class TestTestFirstLoop(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()

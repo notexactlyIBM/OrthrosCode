@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import time
+import unittest
 
 # The console this lands in is whatever Windows hands over, often cp1252, which
 # cannot encode a good deal of what aider prints. Echoing is the least
@@ -212,3 +213,19 @@ def write_text(path, body):
         return True
     except OSError:
         return False
+
+
+# Tests that run a whole session start dozens of processes each -- git, a fake
+# aider, the linters -- and on Windows a process costs ten to twenty times what
+# it does on Linux: the suite took 217 s there, against 17 s here, and the
+# check after every round has 240 s (2026-09-26). They test the loop, not the
+# round's change, so they run before each turn (Orthros's pre-launch check and
+# --doctor) and are skipped by the checks after each round and inside it,
+# which set LC_QUICK_TESTS=1.
+QUICK_TESTS = "LC_QUICK_TESTS"
+
+
+def session_test(cls):
+    """Mark a TestCase that runs whole sessions: skipped when tests must be quick."""
+    return unittest.skipIf(os.environ.get(QUICK_TESTS) == "1",
+                           "runs whole sessions: checked before each turn, not each round")(cls)

@@ -2813,28 +2813,33 @@ def doctor(root, out=print):
         except (OSError, subprocess.TimeoutExpired):
             version = ""
         say("OK" if version else "FAIL", "%s's Python: %s" % (name, version or "does not run"))
-        out("      running %s's tests -- a minute or several, with no output until done ..."
-            % name)
-        started = now()
-        try:
-            proc = subprocess.run([python, "-m", "unittest", "discover", "-s", ".", "-p",
-                                   "test_*.py", "-q"], cwd=folder, capture_output=True,
-                                  text=True, timeout=600, encoding="utf-8", errors="replace")
-            took = now() - started
-            tail_ = ((proc.stderr or "") + (proc.stdout or "")).strip().splitlines()[-1:]
-            if proc.returncode == 5 or "Ran 0 tests" in " ".join(tail_) + (proc.stderr or ""):
-                say("WARN", "%s has no tests" % name)
-            elif proc.returncode != 0:
-                say("FAIL", "%s's tests fail: %s" % (name, " ".join(tail_)))
-            else:
-                say("OK" if took < 120 else "WARN",
-                    "%s's tests pass in %d s%s" % (name, took, "" if took < 120 else
-                                                  " -- rounds are failed past 240 s; find the "
-                                                  "slow ones"))
-        except subprocess.TimeoutExpired:
-            say("FAIL", "%s's tests did not finish in 10 minutes" % name)
-        except OSError as exc:
-            say("FAIL", "%s's tests could not run: %s" % (name, exc))
+        # The quick suite is what runs after every round (limit 240 s); the
+        # whole one, with the tests that run entire sessions, before each turn.
+        for quick, what, limit, ok_under in (("1", "quick tests (after every round)", 240, 60),
+                                             ("", "full tests (before each turn)", 600, 300)):
+            out("      running %s's %s -- no output until done ..." % (name, what))
+            env = dict(os.environ, LC_QUICK_TESTS=quick)
+            started = now()
+            try:
+                proc = subprocess.run([python, "-m", "unittest", "discover", "-s", ".", "-p",
+                                       "test_*.py", "-q"], cwd=folder, capture_output=True,
+                                      text=True, timeout=limit + 60, encoding="utf-8",
+                                      errors="replace", env=env)
+                took = now() - started
+                tail_ = ((proc.stderr or "") + (proc.stdout or "")).strip().splitlines()[-1:]
+                if proc.returncode == 5 or "Ran 0 tests" in " ".join(tail_) + (proc.stderr or ""):
+                    say("WARN", "%s has no tests" % name)
+                    break
+                if proc.returncode != 0:
+                    say("FAIL", "%s's %s fail: %s" % (name, what, " ".join(tail_)))
+                else:
+                    say("OK" if took < ok_under else "FAIL" if took > limit else "WARN",
+                        "%s's %s pass in %d s (the limit is %d s)" % (name, what, took, limit))
+            except subprocess.TimeoutExpired:
+                say("FAIL", "%s's %s did not finish in %d s" % (name, what, limit + 60))
+            except OSError as exc:
+                say("FAIL", "%s's tests could not run: %s" % (name, exc))
+                break
         if os.name != "nt":
             say("WARN", "%s: the limits on the model's code apply on Windows only" % name)
         elif os.path.isfile(os.path.join(folder, "ralph_contain.py")):

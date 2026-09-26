@@ -164,7 +164,7 @@ print("@@IMPORTS@@" + json.dumps(failed))
 def _import_env():
     env = os.environ.copy()
     env.update(SDL_VIDEODRIVER="dummy", SDL_AUDIODRIVER="dummy",
-               PYGAME_HIDE_SUPPORT_PROMPT="1", MPLBACKEND="Agg")
+               PYGAME_HIDE_SUPPORT_PROMPT="1", MPLBACKEND="Agg", LC_QUICK_TESTS="1")
     return env
 
 

@@ -20,7 +20,7 @@ from unittest import mock
 
 import ralph_ledger
 import status
-from ralph_common import read_text, write_text
+from ralph_common import read_text, write_text, session_test
 from ralph_session import Session
 
 os.environ.setdefault("LC_RALPH_RAISE", "1")
@@ -79,6 +79,7 @@ def git(ws, *args):
                           + list(args), capture_output=True, text=True)
 
 
+@session_test
 class TestWholeSession(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()

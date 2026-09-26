@@ -10,7 +10,7 @@ import tempfile
 import unittest
 
 import status
-from ralph_common import read_text, write_text
+from ralph_common import read_text, write_text, session_test
 from ralph_memory import Index, Memory, examples_note, kept_rounds, tokens
 from ralph_session import Session
 
@@ -37,6 +37,7 @@ class TestIndex(unittest.TestCase):
         self.assertEqual(index.search("nothing alike"), [])
 
 
+@session_test
 class TestMemoryFromGit(unittest.TestCase):
     def setUp(self):
         self.ws = tempfile.mkdtemp()
@@ -86,6 +87,7 @@ print("Tokens: 1k sent, 100 received.")
 '''
 
 
+@session_test
 class TestTheLoopRemembers(unittest.TestCase):
     def test_a_kept_round_is_an_example_for_the_next_similar_item(self):
         d = tempfile.mkdtemp()

@@ -14,11 +14,8 @@ import status
 from ralph_common import (PLAN_FILE, RESEARCH_AUTO, RESEARCH_FILE,
     ROUND_FILE, TRANSCRIPT_CAP, TRANSCRIPT_FILE, read_text, say, write_text)
 from ralph_tasks import PLAN_HEADER
-from ralph_prompts import compose_refill_prompt, design_guide
+from ralph_prompts import FIELD_REPORT_FILE, compose_refill_prompt, design_guide
 from ralph_tools import LESSONS_FILE
-
-# Written by Orthros after each turn: how the agent in this folder performed.
-FIELD_REPORT_FILE = "FIELD_REPORT.md"
 
 
 DIFF_BUDGET = 14000      # characters of diff a review is shown, ~3,500 tokens

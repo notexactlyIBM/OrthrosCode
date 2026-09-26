@@ -35,9 +35,13 @@ Every step is a git commit you can read.
    edit that did not apply is redone as a whole-file rewrite, a change that
    broke something is redone in plan-then-edit mode, and after two failures
    the job is split into smaller ones.
-5. **Handover.** The model is unloaded, the card freed, and the other agent
+5. **Fix before building.** When the list runs dry, an agent first turns the
+   field report -- what went wrong in its twin's real turns -- into fixes, then
+   checks the work already ticked off. Only when that finds nothing does it
+   plan something new.
+6. **Handover.** The model is unloaded, the card freed, and the other agent
    starts.
-6. **Proof by score.** Working is not the same as better. Every few good
+7. **Proof by score.** Working is not the same as better. Every few good
    turns, an agent's current version is scored on held-out coding exercises
    it has never seen. Its changes are copied into its twin only if the score
    is no worse than the last version that passed (and not far below the best
@@ -68,7 +72,8 @@ Darwin Gödel Machine, SICA), cut down to fit one graphics card.
 3. Download this repository and run **`SETUP.bat`**. It installs aider once and
    creates the two agents, `OrthrosCode A\` and `OrthrosCode B\`.
 4. Run **`ORTHROS.bat --doctor`**. It changes nothing and prints OK / WARN /
-   FAIL for every check. Fix any FAIL.
+   FAIL for every check -- the agents' tests are run exactly as before every
+   turn, so all clear here means a turn can start. Fix any FAIL.
 5. Run **`ORTHROS.bat`**, pick a mode on the dashboard and press **Start**.
 
 No GPU? `ORTHROS.bat --simulate` runs the whole thing with stand-in agents.

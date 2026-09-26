@@ -228,21 +228,47 @@ class TestDoctor(Sandbox):
         self.assertEqual(before, {n: orthros.head(self.o.folders[n]) for n in orthros.NAMES})
 
     def test_a_missing_agent_is_a_failure(self):
-        shutil.rmtree(os.path.join(self.o.folders["B"], ".git"))
+        orthros.remove_tree(os.path.join(self.o.folders["B"], ".git"))
         lines = []
         self.assertEqual(orthros.doctor(self.root, out=lines.append), 1)
         self.assertTrue(any(l.startswith("FAIL  B: no agent") for l in lines))
 
 
 class TestPreflight(Sandbox):
-    def test_the_tests_never_get_the_ledger(self):
-        # Given it, the ledger's own tests wrote into it and failed (2026-09-26).
-        self.write(self.o.folders["A"], "test_ledger_unseen.py",
+    def test_the_tests_get_nothing_of_the_harness(self):
+        # Given the ledger, its own tests wrote into it and failed (2026-09-26).
+        self.write(self.o.folders["A"], "test_harness_unseen.py",
                    "import os\nimport unittest\n\n\nclass T(unittest.TestCase):\n"
                    "    def test_unseen(self):\n"
-                   "        self.assertNotIn('ORTHROS_LEDGER', os.environ)\n")
+                   "        self.assertEqual([k for k in os.environ\n"
+                   "                          if k.startswith(('ORTHROS_', 'LC_'))], [])\n")
         self.assertIn("ORTHROS_LEDGER", self.o.agent_env("A"))     # a turn still gets it
+        with mock.patch.dict(os.environ, {"LC_WORKSPACE": "the twin"}):
+            self.assertEqual(self.o.preflight("A"), [])
+
+    def test_a_flaky_test_goes_to_the_twin_and_rolls_nothing_back(self):
+        folder = self.o.folders["A"]
+        self.write(folder, "test_a_leaves_a_mess.py", "import os\nos.environ['MESS'] = '1'\n")
+        self.write(folder, "test_b_minds_it.py",
+                   "import os\nimport unittest\n\n\nclass T(unittest.TestCase):\n"
+                   "    def test_clean(self):\n        self.assertNotIn('MESS', os.environ)\n")
         self.assertEqual(self.o.preflight("A"), [])
+        self.assertIn("In `T.test_clean` (test_b_minds_it.py)", self.notes("A"))
+        self.o.preflight("A")
+        self.assertEqual(self.notes("A").count("T.test_clean"), 1)     # listed once
+
+    def test_a_test_that_fails_on_its_own_too_counts(self):
+        self.write(self.o.folders["A"], "test_broken.py",
+                   "import unittest\n\n\nclass T(unittest.TestCase):\n"
+                   "    def test_sum(self):\n        self.assertEqual(1 + 1, 3)\n")
+        problems = self.o.preflight("A")
+        self.assertEqual(len(problems), 1)
+        self.assertIn("test_sum", problems[0])
+
+    def test_failed_tests_are_read_in_either_pythons_words(self):
+        out = ("FAIL: test_x (test_m.T)\nERROR: test_y (test_m.T.test_y)\n"
+               "ERROR: setUpClass (test_m.U)\nERROR: test_gone (unittest.loader._FailedTest)\n")
+        self.assertEqual(orthros.rerun_ids(out), ["test_m.T.test_x", "test_m.T.test_y"])
 
 
 class TestSurrender(Sandbox):

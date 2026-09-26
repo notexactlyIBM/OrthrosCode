@@ -322,6 +322,22 @@ given what the code already does. Then write the steps into the task list.
 """
 
 
+# Written by Orthros after each turn: how the agent in this folder performed.
+FIELD_REPORT_FILE = "FIELD_REPORT.md"
+
+FIX_PROMPT = """The task list is empty and there is still time. Before anything new,
+fix what went wrong when this code was last run for real. Do not touch any code
+this round.
+
+FIELD_REPORT.md, which you have, says how its last turns went, newest first:
+rounds lost and to what, changes sent back and why, errors, early stops. For
+each problem in it, find the cause in the source and write an item that removes
+it -- the one that cost the most rounds first. If you cannot find a cause,
+write an item that makes that code say more when it happens, so the next
+report shows it. If the report shows nothing going wrong, write nothing.
+"""
+
+
 VERIFY_PROMPT = """The task list is empty and there is still time. Before taking on
 more, check that what is already ticked off is really true. Do not touch any
 code this round.
@@ -343,11 +359,14 @@ weaknesses you noticed in the code while checking.
 """
 
 
-# What the loop asks for when the list runs dry, in order, repeating. Mostly
-# decomposition -- that is the engine that keeps work coming -- with the
-# operator's own briefs and a verification pass woven in, because a plan
-# followed without ever looking back builds on its own unchecked claims.
-REFILL_CYCLE = ("decompose", "decompose", "brief", "decompose", "verify")
+# What the loop asks for when the list runs dry, in order, repeating: fixing
+# and checking first, new work last. Until 2026-09-26 it was mostly new work --
+# decompose, decompose, brief, decompose, verify -- and as a session seldom
+# refills more than twice, 37 of the 39 refills in the logs were new
+# milestones and none was a check: whatever went wrong was built on. A refill
+# that finds nothing moves on to the next, so new work comes once the fixing
+# and checking come back empty.
+REFILL_CYCLE = ("fix", "verify", "brief", "verify", "decompose")
 
 
 def rules(heading):
@@ -367,7 +386,7 @@ def _refill_lessons(notes_path, task):
 def compose_refill_prompt(notes_path, refills):
     """One refill round's prompt. Returns (text, label, mode, milestone).
 
-    Four ways of finding the next work, cycled rather than chosen, so a long
+    Five ways of finding the next work, cycled rather than chosen, so a long
     unattended run keeps making progress on a plan without either grinding one
     seam forever or drifting off what the operator asked for.
     """
@@ -390,6 +409,14 @@ def compose_refill_prompt(notes_path, refills):
                 + history_note(notes_path) + tests_note(notes_path)
                 + _refill_lessons(notes_path, "planning the next milestones"),
                 "planning the next milestones", mode, None)
+
+    if mode == "fix":
+        if os.path.isfile(os.path.join(os.path.dirname(notes_path), FIELD_REPORT_FILE)):
+            return (FIX_PROMPT + "\n" + rules("Found in the field report")
+                    + history_note(notes_path)
+                    + _refill_lessons(notes_path, "fixing what went wrong in its turns"),
+                    "fixing what the field report shows", mode, None)
+        mode = "verify"                  # no turns reported yet: check the work instead
 
     if mode == "verify":
         return (VERIFY_PROMPT + "\n" + rules("Found by checking the work")

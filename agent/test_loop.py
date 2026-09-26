@@ -128,9 +128,13 @@ class TestLoop(LoopBase):
         self.env["PYTHONHASHSEED"] = "7"
         self.assertEqual(self.session().child_env["PYTHONHASHSEED"], "7")
 
-    def test_aiders_test_runs_never_get_orthros_ledger(self):
-        self.env["ORTHROS_LEDGER"] = os.path.join(self.dir, "shared.sqlite")
-        self.assertNotIn("ORTHROS_LEDGER", self.session().child_env)
+    def test_aider_gets_nothing_of_the_harness_but_the_guard(self):
+        self.env.update(ORTHROS_LEDGER=os.path.join(self.dir, "shared.sqlite"),
+                        LC_WORKSPACE=self.dir, ORTHROS_AIDER_GUARD="1")
+        env = self.session().child_env
+        self.assertNotIn("ORTHROS_LEDGER", env)
+        self.assertNotIn("LC_WORKSPACE", env)
+        self.assertEqual((env["ORTHROS_AIDER_GUARD"], env["LC_QUICK_TESTS"]), ("1", "1"))
 
     def test_dead_engine_stops_cleanly(self):
         self.env["FAKE_MODE"] = "dead"
@@ -384,6 +388,7 @@ class TestDeadEndRecovery(LoopBase):
 class TestRefillTemperature(unittest.TestCase):
     def test_checking_is_cold_inventing_is_warm(self):
         self.assertEqual(refill_temperature("verify", 0.2, 0.8), 0.2)
+        self.assertEqual(refill_temperature("fix", 0.2, 0.8), 0.2)
         self.assertEqual(refill_temperature("plan", 0.2, 0.8), 0.8)
         self.assertEqual(refill_temperature("brief", 0.2, 0.8), 0.8)
         self.assertEqual(refill_temperature("decompose", 0.2, 0.8), 0.5)

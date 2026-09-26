@@ -19,11 +19,11 @@ import status
 def refill_temperature(mode, code, brainstorm):
     """How warm a refill round runs, by what it is for.
 
-    Planning and briefs invent: warm, for range. Checking finished work is
-    reading code for faults: cold, like writing it. Breaking a milestone
-    into steps is some of each.
+    Planning and briefs invent: warm, for range. Checking finished work, or
+    finding what went wrong, is reading code for faults: cold, like writing
+    it. Breaking a milestone into steps is some of each.
     """
-    if mode == "verify":
+    if mode in ("verify", "fix"):
         return code
     if mode == "decompose":
         return round((code + brainstorm) / 2, 2)

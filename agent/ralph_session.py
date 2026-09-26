@@ -19,6 +19,7 @@ import ralph_ledger as ledger
 import status
 from ralph_checks import code_fingerprint, find_project_python, full_check
 from ralph_common import LOG_FILE, ROUNDS_IF_SMALL, TRANSCRIPT_FILE, say
+from ralph_contain import without_harness
 from ralph_outcome import OutcomeMixin
 from ralph_refill import RefillMixin
 from ralph_report import ReportMixin
@@ -54,12 +55,13 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin, Tes
         # which reuses the longest unchanged start of the last prompt, had to
         # read them all again. A fixed hash seed makes the order the same
         # every round (aider 0.86.2, base_coder.get_read_only_files_content).
-        self.child_env = dict(child_env or {})
+        # Nothing of the harness's but the guard's switch (ralph_contain): this
+        # process writes the ledger, and aider's own test runs are the checks'.
+        self.child_env = without_harness(child_env or {},
+                                         keep=(common.QUICK_TESTS, "ORTHROS_AIDER_GUARD"))
         self.child_env.setdefault("PYTHONHASHSEED", "0")
-        # aider's own test runs inside a round: the quick suite (ralph_common),
-        # and without Orthros's ledger, which this process writes (ralph_contain).
-        self.child_env.setdefault("LC_QUICK_TESTS", "1")
-        self.child_env.pop("ORTHROS_LEDGER", None)
+        # aider's own test runs inside a round: the quick suite (ralph_common).
+        self.child_env.setdefault(common.QUICK_TESTS, "1")
         self.minutes = minutes
         self.single_shot = single_shot
         self.notes_hint = notes_hint

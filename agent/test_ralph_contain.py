@@ -45,14 +45,17 @@ class TestRun(unittest.TestCase):
             proc.wait()
             self.assertIsNone(job)
 
-    def test_the_code_checked_never_gets_orthros_ledger(self):
-        show = [sys.executable, "-c", "import os; print(os.environ.get('ORTHROS_LEDGER', '-'))"]
-        with mock.patch.dict(os.environ, {"ORTHROS_LEDGER": "shared.sqlite"}):
-            inherited = contain.run(show, text=True, timeout=30).stdout.strip()
+    def test_the_code_checked_gets_nothing_of_the_harness(self):
+        show = [sys.executable, "-c", "import os; print(*(os.environ.get(k, '-') for k in "
+                "('ORTHROS_LEDGER', 'LC_WORKSPACE', 'LC_QUICK_TESTS', 'KEEP')))"]
+        harness = {"ORTHROS_LEDGER": "shared.sqlite", "LC_WORKSPACE": "twin", "LC_QUICK_TESTS": "1"}
+        with mock.patch.dict(os.environ, harness):
+            inherited = contain.run(show, text=True, timeout=30).stdout.split()
             given = contain.run(show, text=True, timeout=30,
-                                env=dict(os.environ, KEEP="1")).stdout.strip()
+                                env=dict(os.environ, KEEP="1")).stdout.split()
             self.assertEqual(os.environ["ORTHROS_LEDGER"], "shared.sqlite")   # ours is untouched
-        self.assertEqual((inherited, given), ("-", "-"))
+        self.assertEqual(inherited, ["-", "-", "1", "-"])      # the quick switch gets through
+        self.assertEqual(given, ["-", "-", "1", "1"])
 
     @unittest.skipUnless(os.name == "nt", "Windows job objects")
     def test_a_test_that_eats_memory_is_stopped(self):

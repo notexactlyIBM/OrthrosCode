@@ -31,6 +31,17 @@ class TestRelevantLessons(unittest.TestCase):
         ranked = relevant_lessons(self.dir, task, most=5)
         self.assertIn("ralph_tools.py", ranked[0])
 
+    def test_refills_fix_and_check_before_new_work(self):
+        notes = os.path.join(self.dir, "orthros_tasks.md")
+        write_text(notes, "# Tasks\n\n- [x] In `add` (calc.py), handle None\n")
+        write_text(os.path.join(self.dir, "PLAN.md"), "# Plan\n\n## [ ] Faster\n\nMake it fast.\n")
+        modes = [compose_refill_prompt(notes, n)[2] for n in range(1, 6)]
+        self.assertEqual(modes, ["verify", "verify", "brief", "verify", "decompose"])
+        write_text(os.path.join(self.dir, "FIELD_REPORT.md"), "## 2026-09-26\n\n- Error: boom\n")
+        text, _, mode, _ = compose_refill_prompt(notes, 1)
+        self.assertEqual(mode, "fix")                  # a report to act on comes first
+        self.assertIn("FIELD_REPORT.md", text)
+
     def test_ordinary_words_do_not_score(self):
         # "the" and "old" are not identifiers; they must not create a match.
         task = "the old thing"

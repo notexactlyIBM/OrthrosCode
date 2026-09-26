@@ -57,12 +57,6 @@ DEFAULTS = {
     "launch_minutes": 20,        # to get from starting to its first round
     "grace_minutes": 30,         # past the planned end before asking it to stop
     "pause_after_idle": 4,       # sessions in a row with nothing kept; 0 = never
-    # Install an agent's changed requirements.txt into its own venv layer
-    # before its turn. Off by default: it downloads from PyPI whatever the
-    # other agent wrote there, and a small model can invent package names
-    # that someone has registered maliciously. The shared base and the twin
-    # are never touched either way.
-    "install_requirements": False,
     # Windows counts every byte a program may need -- including the system
     # memory the driver commits to back video memory -- against one limit. A
     # 27B model can put that limit within reach on 32 GB, and when it is
@@ -124,7 +118,7 @@ GUARD_REFUSED = "Orthros guard: prompt too big"
 # rollback of the code keeps them, and they are never carried across.
 # STOPS.md was missing and the 2026-09-25 export copied one into agent\;
 # LESSONS.summary.md is written by fold_old_lessons from that day on.
-MEMORY_FILES = ("orthros_tasks.md", "janus_tasks.md", "PLAN.md", "PROGRESS.md", "PROGRESS.old.md", "DONE.md",
+MEMORY_FILES = ("orthros_tasks.md", "PLAN.md", "PROGRESS.md", "PROGRESS.old.md", "DONE.md",
                 "BRIEF.md", "CONVENTIONS.md", "RALPH_PROMPT.md", "RESEARCH.md",
                 "LESSONS.md", "LESSONS.summary.md", "STOPS.md", "FOUND.md", "FIELD_REPORT.md",
                 "ROLLBACK.md", "GISTS.md")
@@ -197,15 +191,11 @@ FIELD_SIGNS = (
 )
 OVERSIZE = re.compile(r"request \((\d+) tokens\) exceeds the available context size "
                       r"\((\d+) tokens\)")
-NOTES_FILES = ("orthros_tasks.md", "janus_tasks.md")
 
 
 def notes_file(folder):
-    """The task list an agent keeps about this folder, under either name."""
-    for name in NOTES_FILES:
-        if os.path.isfile(os.path.join(folder, name)):
-            return os.path.join(folder, name)
-    return os.path.join(folder, NOTES_FILES[0])
+    """The task list an agent keeps about this folder."""
+    return os.path.join(folder, "orthros_tasks.md")
 
 
 OPEN_ITEM = re.compile(r"^[ \t]*[-*][ \t]*\[ \][ \t]*(.+?)[ \t]*$", re.MULTILINE)
@@ -262,26 +252,7 @@ CREATE_NO_WINDOW = 0x08000000
 CREATE_NEW_PROCESS_GROUP = 0x00000200
 
 
-def adopt_old_name(root, new, old):
-    """Keep using what is already there: a machine set up under the old name
-    has its state and settings in files called janus*, and losing them would
-    mean losing which versions have proven themselves."""
-    fresh, stale = os.path.join(root, new), os.path.join(root, old)
-    if not os.path.isfile(fresh) and os.path.isfile(stale):
-        try:
-            os.replace(stale, fresh)
-        except OSError:
-            return stale
-    return fresh
-
-
 def agent_folder(root, name):
-    """An agent's folder. New setups are OrthrosCode A and B; a machine set up
-    when the project was called JanusCoder keeps those folder names."""
-    for pattern in ("OrthrosCode %s", "JanusCoder %s"):
-        folder = os.path.join(root, pattern % name)
-        if os.path.isdir(folder):
-            return folder
     return os.path.join(root, "OrthrosCode %s" % name)
 
 
@@ -497,6 +468,14 @@ def git(folder, *args, timeout=300):
     return proc.returncode == 0, ((proc.stdout or "") + (proc.stderr or "")).strip()
 
 
+def remove_tree(path):
+    """shutil.rmtree, through the files git marks read-only on Windows."""
+    def writable(func, target, _):
+        os.chmod(target, 0o666)
+        func(target)
+    shutil.rmtree(path, onerror=writable)
+
+
 def head(folder):
     ok, out = git(folder, "rev-parse", "HEAD")
     return out.strip() if ok else ""
@@ -549,6 +528,97 @@ def score_totals(scores):
 
 
 # --------------------------------------------------------------------------
+# the check: one, for the pre-launch check and --doctor alike
+# --------------------------------------------------------------------------
+
+# The harness's own settings: Orthros's and LocalCoder's.
+HARNESS = ("ORTHROS_", "LC_")
+FAILING = re.compile(r"^(?:FAIL|ERROR): (\w+) \(([\w.]+)\)", re.M)
+NOT_A_TEST = ("setUpClass", "tearDownClass", "setUpModule", "tearDownModule")
+
+
+def check_env(quick=False):
+    """The environment an agent's code is checked in: this machine's, with none
+    of the harness's settings.
+
+    Built the same way for every check, so what --doctor passes the pre-launch
+    check passes too. On 2026-09-26 the pre-launch check ran in a turn's own
+    environment, which names Orthros's ledger: the ledger's tests wrote into
+    it, failed, and stopped Orthros on A's baseline -- while --doctor, without
+    that environment, had said all clear. Dropped by prefix, not by name, so
+    the next setting a turn needs cannot leak in either.
+    """
+    env = {k: v for k, v in os.environ.items() if not k.upper().startswith(HARNESS)}
+    env.update(PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
+    if quick:
+        env["LC_QUICK_TESTS"] = "1"      # the suite the check after each round runs
+    return env
+
+
+def rerun_ids(output):
+    """The ids of the failed tests in a unittest run's output, to run again."""
+    ids = []
+    for method, where in FAILING.findall(output):
+        # "(test_mod.TestCase)" up to Python 3.10, "(test_mod.TestCase.method)" after.
+        test_id = where if where.endswith("." + method) else "%s.%s" % (where, method)
+        if method not in NOT_A_TEST and not where.startswith("unittest.") \
+                and test_id not in ids:
+            ids.append(test_id)
+    return ids
+
+
+def check_agent(folder, python, quick=False, seconds=600):
+    """Does an agent's code import and pass its own tests? Returns (problems,
+    flaky, seconds taken); no problems means fit to run.
+
+    Tests that fail are run once more, on their own. Those that pass then are
+    flaky -- timing on a loaded machine, or leaning on what another test left
+    behind -- and are named, not counted: a flaky test is a test to fix, not a
+    reason to roll a version back or to stop for the night. A failure outside
+    any one test (a module that will not load, a setUpClass) always counts.
+    """
+    env, flags, started = check_env(quick), CREATE_NO_WINDOW if os.name == "nt" else 0, now()
+
+    def run(args, timeout):
+        proc = subprocess.run([python] + args, cwd=folder, env=env, capture_output=True,
+                              text=True, timeout=timeout, encoding="utf-8", errors="replace",
+                              creationflags=flags)
+        return proc.returncode, (proc.stderr or "") + (proc.stdout or "")
+
+    def verdict(problem="", flaky=()):
+        return [problem] if problem else [], list(flaky), now() - started
+
+    try:
+        code, out = run(["-c", PREFLIGHT_IMPORTS], 180)
+        if code:
+            return verdict("modules do not import: "
+                           + " | ".join(out.strip().splitlines()[-4:]))
+        if not any(f.startswith("test_") and f.endswith(".py") for f in os.listdir(folder)):
+            return verdict()
+        code, out = run(["-m", "unittest", "discover", "-s", ".", "-p", "test_*.py", "-q"],
+                        seconds)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return verdict("the check did not finish: %s" % exc)
+    if not code:
+        return verdict()
+    failing = [l for l in out.splitlines() if l.startswith(("FAIL:", "ERROR:"))]
+    ids, flaky = rerun_ids(out), []
+    if ids and len(ids) == len(failing):
+        try:
+            code, again = run(["-m", "unittest", "-q"] + ids, seconds)
+        except (OSError, subprocess.TimeoutExpired):
+            code, again = 1, ""
+        if not code:
+            return verdict("", ids)
+        still = rerun_ids(again)
+        if still:
+            flaky = [i for i in ids if i not in still]
+            failing = [l for l in again.splitlines() if l.startswith(("FAIL:", "ERROR:"))]
+    return verdict("tests fail: " + " | ".join(failing[:4] or out.strip().splitlines()[-4:]),
+                   flaky)
+
+
+# --------------------------------------------------------------------------
 # the orchestrator
 # --------------------------------------------------------------------------
 
@@ -560,8 +630,8 @@ class Orthros:
         self.folders = {n: agent_folder(root, n) for n in NAMES}
         self.logs = os.path.join(root, "logs")
         os.makedirs(self.logs, exist_ok=True)
-        self.state_path = adopt_old_name(root, ".orthros-state.json", ".janus-state.json")
-        self.settings_path = adopt_old_name(root, "orthros.json", "janus.json")
+        self.state_path = os.path.join(root, ".orthros-state.json")
+        self.settings_path = os.path.join(root, "orthros.json")
         self.lock = threading.RLock()
         self.wake = threading.Event()
         self.settings = dict(DEFAULTS)
@@ -805,7 +875,7 @@ class Orthros:
             cmd = [self.python_for(name), "supervisor.py", "--loop", "--minutes", str(minutes)]
         work_ = work_ or {}
         env = self.agent_env(name, work_.get("folder"), work_.get("kind", "self"))
-        env["ORTHROS_SESSION"] = env["JANUS_SESSION"] = token
+        env["ORTHROS_SESSION"] = token
         log = open(log_path, "ab")
         try:
             proc = subprocess.Popen(cmd, cwd=folder, env=env, stdout=log,
@@ -826,7 +896,6 @@ class Orthros:
         peer = work_["folder"]
         own_sha = commit_all(self.folders[name], "Orthros: %s as it starts its turn" % name)
         pre = commit_all(peer, "Orthros: before %s works on it" % name)
-        self.install_requirements(name)
         for leftover in (STOP_FILE,):
             try:
                 os.remove(os.path.join(peer, leftover))
@@ -922,33 +991,6 @@ class Orthros:
         self.proc = None
         return result
 
-    def install_requirements(self, name):
-        """If the twin changed this agent's requirements.txt, install it -- into
-        this agent's own venv layer only. See "install_requirements" above."""
-        if self.simulate or not self.settings.get("install_requirements"):
-            return
-        req = os.path.join(self.folders[name], "requirements.txt")
-        body = read_text(req)
-        me = self.agent(name)
-        if not body or body == me.get("requirements", ""):
-            return
-        try:
-            proc = subprocess.run([self.python_for(name), "-m", "pip", "install", "-q",
-                                   "--disable-pip-version-check", "-r", req],
-                                  cwd=self.folders[name], capture_output=True, text=True,
-                                  timeout=900, encoding="utf-8", errors="replace")
-            ok = proc.returncode == 0
-            out = (proc.stdout or "") + (proc.stderr or "")
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            ok, out = False, str(exc)
-        if ok:
-            me["requirements"] = body
-            self.event("installed %s's changed requirements into its own venv" % name, "good")
-        else:
-            self.event("could not install %s's requirements: %s"
-                       % (name, " ".join(out.split())[-160:]), "bad")
-        self.save()
-
     def request_stop(self, folder):
         try:
             with open(os.path.join(folder, STOP_FILE), "w", encoding="utf-8") as handle:
@@ -1004,44 +1046,26 @@ class Orthros:
     # ---------------------------------------------------------------- preflight and reports
 
     def preflight(self, name):
-        """Import every module and run the tests, with the agent's own Python.
+        """check_agent, with the agent's own Python: seconds, where a failed
+        launch costs minutes of model loading first.
 
-        Seconds, where a failed launch costs minutes of model loading first.
         Returns a list of problems; empty means fit to launch. Orthros's own
         check, so an agent cannot switch it off by editing itself -- though
-        the tests it runs are the agent's.
+        the tests it runs are the agent's. A flaky test goes to the top of the
+        list its twin works from, to be fixed like anything else.
         """
-        folder, python = self.folders[name], self.python_for(name)
-        env = self.agent_env(name)
-        # The tests are not a turn. Given the ledger, its own tests wrote their
-        # fixtures into it and looked for them in their temporary folder: A
-        # failed this check on its baseline, and ledger.sqlite held 86 made-up
-        # rounds (2026-09-26).
-        env.pop("ORTHROS_LEDGER", None)
-        flags = CREATE_NO_WINDOW if os.name == "nt" else 0
-        problems = []
-        try:
-            proc = subprocess.run([python, "-c", PREFLIGHT_IMPORTS], cwd=folder, env=env,
-                                  capture_output=True, text=True, timeout=180,
-                                  encoding="utf-8", errors="replace", creationflags=flags)
-            if proc.returncode != 0:
-                problems.append("modules do not import: " + " | ".join(
-                    ((proc.stdout or "") + (proc.stderr or "")).strip().splitlines()[-4:]))
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            problems.append("could not run the import check: %s" % exc)
-        tests = [f for f in os.listdir(folder) if f.startswith("test_") and f.endswith(".py")]
-        if not problems and tests:
-            try:
-                proc = subprocess.run([python, "-m", "unittest", "discover", "-s", ".", "-p",
-                                       "test_*.py", "-q"], cwd=folder, env=env,
-                                      capture_output=True, text=True, timeout=600,
-                                      encoding="utf-8", errors="replace", creationflags=flags)
-                if proc.returncode != 0:
-                    out = ((proc.stderr or "") + (proc.stdout or "")).splitlines()
-                    failing = [l for l in out if l.startswith(("FAIL:", "ERROR:"))]
-                    problems.append("tests fail: " + " | ".join(failing[:4] or out[-4:]))
-            except (OSError, subprocess.TimeoutExpired) as exc:
-                problems.append("the tests did not finish: %s" % exc)
+        problems, flaky, _ = check_agent(self.folders[name], self.python_for(name))
+        if flaky:
+            self.event("%s has flaky tests -- they failed in the suite and passed on their "
+                       "own: %s" % (name, ", ".join(flaky)[:200]), "bad")
+        path = notes_file(self.folders[name])
+        for test_id in flaky[:3]:
+            module, _, test = test_id.partition(".")
+            if not any(test in item for item in OPEN_ITEM.findall(read_text(path))):
+                add_first(path, "Found by Orthros: In `%s` (%s.py), the test failed in the full "
+                          "suite and passed when run on its own, so it depends on timing or on "
+                          "what other tests leave behind. Make it pass either way. Done when: "
+                          "it passes both alone and in the full suite." % (test, module))
         return problems
 
     def memory_is_free_enough(self, name):
@@ -2461,19 +2485,14 @@ def serve(orthros, port):
 
 def make_sandbox():
     root = os.path.join(tempfile.gettempdir(), "orthros-sim")
-
-    def writable(func, path, _):
-        os.chmod(path, 0o666)       # git marks its objects read-only on Windows
-        func(path)
-
     if os.path.isdir(root):
-        shutil.rmtree(root, onerror=writable)
+        remove_tree(root)
     for n in NAMES:
         folder = os.path.join(root, "OrthrosCode %s" % n)
         os.makedirs(folder)
         with open(os.path.join(folder, "agent.py"), "w") as handle:
             handle.write("# agent %s\n" % n)
-        with open(os.path.join(folder, NOTES_FILES[0]), "w") as handle:
+        with open(notes_file(folder), "w") as handle:
             handle.write("# Tasks\n\n- [ ] improve something\n")
         with open(os.path.join(folder, ".gitignore"), "w") as handle:
             handle.write(".localcoder*\n")
@@ -2570,13 +2589,8 @@ def export(root, name):
         print("Could not read %s's history: %s" % (name, listing))
         return 1
     out = os.path.join(root, "agent")
-
-    def writable(func, path, _):
-        os.chmod(path, 0o666)
-        func(path)
-
     if os.path.isdir(out):
-        shutil.rmtree(out, onerror=writable)
+        remove_tree(out)
     count = 0
     for rel in listing.splitlines():
         base = os.path.basename(rel)
@@ -2818,33 +2832,25 @@ def doctor(root, out=print):
         except (OSError, subprocess.TimeoutExpired):
             version = ""
         say("OK" if version else "FAIL", "%s's Python: %s" % (name, version or "does not run"))
-        # The quick suite is what runs after every round (limit 240 s); the
-        # whole one, with the tests that run entire sessions, before each turn.
-        for quick, what, limit, ok_under in (("1", "quick tests (after every round)", 240, 60),
-                                             ("", "full tests (before each turn)", 600, 300)):
+        # The same check as before each turn (check_agent), so all clear here
+        # means the pre-launch check passes. The quick suite is what runs after
+        # every round (limit 240 s); the whole one before each turn.
+        has_tests = any(f.startswith("test_") and f.endswith(".py") for f in os.listdir(folder))
+        if not has_tests:
+            say("WARN", "%s has no tests" % name)
+        for quick, what, limit, ok_under in (((True, "quick tests (after every round)", 240, 60),
+                                              (False, "full tests (before each turn)", 600, 300))
+                                             if has_tests else ()):
             out("      running %s's %s -- no output until done ..." % (name, what))
-            env = dict(os.environ, LC_QUICK_TESTS=quick)
-            started = now()
-            try:
-                proc = subprocess.run([python, "-m", "unittest", "discover", "-s", ".", "-p",
-                                       "test_*.py", "-q"], cwd=folder, capture_output=True,
-                                      text=True, timeout=limit + 60, encoding="utf-8",
-                                      errors="replace", env=env)
-                took = now() - started
-                tail_ = ((proc.stderr or "") + (proc.stdout or "")).strip().splitlines()[-1:]
-                if proc.returncode == 5 or "Ran 0 tests" in " ".join(tail_) + (proc.stderr or ""):
-                    say("WARN", "%s has no tests" % name)
-                    break
-                if proc.returncode != 0:
-                    say("FAIL", "%s's %s fail: %s" % (name, what, " ".join(tail_)))
-                else:
-                    say("OK" if took < ok_under else "FAIL" if took > limit else "WARN",
-                        "%s's %s pass in %d s (the limit is %d s)" % (name, what, took, limit))
-            except subprocess.TimeoutExpired:
-                say("FAIL", "%s's %s did not finish in %d s" % (name, what, limit + 60))
-            except OSError as exc:
-                say("FAIL", "%s's tests could not run: %s" % (name, exc))
-                break
+            problems, flaky, took = check_agent(folder, python, quick, limit + 60)
+            if problems:
+                say("FAIL", "%s's %s fail: %s" % (name, what, problems[0][:300]))
+            else:
+                say("OK" if took < ok_under else "FAIL" if took > limit else "WARN",
+                    "%s's %s pass in %d s (the limit is %d s)" % (name, what, took, limit))
+            if flaky:
+                say("WARN", "%s has flaky tests, which failed in the suite and passed on "
+                            "their own: %s" % (name, ", ".join(flaky)))
         if os.name != "nt":
             say("WARN", "%s: the limits on the model's code apply on Windows only" % name)
         elif os.path.isfile(os.path.join(folder, "ralph_contain.py")):

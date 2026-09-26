@@ -21,7 +21,7 @@ import os
 import signal
 import subprocess
 
-from ralph_common import _env_int
+from ralph_common import QUICK_TESTS, _env_int
 
 CHECK_MEMORY_MB = _env_int("LC_CHECK_MEMORY_MB", 4096, floor=0)
 CHECK_PROCESSES = 32
@@ -82,14 +82,24 @@ def _terminate(job):
         pass
 
 
+# The harness's own settings: Orthros's and LocalCoder's.
+HARNESS = ("ORTHROS_", "LC_")
+
+
+def without_harness(env, keep=(QUICK_TESTS,)):
+    """`env` without the harness's settings, but for those named in `keep`.
+
+    The code a round checks has no business with them, nor has aider. Given
+    ORTHROS_LEDGER, the ledger's own tests wrote their fixtures into Orthros's
+    records and failed every check (2026-09-26); LC_WORKSPACE names the twin's
+    real folder. Dropped by prefix, not by name, so the next one stays out too.
+    """
+    return {k: v for k, v in env.items() if k in keep or not k.upper().startswith(HARNESS)}
+
+
 def start(cmd, memory_mb=None, **kwargs):
     """subprocess.Popen, inside a limited job where there is one. Returns (proc, job)."""
-    # The code checked never gets Orthros's ledger, which is for rounds: with it
-    # the ledger's own tests wrote their fixtures there, failed every check and
-    # filled the ledger with made-up rounds (2026-09-26).
-    env = dict(os.environ if kwargs.get("env") is None else kwargs["env"])
-    env.pop("ORTHROS_LEDGER", None)
-    kwargs["env"] = env
+    kwargs["env"] = without_harness(os.environ if kwargs.get("env") is None else kwargs["env"])
     job = _limited_job(CHECK_MEMORY_MB if memory_mb is None else memory_mb, CHECK_PROCESSES)
     if os.name != "nt":
         kwargs.setdefault("start_new_session", True)    # its own group, to kill whole

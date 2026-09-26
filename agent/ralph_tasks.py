@@ -1,11 +1,12 @@
 """The task list, the plan and the progress ledger: the loop's memory on disk."""
 
+import difflib
 import os
 import re
 import time
 from ralph_common import (ARCHIVE_FILE, BRIEF_FILE, CONVENTIONS_FILE, HEADING_LINE,
     MILESTONE, PLAN_FILE, PROGRESS_FILE, PROMPT_FILE, RESEARCH_FILE,
-    ROUNDS_IF_BIG, ROUNDS_IF_SMALL, SEED_HEADINGS, TASK_DONE,
+    ROUNDS_IF_BIG, ROUNDS_IF_SMALL, SEED_HEADINGS, TASK_DONE, TASK_DONE_LINE,
     TASK_OPEN, TASK_PARKED, read_text, say, write_text)
 
 
@@ -179,6 +180,59 @@ def find_notes_file(workspace, configured=""):
             if pick in name.lower():
                 return os.path.join(workspace, name)
     return ""
+
+
+REPEAT_RATIO = 0.85     # difflib's measure; "In `add`, handle None" vs "In `add`, handle None."
+
+
+def _gist(text):
+    """(the code it names, its words) -- an item without its check, marks and case.
+
+    The names must match exactly: "In `add`, handle None" and "In `sub`,
+    handle None" are nine tenths the same text and entirely different work.
+    """
+    head = text.split(" Done when:")[0]
+    names = frozenset(re.findall(r"`([^`]+)`", head) + re.findall(r"\b[\w-]+\.py\b", head))
+    return names, " ".join(re.sub(r"[`.,;:-]", " ", head).lower().split())
+
+
+def _repeats(a, b):
+    return a[0] == b[0] and difflib.SequenceMatcher(None, a[1], b[1]).quick_ratio() > REPEAT_RATIO \
+        and difflib.SequenceMatcher(None, a[1], b[1]).ratio() > REPEAT_RATIO
+
+
+def drop_repeats(notes_path, before):
+    """Remove new open items that repeat work already done, parked or listed.
+
+    `before` is the open items before the refill; only items not among them
+    are judged. A repeat is a near-copy -- difflib ratio over REPEAT_RATIO --
+    of a done item (in the list or DONE.md), a parked one, or an item earlier
+    in the list. On 2026-09-24 rounds were spent and sent back as "an earlier
+    round already did this"; ORTHROSCODE-IMPROVEMENTS.md, item 7. Returns
+    [(dropped item, the one it repeats)].
+    """
+    body = read_text(notes_path)
+    known = [m.strip() for m in TASK_DONE_LINE.findall(body + "\n" +
+                                                         read_text(archive_path(notes_path)))]
+    known += [m.strip() for m in PARKED_LINE.findall(body)]
+    known = [(k, _gist(k)) for k in known]
+    old = set(before)
+    kept, dropped = [], []
+    for line in body.split("\n"):
+        match = TASK_OPEN.match(line)
+        if match:
+            item = match.group(1).strip()
+            gist = _gist(item)
+            if item not in old:
+                twin = next((k for k, g in known if _repeats(gist, g)), None)
+                if twin is not None:
+                    dropped.append((item, twin))
+                    continue
+            known.append((item, gist))
+        kept.append(line)
+    if dropped:
+        write_text(notes_path, "\n".join(kept))
+    return dropped
 
 
 def open_tasks(notes_path):

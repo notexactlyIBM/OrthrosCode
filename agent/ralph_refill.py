@@ -10,7 +10,7 @@ from ralph_common import (BRAINSTORM_ROUNDS, BRAINSTORM_UNTIL, GISTS_PER_REFILL,
 from ralph_gists import refresh_gists
 from ralph_prompts import compose_refill_prompt
 from ralph_rounds import refill_list
-from ralph_tasks import (drop_reparked, mark_decomposed, milestones, normalize_checkboxes,
+from ralph_tasks import (drop_repeats, drop_reparked, mark_decomposed, milestones, normalize_checkboxes,
     normalize_plan, open_tasks, park_milestone)
 
 import status
@@ -60,7 +60,8 @@ class RefillMixin:
             if ask:
                 self.note("  gists: %d module(s) summed up by the model, %d still to do"
                           % (written, left))
-        before = len(open_tasks(self.notes_path))
+        listed = open_tasks(self.notes_path)
+        before = len(listed)
         # Warm for inventing work: at the temperature that writes good diffs
         # it returns the same four safe ideas every time. Cold for checking.
         mode = compose_refill_prompt(self.notes_path, self.refills)[2]
@@ -83,6 +84,8 @@ class RefillMixin:
         again = drop_reparked(self.notes_path)
         if again:
             self.note("  dropped %d item(s) that repeat ones already parked" % again)
+        for item, twin in drop_repeats(self.notes_path, listed):
+            self.note("  dropped a repeat of work already done or listed: %s" % item[:70])
         added = len(open_tasks(self.notes_path)) - before
         if added > 0:
             return self.refill_added(added, milestone, left)

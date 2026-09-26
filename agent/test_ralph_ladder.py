@@ -16,6 +16,10 @@ from ralph_common import read_text, write_text
 from ralph_ladder import next_rung, outcome, rung_command
 from ralph_session import Session
 
+# A bug in the loop fails the test instead of being logged and survived: that
+# is how a crash in the refill hid behind a passing suite on 2026-09-26.
+os.environ.setdefault("LC_RALPH_RAISE", "1")
+
 R = namedtuple("R", "failed applied")
 
 
@@ -45,6 +49,11 @@ class TestRungs(unittest.TestCase):
                          "architect")
         self.assertEqual(next_rung(["broke", "kept", "rejected"], [self.small]), "plain")
 
+    def test_the_split_round_is_told_how_the_item_failed(self):
+        from ralph_ladder import split_note
+        note = split_note(["kept", "broke", "rejected", "split"])
+        self.assertIn("failed 2 times in a row (broke the checks, sent back)", note)
+
     def test_outcomes(self):
         self.assertEqual(outcome(R(0, 1), True, True, False, False), "kept")
         self.assertEqual(outcome(R(0, 1), True, False, False, True), "broke")
@@ -66,6 +75,11 @@ args = sys.argv[1:]
 message = open(args[args.index("--message-file") + 1], encoding="utf-8").read()
 with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "calls.jsonl"), "a") as h:
     h.write(json.dumps({"args": args, "split": "SPLIT THE ITEM" in message}) + "\n")
+if "SPLIT THE ITEM" in message:
+    notes = [args[i + 1] for i, a in enumerate(args) if a == "--file"][0]
+    body = open(notes).read().replace("handle None\n", "handle None\n  - [ ] In `add` (calc.py), "
+                                      "check a\n  - [ ] In `add` (calc.py), check b\n", 1)
+    open(notes, "w").write(body)
 if os.environ.get("FAKE_MISS"):
     print("# 1 SEARCH/REPLACE block failed to match!")
 print("Tokens: 1k sent, 100 received.")
@@ -102,8 +116,12 @@ class TestTheLadderInALoop(unittest.TestCase):
         self.assertNotIn("--architect", calls[0]["args"])
         self.assertIn("--architect", calls[1]["args"])
         self.assertTrue(calls[2]["split"])
-        self.assertIn("asking for it to be split",
-                      read_text(os.path.join(self.ws, ".localcoder-ralph.log")))
+        log = read_text(os.path.join(self.ws, ".localcoder-ralph.log"))
+        self.assertIn("asking for it to be split", log)
+        self.assertIn("split into 2 item(s), which come first now", log)
+        # The round after the split works the first new item, not the parent.
+        after_split = log.split("which come first now", 1)[1]
+        self.assertIn("Parked after 3 rounds: In `add` (calc.py), check a", after_split)
 
     def test_edits_that_miss_are_made_whole(self):
         calls = self.calls(FAKE_MISS="1")

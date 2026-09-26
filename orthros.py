@@ -1651,6 +1651,17 @@ class Orthros:
         me["since_eval"] = 0
         parent = me["scored"].get(ev["parent"], {}).get("scores", {}) if ev["parent"] else {}
         wins, losses, not_worse = compare_scores(ev["scores"], parent)
+        # Each step "not clearly worse than the last" can still walk downhill
+        # a little at a time. So the best version so far is a second bar,
+        # stricter, since it may have been a lucky run: five exercises worse
+        # and none better in eight.
+        best = self.best_scored(name, ev["scores"])
+        if parent and best and best != ev["parent"]:
+            _, best_losses, not_worse_than_best = compare_scores(
+                ev["scores"], me["scored"][best]["scores"], alpha=0.05)
+            if not not_worse_than_best:
+                not_worse = False
+                losses = max(losses, best_losses)
         full, count, passed, total = score_totals(ev["scores"])
         mine = "%d of %d held-out exercises fully passed, %d of %d hidden tests" % (
             full, count, passed, total)
@@ -1669,6 +1680,7 @@ class Orthros:
         self.warn_if_gamed(name)
         if not parent:
             me["scored_good"] = ev["sha"]
+            self.prove(name, ev["sha"])        # it ran every exercise: it works
             self.carry_over(name, me["proven_pending"] + me["pending"])
             me["proven_pending"], me["pending"] = [], []
             self.event("%s's first held-out score: %s. Later versions are held to it."
@@ -1694,6 +1706,14 @@ class Orthros:
                                 mine, theirs))
             self.rollback_to_scored(name, why)
         self.save()
+
+    def best_scored(self, name, scores):
+        """The passed version with the most hidden tests passed on these exercises."""
+        me = self.agent(name)
+        passed = [(sum(s[0] for e, s in entry["scores"].items() if e in scores), sha)
+                  for sha, entry in me["scored"].items()
+                  if entry.get("verdict") in ("baseline", "kept")]
+        return max(passed)[1] if passed else ""
 
     def rollback_to_scored(self, name, why):
         """Back to the last version that passed its score: newer proofs withdrawn."""
@@ -1963,6 +1983,7 @@ class Orthros:
         self.stop_mode = mode
         with self.lock:
             self.state["paused"] = True     # no handover once it ends
+            self.state["wanted"] = False    # stopped by hand: --resume must not undo it
             self.save()
         if mode == "now" and self.state.get("running"):
             self.request_stop(self.workspace_of(self.state["running"]))

@@ -18,6 +18,10 @@ from ralph_common import read_text, write_text
 from ralph_scan import check_claims, lint
 from ralph_session import Session
 
+# A bug in the loop fails the test instead of being logged and survived: that
+# is how a crash in the refill hid behind a passing suite on 2026-09-26.
+os.environ.setdefault("LC_RALPH_RAISE", "1")
+
 LIB = "import re\n\n\ndef words(text):\n    return re.findall(r\"\\w+\", text)\n"
 DIFF = "+def words(text):\n+    return re.findall(r\"\\w+\", text)\n"
 

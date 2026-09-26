@@ -105,6 +105,39 @@ class TestProofByScore(Sandbox):
             os.path.join(self.o.folders["A"], orthros.ROLLBACK_NOTE)))
         self.assertEqual(self.o.good("A"), self.o.agent("A")["scored_good"])
 
+    def test_a_slow_slide_is_stopped_by_the_best_score(self):
+        # No worse than the last version, which had already slipped; all eight
+        # worse than the best. The last alone would let it through.
+        exercises = orthros.work.eval_exercises()[:8]
+        me = self.o.agent("A")
+        me["scored"] = {"best": {"scores": {e: [5, 5] for e in exercises}, "verdict": "kept",
+                                 "at": 1},
+                        "last": {"scores": {e: [4, 5] for e in exercises}, "verdict": "kept",
+                                 "at": 2}}
+        me["scored_good"] = "last"
+        ev = {"agent": "A", "sha": orthros.head(self.o.folders["A"]), "parent": "last",
+              "todo": [], "scores": {e: [4, 5] for e in exercises}, "resume": "B"}
+        self.assertTrue(orthros.compare_scores(ev["scores"], me["scored"]["last"]["scores"])[2])
+        self.o.state["evaluating"] = ev
+        self.o.rollback_to_scored = lambda name, why: self.events.append("slid: " + why)
+        self.o.decide_eval(ev)
+        self.assertEqual(me["scored"][ev["sha"]]["verdict"], "rolled back")
+        self.assertTrue(any(e.startswith("slid") for e in self.events))
+
+    def test_a_small_step_down_from_a_lucky_best_is_allowed(self):
+        exercises = orthros.work.eval_exercises()[:4]
+        me = self.o.agent("A")
+        me["scored"] = {"best": {"scores": {e: [5, 5] for e in exercises}, "verdict": "kept",
+                                 "at": 1},
+                        "last": {"scores": {e: [4, 5] for e in exercises}, "verdict": "kept",
+                                 "at": 2}}
+        me["scored_good"] = "last"
+        ev = {"agent": "A", "sha": orthros.head(self.o.folders["A"]), "parent": "last",
+              "todo": [], "scores": {e: [4, 5] for e in exercises}, "resume": "B"}
+        self.o.state["evaluating"] = ev
+        self.o.decide_eval(ev)
+        self.assertEqual(me["scored"][ev["sha"]]["verdict"], "kept")
+
     def test_nothing_to_score_when_the_code_has_not_changed(self):
         self.baseline()
         self.o.agent("A")["since_eval"] = 5

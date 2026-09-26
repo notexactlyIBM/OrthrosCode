@@ -334,7 +334,8 @@ def test_check(workspace, seconds=240):
     return broken
 
 
-EXCEPTION_LINE = re.compile(r"^[A-Za-z_][\w.]*(Error|Exception|Exit|Interrupt|Warning)\b(:|$)")
+EXCEPTION_LINE = re.compile(
+    r"^(?:[A-Za-z_][\w.]*)?(?:Error|Exception|Exit|Interrupt|Warning)\b(:|$)")
 EXPLAIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ralph_explain.py")
 
 
@@ -348,6 +349,11 @@ def failing_test_id(line):
     if not match:
         return ""
     method, where = match.groups()
+    if where.startswith("unittest."):
+        # "ERROR: test_calc (unittest.loader._FailedTest.test_calc)": the
+        # module would not import. Run alone it only fails inside unittest;
+        # the ImportError itself is already in the failure's own lines.
+        return ""
     return where if where.endswith("." + method) else "%s.%s" % (where, method)
 
 

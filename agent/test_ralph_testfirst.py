@@ -14,7 +14,11 @@ import ralph_ledger
 import status
 from ralph_common import read_text, write_text
 from ralph_session import Session
-from ralph_testfirst import acceptance, test_file_for, untick
+from ralph_testfirst import acceptance, test_file_for, test_is_broken, untick
+
+# A bug in the loop fails the test instead of being logged and survived: that
+# is how a crash in the refill hid behind a passing suite on 2026-09-26.
+os.environ.setdefault("LC_RALPH_RAISE", "1")
 
 ITEM = "In `double` (calc.py), return twice the number. Done when: `double(2)` returns 4."
 
@@ -69,6 +73,25 @@ class TestAcceptance(unittest.TestCase):
         self.assertEqual(test_file_for("Done when: a test in test_report.py passes",
                                        ["/w/calc.py"]), "test_report.py")
         self.assertEqual(test_file_for(ITEM, []), "")
+
+    def test_honest_errors_of_unwritten_code_are_fine(self):
+        item = "In `add` (calc.py), take a third argument. Done when: add(1, 2, 3) returns 6."
+        for out in ("TypeError: add() takes 2 positional arguments but 3 were given",
+                    "ImportError: cannot import name 'double' from 'calc'",
+                    "AttributeError: module 'calc' has no attribute 'double'",
+                    "KeyError: 'total'"):
+            self.assertEqual(test_is_broken(out, item), "", out)
+
+    def test_a_test_that_can_never_pass_is_broken(self):
+        item = "In `add` (calc.py), take a third argument. Done when: add(1, 2, 3) returns 6."
+        self.assertIn("calcc", test_is_broken(
+            "ModuleNotFoundError: No module named 'calcc'", item))
+        self.assertEqual(test_is_broken("ModuleNotFoundError: No module named 'money'",
+                                        "Add money.py with `Money`. Done when: x"), "")
+        self.assertIn("never defines", test_is_broken(
+            'File "/w/test_calc.py", line 8, in test_x\n    self.assertEqual(ad(1), 2)\n'
+            "NameError: name 'ad' is not defined", item))
+        self.assertIn("parse", test_is_broken("SyntaxError: invalid syntax", item))
 
     def test_untick(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -180,6 +203,24 @@ class TestTestFirstLoop(unittest.TestCase):
         self.assertNotIn("return 0", self.committed("calc.py"))
         self.assertNotIn("4, 4", read_text(os.path.join(self.ws, "test_calc.py"))
                          if os.path.exists(os.path.join(self.ws, "test_calc.py")) else "")
+
+    def test_a_test_whose_file_changed_since_is_written_again(self):
+        s = self.run_session("fails", "nothing_useful")
+        s.pending_tests[ITEM] = {"ids": ["test_calc.T.test_x"], "kept": False,
+                                 "files": {"test_calc.py": (None, "old text")}}
+        write_text(os.path.join(self.ws, "test_calc.py"), "other item's tests\n")
+        s.current_task = ITEM
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(s.round_phase(ITEM), "test")
+        self.assertNotIn(ITEM, s.pending_tests)
+
+    def test_code_that_gets_closer_is_kept_while_its_test_waits(self):
+        self.run_session("fails", "nothing_useful")
+        self.assertIn("the item's test still fails; the change is kept, the test waits", self.log)
+        self.assertNotIn("unexpected error", self.log)
+        self.assertNotIn("Broke start-up", self.log)
+        self.assertIn("def double(x):\n    return x", self.committed("calc.py"))
+        self.assertEqual(self.committed("test_calc.py"), "")
 
     def test_the_reviewer_is_told_what_the_test_settled(self):
         told = []

@@ -111,6 +111,15 @@ class TestFailuresExplained(unittest.TestCase):
         self.assertEqual(ralph_checks.failing_test_id(
             "ERROR: test_add (test_calc.TestCalc)"), "test_calc.TestCalc.test_add")
         self.assertEqual(ralph_checks.failing_test_id("nonsense"), "")
+        self.assertEqual(ralph_checks.failing_test_id(
+            "ERROR: test_calc (unittest.loader._FailedTest.test_calc)"), "")
+
+    def test_any_exception_line_is_the_detail(self):
+        for line in ("Exception: bad input", "ZeroDivisionError: x", "KeyError: 'a'",
+                     "calc.PriceError: negative"):
+            self.assertTrue(ralph_checks.EXCEPTION_LINE.match(line), line)
+        for line in ("Errors are bad", "FAILED (errors=1)", "Traceback (most recent call last):"):
+            self.assertFalse(ralph_checks.EXCEPTION_LINE.match(line), line)
 
 
 if __name__ == "__main__":

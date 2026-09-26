@@ -14,6 +14,10 @@ from ralph_common import read_text, write_text
 from ralph_memory import Index, Memory, examples_note, kept_rounds, tokens
 from ralph_session import Session
 
+# A bug in the loop fails the test instead of being logged and survived: that
+# is how a crash in the refill hid behind a passing suite on 2026-09-26.
+os.environ.setdefault("LC_RALPH_RAISE", "1")
+
 
 def git(ws, *args):
     return subprocess.run(["git", "-C", ws, "-c", "user.name=t", "-c", "user.email=t@t"]

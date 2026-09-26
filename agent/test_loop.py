@@ -21,6 +21,10 @@ from ralph_common import read_text, write_text
 from ralph_refill import refill_temperature
 from ralph_session import Session
 
+# A bug in the loop fails the test instead of being logged and survived: that
+# is how a crash in the refill hid behind a passing suite on 2026-09-26.
+os.environ.setdefault("LC_RALPH_RAISE", "1")
+
 
 def write_fake_aider(path, mode):
     """Write the fake aider script for the given mode to path."""
@@ -88,6 +92,8 @@ class LoopBase(unittest.TestCase):
 
 class TestLoop(LoopBase):
     def test_works_the_list_and_survives_a_bad_reviewer(self):
+        os.environ.pop("LC_RALPH_RAISE", None)
+        self.addCleanup(os.environ.__setitem__, "LC_RALPH_RAISE", "1")
         calls = []
 
         def review(task, diff):

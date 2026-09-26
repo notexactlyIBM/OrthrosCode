@@ -27,10 +27,11 @@ from ralph_rounds import round_diff
 from ralph_scan import put_main_last
 from ralph_tools import handle_tool_requests, record_lesson
 from ralph_setup import SetupMixin, last_line
-from ralph_testfirst import TestFirstMixin, snapshot
+from ralph_testfirst import TestFirstMixin, snapshot, untick
 from ralph_ladder import next_rung, outcome
 from ralph_memory import git_head
-from ralph_tasks import done_count, open_tasks, park_task, remember_review, triage
+from ralph_tasks import (done_count, lift_above, open_tasks, park_task, remember_review,
+                         triage)
 
 # Unexpected exceptions in a row before the session gives up. One is a bug in
 # a rare branch; the loop logs it and carries on, because an unattended run
@@ -101,6 +102,8 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin, Tes
         self.review_note = ""     # what execution settled, for the reviewer
         self.review_tag = ""      # cited / uncited / refuted: how a rejection stood
         self.last_kept = False
+        self.test_state = ""      # the item's own test this round: "", "passes", "fails"
+        self.test_failure = ""
         self.item_history = {}    # item -> what each round on it came to (ralph_ladder)
         self.memory = None        # past kept rounds, for examples (ralph_memory)
         self.rung = "plain"       # how this round is being tried
@@ -207,6 +210,8 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin, Tes
                 except KeyboardInterrupt:
                     raise
                 except Exception as exc:
+                    if os.environ.get("LC_RALPH_RAISE"):
+                        raise            # tests: a bug here must fail, not be survived
                     if not self.survive(exc):
                         break
                     continue
@@ -305,7 +310,8 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin, Tes
                           % ({"whole": "whole-file edits", "architect": "architect mode",
                               "split": "asking for it to be split"}[self.rung],
                              {"edit-missed": "did not apply", "broke": "broke the checks",
-                              "no-change": "changed nothing", "rejected": "was sent back"}
+                              "no-change": "changed nothing", "rejected": "was sent back",
+                              "test-fails": "left its test failing"}
                              .get(history[-1], history[-1])))
             if self.rung == "split":
                 history.append("split")
@@ -355,6 +361,10 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin, Tes
         self.last_kept = False
         keep_going = self.after_round(result, before)
         self.settle_test(task, self.last_kept)
+        if self.rung == "split":
+            fresh = [i for i in open_tasks(self.notes_path) if i not in remaining]
+            if lift_above(self.notes_path, task, fresh):
+                self.note("  split into %d item(s), which come first now" % len(fresh))
         return keep_going
 
     def non_test_files(self):
@@ -395,7 +405,10 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin, Tes
         was_broken = bool(self.broken)
         broke = False
         status.phase("checking", "does it still build and run")
-        self.broken = full_check(ws, self.edit_files, self.entry, self.run_seconds)
+        self.broken = self.checks_with_test(task_text)
+        if self.test_state == "fails" and untick(notes_path, task_text):
+            self.note("  ticked, but its test still fails: opened again.")
+            after_done = done_count(notes_path)
 
         # A round that leaves it unable to start is worse than a round that did
         # nothing, so undo it outright rather than spending the next round
@@ -415,6 +428,7 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin, Tes
                     self.rounds_on_task += 1
                 after_done = done_count(notes_path)
                 after_open = len(open_tasks(notes_path))
+                self.last_failure_kind = "Broke start-up and was undone"
                 record_lesson(ws, "Broke start-up and was undone: %s -- %s"
                               % (self.current_task[:80], last_line(self.broken[0][1])[:100]))
                 self.broken = full_check(ws, self.edit_files, self.entry, self.run_seconds)
@@ -459,6 +473,7 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin, Tes
                     after_done = done_count(notes_path)
                     after_open = len(open_tasks(notes_path))
                     remember_review(notes_path, self.current_task, why)
+                    self.last_failure_kind = "Reviewer rejected"
                     record_lesson(ws, "Reviewer rejected: %s -- %s"
                                   % (self.current_task[:80], why[:100]))
                 else:
@@ -478,6 +493,9 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin, Tes
         # revert` never lands on a broken snapshot.
         kept = bool(self.commit and touched and not self.broken)
         if kept:
+            # A kept change ends the run of that failure: its lessons stop
+            # being put first.
+            self.last_failure_kind = ""
             # The item goes in the message: it is how ralph_memory finds this
             # change again as an example for a similar item.
             self.commit("LocalCoder ralph: round %d\n\nItem: %s" % (self.rounds,
@@ -489,6 +507,7 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin, Tes
                           after_done - before_done, kept, diff)
         if self.current_task:
             self.item_history.setdefault(self.current_task, []).append(
+                "test-fails" if self.test_state == "fails" else
                 outcome(result, touched, kept, rejected_now, broke or bool(self.broken)))
 
         self.last_kept = kept

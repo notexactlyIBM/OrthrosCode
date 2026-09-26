@@ -39,9 +39,35 @@ CHECKABLE = re.compile(r"\b(returns?|raises?|prints?|equals?|is|are|==|tests?|pa
 CODE_NAME = re.compile(r"^[A-Za-z_][\w.]*(\(\))?$")
 PROSE = (".md", ".cmd", ".bat", ".html", ".txt", ".json", ".toml", ".cfg")
 FILE_NAMED = re.compile(r"\b([\w-]+\.py)\b")
-# What a test of something not written yet dies of. Any other error means the
-# test itself is broken.
-MISSING_YET = re.compile(r"\b(ImportError|ModuleNotFoundError|AttributeError|NameError)\b")
+NO_MODULE = re.compile(r"ModuleNotFoundError: No module named '([\w.]+)'")
+LAST_FRAME = re.compile(r'File "([^"]+)", line \d+')
+
+
+def test_is_broken(out, task_text):
+    """Why an erroring new test is itself broken, or '' if its error is honest.
+
+    A test of something not written yet errors rather than fails: an
+    ImportError or AttributeError for a new name, a TypeError for a new
+    argument, a KeyError for a new key. Those are what it should do. It is
+    broken when it cannot be read, when it names something undefined in its
+    own lines, or when it imports a module the item never mentions -- a
+    misspelling, which no change to the code would ever make pass.
+    """
+    if "timed out" in out:
+        return "it timed out"
+    if re.search(r"\b(SyntaxError|IndentationError)\b", out):
+        return "it does not parse"
+    missing = NO_MODULE.search(out)
+    if missing:
+        name = missing.group(1).split(".")[0]
+        if name not in (task_text or "") and name + ".py" not in (task_text or ""):
+            return "it imports %s, which the item does not mention" % name
+        return ""
+    frames = LAST_FRAME.findall(out)
+    if re.search(r"\bNameError\b", out) and frames \
+            and os.path.basename(frames[-1]).startswith("test_"):
+        return "it uses a name it never defines"
+    return ""
 
 
 def acceptance(task_text):
@@ -196,11 +222,66 @@ class TestFirstMixin:
 
     def round_phase(self, task):
         """'test' for an item a test could check that has none yet, else 'code'."""
+        pending = self.pending_tests.get(task)
+        if pending and not pending["kept"] and not self.test_still_fits(pending):
+            # Its test files were changed since -- another item's tests kept in
+            # the same file. Putting back the saved text would drop those.
+            del self.pending_tests[task]
+            self.note("  its test file changed since the test was written; writing it again")
         if not TEST_FIRST or self.single_shot or self.broken or task in self.pending_tests:
             return "code"
         if self.test_misses.get(task, 0) >= TEST_TRIES:
             return "code"
         return "test" if acceptance(task) and self.test_target(task) else "code"
+
+    def test_still_fits(self, pending):
+        """Are the test files as they were before the test round (so it can go in)?"""
+        now = snapshot(self.workspace)
+        return all(now.get(n) == before for n, (before, _) in pending["files"].items())
+
+    def take_test_out(self, pending):
+        """The test files back to before the test round -- only those still as it left them."""
+        now = snapshot(self.workspace)
+        self.put_tests({n: before for n, (before, after) in pending["files"].items()
+                        if now.get(n) == after})
+
+    def put_tests(self, files):
+        """put_files, and a test file it deletes leaves the session's file list too:
+        left there, the next refill's size of it crashed the session."""
+        put_files(self.workspace, files)
+        gone = {os.path.join(self.workspace, n) for n, text in files.items() if text is None}
+        if gone:
+            self.edit_files = [f for f in self.edit_files if f not in gone]
+
+    def checks_with_test(self, task):
+        """full_check for a code round, telling the item's own test apart.
+
+        With the item's test failing and nothing else wrong, the round is not
+        broken -- the item is not done yet. Treated as broken, every such
+        round was undone, reset the stall count, and wrote a "broke start-up"
+        lesson; items with a test could never be parked. So: take the test
+        out and check again. Clean without it: the test comes out for the rest
+        of the round (the change can be reviewed and kept on its own merits)
+        and test_state is "fails". Sets test_state to "passes" when all pass.
+        """
+        from ralph_checks import full_check
+        self.test_state, self.test_failure = "", ""
+        broken = full_check(self.workspace, self.edit_files, self.entry, self.run_seconds)
+        pending = self.pending_tests.get(task)
+        if not pending or pending["kept"]:
+            return broken
+        if not broken:
+            self.test_state = "passes"
+            return broken
+        self.take_test_out(pending)
+        without = full_check(self.workspace, self.edit_files, self.entry, self.run_seconds)
+        if without:
+            put_files(self.workspace, {n: after for n, (_, after) in pending["files"].items()})
+            return broken
+        self.test_state = "fails"
+        self.review_note = ""           # it does not pass: nothing is settled
+        self.test_failure = " ".join(" ".join(m.split()) for w, m in broken if w == "tests")
+        return []
 
     def test_target(self, task):
         from ralph_rounds import files_for_task
@@ -218,6 +299,7 @@ class TestFirstMixin:
 
     def put_test_back(self, task):
         """Before a code round: the item's unkept test goes back in the tree."""
+        self.test_state, self.test_failure = "", ""
         pending = self.pending_tests.get(task)
         if not pending or pending["kept"]:
             self.review_note = ""
@@ -241,18 +323,21 @@ class TestFirstMixin:
         pending = self.pending_tests.get(task)
         if not pending or pending["kept"]:
             return
-        if kept:
+        if kept and getattr(self, "test_state", "") == "passes":
             pending["kept"] = True
             self.note("  the item's test passes, and is kept with the change.")
             return
+        if getattr(self, "test_state", "") == "fails":
+            # Out of the tree already; what the change did stays, if it was kept.
+            from ralph_tasks import remember_review
+            self.note("  the item's test still fails%s" % (
+                "; the change is kept, the test waits" if kept else ""))
+            remember_review(self.notes_path, task, "its test still fails -- %s"
+                            % self.test_failure[:160])
+            return
         # Not kept: rolled back, rejected, or nothing changed. The test is
         # taken out again, so no later item inherits a failing test.
-        put_files(self.workspace, {n: before for n, (before, _) in pending["files"].items()})
-        failing = [msg for where, msg in self.broken if where == "tests"]
-        if failing:
-            from ralph_tasks import remember_review
-            remember_review(self.notes_path, task, "its test still fails -- %s"
-                            % " ".join(failing[0].split())[:160])
+        self.take_test_out(pending)
         if self.broken:
             from ralph_checks import full_check
             self.broken = full_check(self.workspace, self.edit_files, self.entry,
@@ -287,15 +372,16 @@ class TestFirstMixin:
         else:
             outcomes = {t: run_one_test(ws, t) for t in new[:5]}
             ran = [(t, o, out) for t, (o, out) in outcomes.items()]
-            unusable = [(t, out) for t, o, out in ran if o == "error"
-                        and not MISSING_YET.search(out)]
+            unusable = [(t, test_is_broken(out, task), out) for t, o, out in ran if o == "error"]
+            unusable = [u for u in unusable if u[1]]
             if unusable:
-                why = "the new test does not run (%s): %s" % (unusable[0][0], last_words(unusable[0][1]))
+                why = "the new test is broken (%s): %s -- %s" % (
+                    unusable[0][0], unusable[0][1], last_words(unusable[0][2]))
             elif all(o == "passed" for _, o, _ in ran):
                 why = "the new test passes before any change, so it does not test the item"
 
         # Out of the tree either way: kept aside on success, dropped on failure.
-        put_files(ws, {n: before for n, (before, _) in changed.items()})
+        self.put_tests({n: before for n, (before, _) in changed.items()})
         if changed_code and self.rollback and self.rollback():
             self.remove_new_sources(listing_before)
 

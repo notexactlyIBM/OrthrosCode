@@ -253,9 +253,9 @@ def files_for_refill(topic, edit_files, budget=REFILL_SOURCE_BUDGET):
         named = []                       # named nothing recognisable
     # What the milestone names always goes in -- a working round sends that
     # module whole anyway. The budget only limits the extras around it.
-    chosen = list(named)
+    chosen = [p for p in named if os.path.isfile(p)]
     spent = sum(os.path.getsize(p) // 4 for p in chosen)
-    for path in sorted((f for f in edit_files if f not in named),
+    for path in sorted((f for f in edit_files if f not in named and os.path.isfile(f)),
                        key=lambda f: os.path.getsize(f)):
         cost = os.path.getsize(path) // 4
         if spent + cost > budget:

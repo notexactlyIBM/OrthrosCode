@@ -235,6 +235,35 @@ def drop_repeats(notes_path, before):
     return dropped
 
 
+def lift_above(notes_path, parent, items):
+    """Move open `items` to just above the open `parent`. Returns how many moved.
+
+    After a split the new items sit under the item they came from, and the
+    loop works the first open item -- the parent, again, which is what the
+    split was meant to stop. Above it, they are done first, and the parent
+    comes back last, often done by then.
+    """
+    body = read_text(notes_path)
+    lines = body.split("\n")
+    wanted = set(items)
+    moving, rest = [], []
+    for line in lines:
+        match = TASK_OPEN.match(line)
+        if match and match.group(1).strip() in wanted and match.group(1).strip() != parent:
+            moving.append(line.lstrip())
+            continue
+        rest.append(line)
+    spot = next((i for i, line in enumerate(rest)
+                 if TASK_OPEN.match(line) and TASK_OPEN.match(line).group(1).strip() == parent),
+                None)
+    if not moving or spot is None:
+        return 0
+    indent = rest[spot][:len(rest[spot]) - len(rest[spot].lstrip())]
+    rest[spot:spot] = [indent + line for line in moving]
+    write_text(notes_path, "\n".join(rest))
+    return len(moving)
+
+
 def open_tasks(notes_path):
     """The unticked items, in file order."""
     return [m.strip() for m in TASK_OPEN.findall(read_text(notes_path))]

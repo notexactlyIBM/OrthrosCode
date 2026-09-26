@@ -5,7 +5,7 @@ import tempfile
 import unittest
 
 from ralph_common import read_text, write_text
-from ralph_tasks import drop_repeats, open_tasks
+from ralph_tasks import drop_repeats, lift_above, open_tasks
 
 
 class TestDropRepeats(unittest.TestCase):
@@ -49,6 +49,18 @@ class TestDropRepeats(unittest.TestCase):
         write_text(self.notes, "# Tasks\n\n- [x] In `add` (calc.py), handle None\n"
                                "- [ ] In `add` (calc.py), accept strings of digits\n")
         self.assertEqual(drop_repeats(self.notes, []), [])
+
+
+class TestLiftAbove(unittest.TestCase):
+    def test_a_split_items_children_come_first(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            notes = os.path.join(tmp, "tasks.md")
+            write_text(notes, "# Tasks\n\n- [ ] Big job\n  - *Review*: no\n  - [ ] part one\n"
+                              "  - [ ] part two\n- [ ] Next job\n")
+            self.assertEqual(lift_above(notes, "Big job", ["part one", "part two"]), 2)
+            self.assertEqual(open_tasks(notes), ["part one", "part two", "Big job", "Next job"])
+            self.assertIn("- [ ] Big job\n  - *Review*: no", read_text(notes))
+            self.assertEqual(lift_above(notes, "Missing", ["part one"]), 0)
 
 
 if __name__ == "__main__":

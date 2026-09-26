@@ -24,7 +24,7 @@ from ralph_common import _env_flag, read_text
 
 LADDER = _env_flag("LC_RALPH_LADDER", True)
 WHOLE_LINES = 300            # whole-file edits only for files up to this long
-FAILED = ("rejected", "broke", "edit-missed", "no-change")
+FAILED = ("rejected", "broke", "edit-missed", "no-change", "test-fails")
 
 SPLIT_ROUND = """# THIS ROUND: SPLIT THE ITEM
 
@@ -36,7 +36,8 @@ nothing -- the next rounds do the new items.
 """
 
 WHY = {"rejected": "sent back", "broke": "broke the checks", "edit-missed":
-       "its edits did not apply", "no-change": "changed nothing"}
+       "its edits did not apply", "no-change": "changed nothing",
+       "test-fails": "its test still failed"}
 
 
 def outcome(result, touched, kept, rejected_now, broke):
@@ -53,8 +54,16 @@ def outcome(result, touched, kept, rejected_now, broke):
 
 
 def failing_streak(history):
+    """The failures since the last round that was not one, newest first.
+
+    "split" marks the round that asked for a split; it is not an outcome, and
+    it is recorded before that round runs, so it neither ends nor joins a
+    streak.
+    """
     streak = []
     for entry in reversed(history):
+        if entry == "split":
+            continue
         if entry not in FAILED:
             break
         streak.append(entry)
@@ -74,7 +83,7 @@ def next_rung(history, files):
     if last == "edit-missed" and files and all(
             len(read_text(f).splitlines()) <= WHOLE_LINES for f in files if os.path.isfile(f)):
         return "whole"
-    if last in ("broke", "no-change"):
+    if last in ("broke", "no-change", "test-fails"):
         return "architect"
     return "plain"
 

@@ -1169,6 +1169,16 @@ class Orthros:
         except sqlite3.Error:
             return []
 
+    def recent_outcomes(self, name):
+        """round_outcomes for the last day, for the page -- read at most once a minute."""
+        cache = getattr(self, "_outcomes", {})
+        at, value = cache.get(name, (0, []))
+        if now() - at > 60:
+            value = self.round_outcomes(name, now() - 86400)
+            cache[name] = (now(), value)
+            self._outcomes = cache
+        return value
+
     def coding_record(self, name):
         """The measure that matters: practice scores and task turns, newest last."""
         me = self.agent(name)
@@ -2319,6 +2329,10 @@ class Orthros:
             agents[n]["unscored"] = len(a.get("proven_pending") or [])
             best = (a.get("scored") or {}).get(a.get("scored_good") or "")
             agents[n]["held_out"] = list(score_totals(best["scores"])) if best else None
+            agents[n]["scores"] = [[e["at"]] + list(score_totals(e["scores"])) + [e["verdict"]]
+                                   for e in sorted((a.get("scored") or {}).values(),
+                                                   key=lambda e: e["at"])][-6:]
+            agents[n]["rounds_24h"] = self.recent_outcomes(n)
         return {"phase": self.phase, "message": self.message, "paused": st["paused"],
                 "next": st["next"], "running": running, "live": live, "agents": agents,
                 "events": st["events"][-12:][::-1], "settings": self.settings,

@@ -9,6 +9,29 @@ tell whether it worked.
 Written against `main` at `26aa9bb`. Module and function names refer to that
 code.
 
+## Status, 2026-09-26
+
+Built, with tests; not yet measured on the real machine:
+
+| # | What | Where |
+|---|---|---|
+| 0 | Round ledger; outcomes in field reports and on the page | `agent/ralph_ledger.py`, `orthros.py` |
+| 1 | Test first, then code; the test kept only with code that passes it | `agent/ralph_testfirst.py` |
+| 2 | Reviewer cites faults; the loop checks the citations | `supervisor_aider.py`, `ralph_scan.check_claims` |
+| 3 | 12 held-out exercises; proof by score against the last and the best | `evals\`, `orthros.py` |
+| 5 | Escalation ladder: whole files, architect mode, split | `agent/ralph_ladder.py` |
+| 6 | Similar kept rounds shown as examples (BM25 over git history) | `agent/ralph_memory.py` |
+| 7 | New items that repeat done, parked or listed work dropped (the deterministic part) | `ralph_tasks.drop_repeats` |
+| 9 | Values at a failing test's failure, for the next round | `agent/ralph_explain.py` |
+| 11 | Prompt-cache order: aider's file sets made stable (the draft model is a setting in LM Studio) | `ralph_session.py` |
+| 17 | `--resume`; practice finishes not reported as early stops | `orthros.py` |
+
+Left out for now, and why: **8** (mypy) -- the agents' code is built from
+mixins, whose `self.x` from a sibling class mypy reports as missing, so it
+would reject sound rounds; **12** (edit format per file) -- the ladder already
+switches to whole files after a miss, and whole-file replies on larger files
+run into the reply ceiling; **4, 10, 13, 14, 15, 16** are still to do.
+
 ---
 
 ## Contents

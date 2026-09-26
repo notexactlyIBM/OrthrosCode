@@ -185,6 +185,11 @@ label { color: var(--dim); font-size: 13px; display: flex; gap: 6px; align-items
         practice exercise instead -- a small job it has never seen, scored by tests it never
         sees. Those scores are how "better" is measured. 0 turns practice off.</p>
       <div class="chips" id="practiceChips"></div>
+      <p style="margin-top:10px">Every few good turns, each agent's version is scored on
+        held-out exercises it never practises on. A version that does worse is rolled back
+        and its changes never reach the other agent.</p>
+      <div class="chips" id="scoreChips"></div>
+      <div class="chips" id="roundChips"></div>
     </div>
     <div class="pane" id="taskPane">
       <div class="line">
@@ -517,6 +522,15 @@ function renderMode(d) {
     chips.push(`<span class="chip">${n} · ${esc(p[1])} <b>${p[2]}/${p[3]}</b></span>`);
   $("#practiceChips").innerHTML = chips.length ? chips.join("") :
     `<span class="chip">no practice yet${d.exercises.length ? ` · ${d.exercises.length} exercises ready` : ""}</span>`;
+  const scores = [], rounds = [];
+  for (const n of ["A", "B"]) {
+    for (const s of (d.agents[n].scores || []).slice(-3))
+      scores.push(`<span class="chip">${n} ${hhmm(s[0])} · <b>${s[1]}/${s[2]}</b> exercises, ${s[3]}/${s[4]} tests · ${esc(s[5])}</span>`);
+    const r = d.agents[n].rounds_24h || [];
+    if (r.length) rounds.push(`<span class="chip">${n}, last 24 h: ${r.map((o) => `${esc(o[0])} <b>${o[1]}</b>`).join(" · ")}</span>`);
+  }
+  $("#scoreChips").innerHTML = scores.length ? scores.join("") : `<span class="chip">no held-out score yet</span>`;
+  $("#roundChips").innerHTML = rounds.join("");
   const pick = $("#taskPick");
   if (document.activeElement !== pick) {
     const opts = d.tasks.map((t) => `<option value="${esc(t.key)}">${esc(t.name)}</option>`).join("");

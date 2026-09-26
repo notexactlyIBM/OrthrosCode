@@ -408,6 +408,11 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin, Tes
         self.broken = self.checks_with_test(task_text)
         if self.test_state == "fails" and untick(notes_path, task_text):
             self.note("  ticked, but its test still fails: opened again.")
+            # The tick earned the round back above; it is undone, so the round
+            # counts. Without this a model that ticks and fails every time was
+            # never out of tries, and spent the turn on one item.
+            if after_done > before_done:
+                self.rounds_on_task += 1
             after_done = done_count(notes_path)
 
         # A round that leaves it unable to start is worse than a round that did

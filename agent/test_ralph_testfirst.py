@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import importlib.util
 import unittest
 from unittest import mock
 
@@ -57,6 +58,8 @@ else:
         open(os.path.join(here, "calc.py"), "a").write("\n\ndef double(x):\n    return x\n")
 print("Tokens: 1k sent, 100 received.")
 '''
+
+HAS_PYFLAKES = importlib.util.find_spec("pyflakes") is not None
 
 
 class TestAcceptance(unittest.TestCase):
@@ -197,6 +200,7 @@ class TestTestFirstLoop(unittest.TestCase):
         self.assertEqual(self.committed("test_calc.py"), "")
         self.assertFalse(s.broken)
 
+    @unittest.skipUnless(HAS_PYFLAKES, "the lint checks need pyflakes (it comes with flake8)")
     def test_a_round_that_changes_the_test_gets_it_back(self):
         self.run_session("fails", "cheat")
         self.assertIn("changed the item's test; put back", self.log)

@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import importlib.util
 import unittest
 from unittest import mock
 
@@ -70,6 +71,8 @@ print("Applied edit to calc.py")
 print("Tokens: 1k sent, 100 received.")
 '''
 
+HAS_PYFLAKES = importlib.util.find_spec("pyflakes") is not None
+
 
 def git(ws, *args):
     return subprocess.run(["git", "-C", ws, "-c", "user.name=t", "-c", "user.email=t@t"]
@@ -101,6 +104,7 @@ class TestWholeSession(unittest.TestCase):
         status._path = None
         shutil.rmtree(self.dir, ignore_errors=True)
 
+    @unittest.skipUnless(HAS_PYFLAKES, "the lint checks need pyflakes (it comes with flake8)")
     def test_three_items_through_every_part(self):
         reviewed = []
 

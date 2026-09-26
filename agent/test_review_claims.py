@@ -10,6 +10,7 @@ import os
 import shutil
 import sys
 import tempfile
+import importlib.util
 import unittest
 
 import status
@@ -24,6 +25,8 @@ os.environ.setdefault("LC_RALPH_RAISE", "1")
 
 LIB = "import re\n\n\ndef words(text):\n    return re.findall(r\"\\w+\", text)\n"
 DIFF = "+def words(text):\n+    return re.findall(r\"\\w+\", text)\n"
+
+HAS_PYFLAKES = importlib.util.find_spec("pyflakes") is not None
 
 
 def fault(kind, line, why):
@@ -136,6 +139,7 @@ class TestTheLoopWeighsClaims(unittest.TestCase):
             s.run()
         return s
 
+    @unittest.skipUnless(HAS_PYFLAKES, "the lint checks need pyflakes (it comes with flake8)")
     def test_a_rejection_on_refuted_claims_keeps_the_change(self):
         s = self.run_with([fault("undefined-name", "return len(words(text))",
                                  "`words` is not defined")])

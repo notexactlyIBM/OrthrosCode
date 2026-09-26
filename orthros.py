@@ -2813,6 +2813,8 @@ def doctor(root, out=print):
         except (OSError, subprocess.TimeoutExpired):
             version = ""
         say("OK" if version else "FAIL", "%s's Python: %s" % (name, version or "does not run"))
+        out("      running %s's tests -- a minute or several, with no output until done ..."
+            % name)
         started = now()
         try:
             proc = subprocess.run([python, "-m", "unittest", "discover", "-s", ".", "-p",
@@ -2836,6 +2838,7 @@ def doctor(root, out=print):
         if os.name != "nt":
             say("WARN", "%s: the limits on the model's code apply on Windows only" % name)
         elif os.path.isfile(os.path.join(folder, "ralph_contain.py")):
+            out("      trying the memory limits (up to 3 minutes) ...")
             try:
                 proc = subprocess.run([python, "-c", DOCTOR_HOG], cwd=folder,
                                       capture_output=True, text=True, timeout=180)

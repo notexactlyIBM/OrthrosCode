@@ -348,6 +348,14 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin):
             if self.rollback():
                 self.remove_new_sources(before_files)
                 self.reverted += 1
+                # The credit for ticking was for work now undone, as for a
+                # rejection below. Kept, a round that ticked the item and broke
+                # the tests was free, and the item was retried until the clock
+                # ran out (found 2026-09-26 by test_ralph_testfirst).
+                if after_done > before_done or after_open > before_open:
+                    self.rounds_on_task += 1
+                after_done = done_count(notes_path)
+                after_open = len(open_tasks(notes_path))
                 record_lesson(ws, "Broke start-up and was undone: %s -- %s"
                               % (self.current_task[:80], last_line(self.broken[0][1])[:100]))
                 self.broken = full_check(ws, self.edit_files, self.entry, self.run_seconds)

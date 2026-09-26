@@ -310,6 +310,33 @@ class TestCaughtWithoutAReviewer(TestLoopWithGit):
         self.assertIn("automatic check", read_text(self.notes))
 
 
+BREAKING_AIDER = r'''import re, sys
+args = sys.argv[1:]
+files = [args[i + 1] for i, a in enumerate(args) if a == "--file"]
+body = open(files[0]).read()
+open(files[0], "w").write(re.sub(r"- \[ \]", "- [x]", body, count=1))
+for f in files[1:]:
+    if f.endswith(".py"):
+        open(f, "a").write("\ndef broken(:\n")
+        print("Applied edit to %s" % f)
+print("Tokens: 1k sent, 100 received.")
+'''
+
+
+class TestTickedButBroken(TestLoopWithGit):
+    def test_a_round_that_ticks_and_breaks_it_still_costs_a_try(self):
+        # Rolled back, the round kept the credit for ticking and the item was
+        # tried until the clock ran out: 180 s for one test (2026-09-26).
+        write_text(self.fake, BREAKING_AIDER)
+        write_text(self.notes, "# Tasks\n\n- [ ] In `add`, handle None\n")
+        self.git("add", "-A")
+        self.git("commit", "-qm", "items")
+        s = self.run_session(lambda task, diff: ("accept", "fine"))
+        self.assertIn("- [!] In `add`", read_text(self.notes))
+        self.assertLessEqual(s.rounds, 5)
+        self.assertNotIn("broken(", read_text(self.code))
+
+
 DO_NOTHING_AIDER = '''import sys
 print("Tokens: 1k sent, 100 received.")
 '''

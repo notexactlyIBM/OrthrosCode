@@ -28,6 +28,7 @@ from ralph_scan import put_main_last
 from ralph_tools import handle_tool_requests, record_lesson
 from ralph_setup import SetupMixin, last_line
 from ralph_testfirst import TestFirstMixin, snapshot
+from ralph_ladder import next_rung, outcome
 from ralph_tasks import done_count, open_tasks, park_task, remember_review, triage
 
 # Unexpected exceptions in a row before the session gives up. One is a bug in
@@ -92,6 +93,8 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin, Tes
         self.review_note = ""     # what execution settled, for the reviewer
         self.review_tag = ""      # cited / uncited / refuted: how a rejection stood
         self.last_kept = False
+        self.item_history = {}    # item -> what each round on it came to (ralph_ladder)
+        self.rung = "plain"       # how this round is being tried
         self.last_failure_kind = ""  # kind of the latest lesson recorded, ranked first
         self.lean = False         # the last prompt was refused as too big: send less
         self.fat_rounds = 0       # rounds lost to the prompt, not the reply
@@ -283,6 +286,20 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin, Tes
         self.rounds_on_task += 1
         task = self.current_task
         phase = self.round_phase(task)
+        history = self.item_history.setdefault(task, [])
+        self.rung = "plain"
+        if phase == "code":
+            from ralph_rounds import files_for_task
+            self.rung = next_rung(history, files_for_task(task, self.edit_files))
+            if self.rung != "plain":
+                self.note("  trying it differently: %s (the last try %s)"
+                          % ({"whole": "whole-file edits", "architect": "architect mode",
+                              "split": "asking for it to be split"}[self.rung],
+                             {"edit-missed": "did not apply", "broke": "broke the checks",
+                              "no-change": "changed nothing", "rejected": "was sent back"}
+                             .get(history[-1], history[-1])))
+            if self.rung == "split":
+                history.append("split")
         if phase == "test" and task not in self.test_budgeted:
             self.test_budgeted.add(task)
             self.task_budget += 1           # the test round is not one of the tries
@@ -316,7 +333,7 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin, Tes
                       budget=self.task_budget, items_open=len(remaining),
                       items_done=done_count(self.notes_path))
         status.phase("working", task)
-        result = self.send_round(task, phase=phase)
+        result = self.send_round(task, phase=phase, rung=self.rung)
         if phase == "test":
             if not self.react_to_symptom(result):
                 self.after_test_round(result, task, tests_before, code_before, before[3])
@@ -366,6 +383,7 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin, Tes
             self.rounds_on_task = max(0, self.rounds_on_task - 1)
 
         was_broken = bool(self.broken)
+        broke = False
         status.phase("checking", "does it still build and run")
         self.broken = full_check(ws, self.edit_files, self.entry, self.run_seconds)
 
@@ -378,6 +396,7 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin, Tes
             if self.rollback():
                 self.remove_new_sources(before_files)
                 self.reverted += 1
+                broke = True
                 # The credit for ticking was for work now undone, as for a
                 # rejection below. Kept, a round that ticked the item and broke
                 # the tests was free, and the item was retried until the clock
@@ -453,6 +472,9 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin, Tes
             self.refresh_files()
         self.ledger_round(result, touched, verdict, self.review_tag + (why or ""), caught,
                           after_done - before_done, kept, diff)
+        if self.current_task:
+            self.item_history.setdefault(self.current_task, []).append(
+                outcome(result, touched, kept, rejected_now, broke or bool(self.broken)))
 
         self.last_kept = kept
         return self.finish_round(result, counted)
@@ -498,7 +520,7 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin, Tes
                       broken=last_line(self.broken[0][1])[:200] if self.broken else "",
                       caught="; ".join(caught)[:300], verdict=verdict,
                       reason=(why or "")[:300], ticked=max(0, ticked), kept=int(kept),
-                      diff=diff)
+                      diff=diff, rung=getattr(self, "rung", "plain"))
 
     # ------------------------------------------------------------------ files
 

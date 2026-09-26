@@ -38,6 +38,7 @@ COLUMNS = (
     ("ticked", "INTEGER"),
     ("kept", "INTEGER"),       # 1 if committed
     ("diff_sha", "TEXT"),      # sha1 of the diff, to find it again
+    ("rung", "TEXT"),          # how the round was tried: plain, whole, architect, split
 )
 SCHEMA = "CREATE TABLE IF NOT EXISTS rounds (id INTEGER PRIMARY KEY, %s)" % ", ".join(
     "%s %s" % pair for pair in COLUMNS)
@@ -64,6 +65,11 @@ def record(folder, **row):
         try:
             with db:
                 db.execute(SCHEMA)
+                # A ledger from before a column was added gets it, empty.
+                have = {r[1] for r in db.execute("PRAGMA table_info(rounds)")}
+                for name, kind in COLUMNS:
+                    if name not in have:
+                        db.execute("ALTER TABLE rounds ADD COLUMN %s %s" % (name, kind))
                 db.execute("INSERT INTO rounds (%s) VALUES (%s)"
                            % (", ".join(keys), ", ".join("?" * len(keys))),
                            [row[k] for k in keys])

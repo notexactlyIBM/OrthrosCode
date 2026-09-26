@@ -12,6 +12,7 @@ import time
 
 import status
 from ralph_common import LOCATE, SCAN, read_text, say
+from ralph_ladder import rung_command, split_note
 from ralph_locate import locate
 from ralph_scan import baseline, check_claims, lint, scan
 from ralph_prompts import compose_round_prompt, design_guide
@@ -116,7 +117,7 @@ def review_context(task, files, linted):
 
 class SendMixin:
 
-    def send_round(self, task, phase="code"):
+    def send_round(self, task, phase="code", rung="plain"):
         """Build the prompt and the file list, run aider, record the numbers.
 
         A test round (ralph_testfirst.py) gets the item's code to read and only
@@ -125,7 +126,8 @@ class SendMixin:
         round_prompt = compose_round_prompt(self.workspace, self.prompt_path, self.broken,
                                             cut_off=self.was_cut_off, task=task,
                                             last_failure_kind=self.last_failure_kind,
-                                            phase_note=self.phase_note(task, phase))
+                                            phase_note=split_note(self.item_history.get(task, []))
+                                            if rung == "split" else self.phase_note(task, phase))
         # Only the files this item names, so a multi-module project does not
         # pay for all of itself on every round.
         self.set_temperature(attempt_temperature(self.rounds_on_task, self.temp_code,
@@ -177,8 +179,8 @@ class SendMixin:
             round_files, reads = round_files[:1], reads[:1]
             say("    sending less after a refused prompt: %d file(s), %d to read"
                 % (len(round_files), len(reads)))
-        cmd = build_round_command(self.base_cmd, round_prompt, self.notes_path,
-                                  round_files, reads)
+        cmd = build_round_command(rung_command(self.base_cmd, rung), round_prompt,
+                                  self.notes_path, round_files, reads)
         started = time.time()
         free_before = self.headroom()
         result = run_round(cmd, self.workspace, self.child_env, self.iteration_timeout,

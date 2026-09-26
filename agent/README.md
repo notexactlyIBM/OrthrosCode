@@ -76,6 +76,7 @@ that produce nothing at all stop it early.
 | `ralph_testfirst.py` | test first, then code: an item whose `Done when:` a test could check gets a round that writes only that test, which must fail; code rounds then make it pass, and the test enters the history only with them. Off with `set "LC_RALPH_TEST_FIRST=0"` |
 | `ralph_memory.py` | how similar items were done here: BM25 over past kept rounds (each commit names its item), the closest one or two shown with their diffs. Off with `set "LC_RALPH_EXAMPLES=0"` |
 | `ralph_ladder.py` | each try at a failing item made differently: whole-file edits after a miss, architect mode after a break or no change, a split after two failures. Off with `set "LC_RALPH_LADDER=0"` |
+| `ralph_contain.py` | the model's code -- tests, imports, a start -- run inside a Windows job: 4 GB between them (`LC_CHECK_MEMORY_MB`), 32 processes, and whatever they leave running killed at the end |
 | `ralph_explain.py` | a failing test run again alone, with the values at the failure, for the next round |
 | `ralph_ledger.py` | one row per round in SQLite -- item, tokens, checks, verdict, kept -- so "where do rounds go?" is a query, not an afternoon of reading logs |
 | `ralph_digest.py` | `DIGEST:` reads a file too big for a round in parts (after Chain-of-Agents) |

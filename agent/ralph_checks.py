@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 
+import ralph_contain as contain
 import status
 from ralph_ledger import LEDGER_FILE
 from ralph_common import (FILE_TOKEN_CAP, LOG_FILE, ROUND_FILE,
@@ -97,7 +98,7 @@ def smoke_run(workspace, entry, seconds=6):
     env["SDL_AUDIODRIVER"] = "dummy"
     env["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
     try:
-        proc = subprocess.Popen(
+        proc, job = contain.start(
             [find_project_python(workspace), os.path.basename(entry)],
             cwd=os.path.dirname(entry) or workspace, env=env,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -111,6 +112,8 @@ def smoke_run(workspace, entry, seconds=6):
         proc.kill()
         proc.communicate()
         return True, ""
+    finally:
+        contain.finish(job)
     # A clean exit with nothing printed is healthy too. Failing it (tried
     # 2026-09-24) flags every `if __name__ == "__main__": doctest.testmod()`
     # or quiet batch script as crashing on startup, and rolls back each round.
@@ -198,7 +201,7 @@ def import_check(workspace, files, seconds=20):
     for folder, paths in by_folder.items():
         names = {os.path.splitext(os.path.basename(p))[0]: p for p in paths}
         try:
-            proc = subprocess.run([python, "-c", IMPORT_PROBE] + list(names),
+            proc = contain.run([python, "-c", IMPORT_PROBE] + list(names),
                                   cwd=folder, env=_import_env(), capture_output=True,
                                   text=True, timeout=seconds + 5 * len(names),
                                   encoding="utf-8", errors="replace")
@@ -224,7 +227,7 @@ def _import_each(python, folder, paths, seconds):
     for path in paths:
         name = os.path.splitext(os.path.basename(path))[0]
         try:
-            proc = subprocess.run([python, "-c", "import %s" % name],
+            proc = contain.run([python, "-c", "import %s" % name],
                                   cwd=folder, env=_import_env(),
                                   capture_output=True, text=True, timeout=seconds,
                                   encoding="utf-8", errors="replace")
@@ -278,7 +281,7 @@ def test_check(workspace, seconds=240):
     if not names:
         return []
     try:
-        proc = subprocess.run([find_project_python(workspace), "-m", "unittest", "discover",
+        proc = contain.run([find_project_python(workspace), "-m", "unittest", "discover",
                                "-s", ".", "-p", "test_*.py", "-q"],
                               cwd=workspace, capture_output=True, text=True, timeout=seconds,
                               encoding="utf-8", errors="replace", env=_import_env())
@@ -363,7 +366,7 @@ def explain_failure(workspace, line, seconds=60):
     if not test_id or not os.path.isfile(EXPLAIN):
         return ""
     try:
-        proc = subprocess.run([find_project_python(workspace), EXPLAIN, test_id],
+        proc = contain.run([find_project_python(workspace), EXPLAIN, test_id],
                               cwd=workspace, capture_output=True, text=True,
                               timeout=min(seconds, 60), encoding="utf-8", errors="replace",
                               env=_import_env())

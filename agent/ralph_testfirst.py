@@ -26,6 +26,7 @@ import os
 import re
 import subprocess
 
+import ralph_contain as contain
 from ralph_checks import _import_env, code_fingerprint, find_project_python
 from ralph_common import _env_flag, _env_int, read_text, write_text
 
@@ -141,7 +142,7 @@ def test_ids(tests):
 def run_one_test(workspace, test_id, seconds=120):
     """('passed' | 'failed' | 'error', output) for one unittest id."""
     try:
-        proc = subprocess.run([find_project_python(workspace), "-m", "unittest", "-q", test_id],
+        proc = contain.run([find_project_python(workspace), "-m", "unittest", "-q", test_id],
                               cwd=workspace, capture_output=True, text=True, timeout=seconds,
                               encoding="utf-8", errors="replace", env=_import_env())
     except subprocess.TimeoutExpired:

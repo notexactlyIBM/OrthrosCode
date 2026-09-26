@@ -71,7 +71,7 @@ class TestImportCheckSingleCall(unittest.TestCase):
                 args=[], returncode=0,
                 stdout='@@IMPORTS@@{}\n', stderr="")
 
-            with mock.patch("ralph_checks.subprocess.run", return_value=fake_result) as mock_run:
+            with mock.patch("ralph_checks.contain.run", return_value=fake_result) as mock_run:
                 ralph_checks.import_check(tmp, files)
 
             self.assertEqual(mock_run.call_count, 1,

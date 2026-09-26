@@ -22,6 +22,8 @@ import re
 import subprocess
 import time
 
+import ralph_contain as contain
+
 from ralph_common import DIGEST_PARTS, RESEARCH_ASK, RESEARCH_FILE, read_text, say, write_text
 from ralph_digest import DIGEST_ASK, digest, inside, parse_request
 
@@ -180,7 +182,7 @@ def run_tests(workspace, module, python):
     if not module.split(".")[-1].startswith("test_") or not os.path.isfile(path):
         return "(no test file %s.py in this folder)" % module.replace(".", "/")
     try:
-        proc = subprocess.run(
+        proc = contain.run(
             [python, "-m", "unittest", module, "-v"],
             cwd=workspace,
             capture_output=True, text=True, timeout=60,

@@ -1,457 +1,228 @@
 # OrthrosCode
 
-**Two local AI coding agents that build what you ask, and take turns making each other better.**
-No cloud, no API keys, no accounts -- one GPU, one open model, and a referee.
+**Two AI coding agents on one home PC that take turns improving each other --
+and only keep the changes that make them measurably better.**
 
-Orthros, the two-headed dog of Greek myth, is one body with two heads that never
-sleep at the same time. OrthrosCode has two heads too: agents **A** and **B**,
-running one at a time on the same card. Give them a project and they take turns
-building it. Leave them to themselves and they take turns rewriting each other's
-source code: A improves B, then B wakes up running A's changes and improves A.
-Changes that make an agent a better coder are copied into both; changes that
-break one are rolled back.
-
-Everything runs on your machine, and every step is a git commit you can read.
+No cloud, no API keys, no accounts. One NVIDIA GPU, one open model, and a
+referee called Orthros.
 
 ![Image](https://i.imgur.com/OtYb2lp.jpeg)
-## At a glance
 
-- **Two modes.** *Work on a task* builds a project you describe. *Improve each
-  other* is recursive self-improvement, measured by how well the agents code on
-  jobs they have never seen.
-- **Improvements are proven by use.** A change counts only once the agent that
-  received it has started and done real work with it. Only then is it copied
-  into the agent that wrote it.
-- **It survives its own mistakes.** Pre-launch checks, rollback, a history of
-  proven versions and a baseline that is never lost keep a bad change -- even one
-  that looked good and was copied into both -- from ending the run.
-- **It fits the machine.** Context size and timeouts are tuned from what each
-  turn measures, so a bigger card is used in full and a smaller one is not
-  overrun.
-- **It runs unattended, and says when it cannot.** Failures are retried,
-  worked around or parked; when a person is needed, it stops loudly.
+Orthros is the two-headed dog of Greek myth. Here the two heads are agents
+**A** and **B**, sharing one graphics card, one at a time. Leave them alone and
+A rewrites B's source code, then B wakes up running A's changes and rewrites A.
+Give them a project instead and they take turns building it.
 
-## Two modes
+Every step is a git commit you can read.
 
-The switch at the top of the dashboard picks what the agents work on. A switch
-takes effect at the next handover; a turn in progress finishes as it began.
+## How it works
 
-### Work on a task
+1. **One job per round.** An agent reads its task list, does the top item,
+   and stops. The next round starts a fresh process with an empty head and
+   reads the list again. This is the *Ralph loop*: state lives in files and
+   git, not in the model's memory, so a small context window can work on a
+   codebase far bigger than itself.
+2. **Every change is checked before it is kept.** It must parse, lint, import,
+   start and pass the tests. Then a separate, cold reviewer reads the diff,
+   and must quote the exact line it objects to; the loop checks the quote and
+   throws out objections that are false. Anything that fails is undone and the
+   reason written down for the next try.
+3. **Tests first, where possible.** If a job says `Done when: add(2, 2)
+   returns 4`, one round writes only that test and the loop checks it fails.
+   Later rounds must make it pass. The test is kept only together with the
+   code that passes it.
+4. **Failures change the approach.** A second try is not just a re-roll: an
+   edit that did not apply is redone as a whole-file rewrite, a change that
+   broke something is redone in plan-then-edit mode, and after two failures
+   the job is split into smaller ones.
+5. **Handover.** The model is unloaded, the card freed, and the other agent
+   starts.
+6. **Proof by score.** Working is not the same as better. Every few good
+   turns, an agent's current version is scored on held-out coding exercises
+   it has never seen. Its changes are copied into its twin only if the score
+   is no worse than the last version that passed (and not far below the best
+   ever). If it is worse, it is rolled back, and the twin that made the change
+   is told the score.
 
-Press **New task**, give it a name and describe what to build: what goes in,
-what comes out, how you would check it works. Orthros creates
-`tasks\<name>\`, a project with its own git history, and A and B take turns on
-it with the same turn lengths, handovers and safety nets as self-improvement.
-The first round turns your description into a task list of small, checkable
-items; later rounds work through it, and plan more when it runs dry. Steer it
-with **Suggest direction** for *the task*.
-
-A good turn on a task also proves the agent that ran it, and the task's
-results, including its own tests, go into that agent's field report.
-
-### Improve itself
-
-A works on B's code, then B on A's. Each keeps a task list, a plan and a
-mission for its twin, in the twin's folder. To keep the two from colliding they
-split the work: A builds **memory, knowledge and skills** into B; B builds
-**tools, efficiency and research** into A. Proven work flows both ways.
-
-"Better" means writing working code on projects never seen before, not only
-getting better at editing itself. So every few turns (`practice_every`), one
-turn is a **practice**: a fresh copy of a small exercise from `exercises\`, a
-short session, then tests the agent never saw are run against what it wrote.
-The score goes into the agent's field report, which its twin reads when
-deciding what to improve, and the standing mission says that these scores are
-the measure that matters.
-
-**Proof by score.** A version that starts and does some work is not broken;
-that does not make it better. So every few good turns (`eval_every`), an
-agent's current version works through held-out exercises from `evals\` --
-ones it never practises on -- and is compared, exercise by exercise, with the
-last version that passed. Until it passes, the changes in it wait and do not
-reach its twin. If it does clearly worse, it goes back to that version, and
-the twin that made the changes reads the scores in its field report. This is
-the loop the published self-improving coding agents (the Darwin Gödel
-Machine, SICA) put at their centre: without a score, changes drift; with one,
-only the ones that hold up spread.
-
-## How a turn works
-
-```mermaid
-flowchart TD
-    Pick["Choose the work<br/>the twin's code · a task · a practice"] --> Pre
-    Pre["Pre-launch checks<br/>the agent's modules import, its tests pass"] -->|fail| Back
-    Pre -->|pass| Load["Load the model<br/>LM Studio, with the settings that fit"]
-    Load --> Round
-    subgraph Loop ["The Ralph loop: one fresh aider process per round"]
-        Round["Read the task list,<br/>do one item"] --> Check{"Parse, lint,<br/>import, test"}
-        Check -->|broken| Undo["Undo the round,<br/>write the lesson down"]
-        Check -->|runs| Review{"Cold review<br/>of the diff"}
-        Review -->|rejected| Undo
-        Review -->|kept| Commit["Commit"]
-        Undo --> Round
-        Commit --> Round
-    end
-    Loop --> Hand["Handover<br/>unload, stop, free the card"]
-    Hand --> Judge{"Did it start<br/>and do useful work?"}
-    Judge -->|yes| Prove["Mark the version proven,<br/>carry the changes into the twin"]
-    Judge -->|no| Back["Step back to the<br/>last proven version"]
-    Prove --> Report["Field report, practice score,<br/>settings kept or tuned"]
-    Back --> Report
-    Report --> Pick
-```
-
-1. **Choose.** The mode decides the folder: the twin's code, the task, or a
-   practice exercise.
-2. **Pre-launch checks.** Orthros imports every module of the agent and runs
-   its test suite -- seconds, where a failed launch costs minutes of model
-   loading. A broken agent is rolled back before anything is loaded.
-3. **Work.** The agent loads the model and works through the task list, one
-   item per round. Each round's change is parsed, linted, imported, run and
-   tested; checked across the whole project for broken calls, placeholders and
-   lost tests; then read by an independent reviewer, and once more by a reader
-   hunting for the bug. Kept
-   rounds are committed; anything else is undone, and the reason is written
-   down for the next try.
-4. **Handover.** The model is unloaded, the server stopped, anything left
-   running is killed. Only then does the other agent start.
-5. **Judgement.** An agent that started and did useful work has proven its
-   version, and the changes its twin made to it are carried into the twin as
-   well. One that did not start steps back to its last proven version, and so
-   do changes that cost it two weak turns in a row. A weak turn on a proven
-   version counts against nothing: there is nothing new to blame.
-6. **Report.** Rounds, kept and rejected changes, errors, speed and scores go
-   into the field report its twin reads when planning.
-
-## Built on
-
-OrthrosCode is a referee and a workflow around two existing programs.
-
-**[LM Studio](https://lmstudio.ai)** downloads open-weight models and runs them
-on your GPU, serving them on `127.0.0.1` with the same protocol as the OpenAI
-API. OrthrosCode drives it through its command-line tool, `lms`: it loads the
-model with the chosen context, checks it really answers, reloads it when the
-engine fails, and unloads it at handover so the other agent starts on a free
-card. No request leaves the machine.
-
-**[aider](https://aider.chat)** ([source](https://github.com/Aider-AI/aider)) is
-an open-source AI pair programmer. It sends files and a message to a model,
-applies the edits that come back, runs the linter and tests, and feeds failures
-back to the model within the same exchange. OrthrosCode runs one aider process
-per round, pointed at LM Studio, chooses which files it may edit, and reads its
-output to tell what happened. Unattended, aider may edit files but never runs a
-command the model suggests.
-
-**The Ralph loop** ([Geoffrey Huntley](https://github.com/ghuntley/how-to-ralph-wiggum))
-is the technique around aider: instead of one long conversation, run the same
-prompt again in a fresh process and keep progress in files and git. Each round
-starts with an empty head and re-reads the task list from disk, so no round has
-to hold the whole project -- which is what lets a small context window work on a
-codebase far bigger than it.
-
-![Ralph Loop](https://i.imgur.com/jfU6x3U.jpeg)
-
-On top of the loop, techniques that trade time for reach on a small window:
-
-| Technique | Source | Here |
-|---|---|---|
-| Search before you build | Huntley, *how-to-ralph-wiggum* | rounds check with `FIND:` before adding what may already exist |
-| Acceptance criteria on every item | [fstandhartinger/ralph-wiggum](https://github.com/fstandhartinger/ralph-wiggum) | items end with `Done when:`, and the reviewer holds the change to it |
-| Count the tries | fstandhartinger/ralph-wiggum (`NR_OF_TRIES`) | an item that ends turn after turn without progress is parked for a person |
-| Repeated sampling with a verifier | Brown et al., *Large Language Monkeys* (2024) | several tries per item, each warmer than the last; tests and the reviewer keep the one that holds |
-| Localize before repairing | Xia et al., *Agentless* (2024) | an item that names no file first asks which files, from an outline of every module |
-| Gist memory | Lee et al., *ReadAgent*, Google DeepMind (2024) | `GISTS.md` sums up every module in a few lines for planning rounds |
-| Chain of agents | Zhang et al., *Chain of Agents*, Google (2024) | `DIGEST:` reads a file of any length in parts, carrying notes forward |
-
-*Recursive Language Models* (Zhang, Kraska and Khattab, 2025) are left out on
-purpose: they have the model write and run code over its input, and the
-unattended loop never runs model-written code.
+That last step is what makes it self-improvement rather than drift. It is the
+same idea at the centre of the published self-improving coding agents (the
+Darwin Gödel Machine, SICA), cut down to fit one graphics card.
 
 ## What you need
 
-- **Windows 10 or 11.** The launchers and process handling are Windows-only.
-- **An NVIDIA GPU.** A 24 GB card runs the default model -- a 27B model at 4-bit
-  -- with 64k of context. Smaller cards work with a smaller model; larger ones
-  are used in full (see [Self-configuration](#self-configuration)).
-- **About 25 GB of disk**: roughly 17 GB for the model, 1 GB for packages.
-- **32 GB of RAM and a page file Windows can grow.** The driver charges system
-  memory to back what the model puts on the card, so this matters as much as
-  video memory -- see [Memory](#memory).
-- **Python 3.10, 3.11 or 3.12** for aider (newer ones may sit beside it),
-  **Git** and **LM Studio**. All free.
+- **Windows 10 or 11** (the launchers are Windows-only).
+- **An NVIDIA GPU.** 24 GB runs the default model (27B parameters, 4-bit)
+  with 64k of context. Smaller cards work with smaller models.
+- **32 GB of RAM and a page file Windows can grow** -- see [Memory](#memory).
+- **About 25 GB of disk.**
+- **Python 3.10--3.12, Git and LM Studio.** All free.
 
 ## Setup
 
-1. **Install Python 3.12** from https://www.python.org/downloads/ and tick
-   *"Add python.exe to PATH"*.
-2. **Install Git** from https://git-scm.com/download/win (the defaults are fine).
-3. **Install LM Studio** from https://lmstudio.ai and open it once.
-4. **Download a model** in LM Studio's search tab. The default is **Qwen 3.8
-   27B** (`qwen/qwen3.8-27b`, Q4_K_M). Any capable coding model works.
-5. **Double the context for free.** In LM Studio open the model's default
-   settings (*My Models*, the gear icon), turn **Flash Attention** on and set
-   **K** and **V cache quantization** to **Q8_0**. The cache then takes half the
-   memory, with no noticeable loss.
-6. **Get OrthrosCode**: clone this repository, or download it as a ZIP and
-   unpack it anywhere.
-7. **Run `SETUP.bat`.** It installs aider and its dependencies once into
-   `shared-venv\` (with a Python aider supports), then creates the two agents,
-   `OrthrosCode A\` and `OrthrosCode B\`, each with its own git history and a
-   thin venv of its own. It reports whether it found LM Studio's `lms` tool; if
-   not, install it from LM Studio's developer settings, or set `LC_LMS_PATH` in
-   each agent's `config.cmd`.
-8. **Using a different model?** `LIST_MODELS.bat` in either agent folder lists
-   the keys; set `LC_MODEL_KEY` in both agents' `config.cmd`.
-9. **Check the chain** with `SELFTEST.bat` in `OrthrosCode A\`: it starts the
-   server, loads the model, sends one message and unloads it. Close other
-   GPU-heavy programs first, including any second LM Studio or ollama.
-10. **Run `ORTHROS.bat`.** The dashboard opens in a window of its own. Choose a
-    mode and press **Start**, and allow notifications when asked.
+1. Install [Python 3.12](https://www.python.org/downloads/) (tick *Add to
+   PATH*), [Git](https://git-scm.com/download/win) and
+   [LM Studio](https://lmstudio.ai).
+2. In LM Studio, download a coding model (default: `qwen/qwen3.8-27b`,
+   Q4_K_M). In its default settings turn on **Flash Attention** and set the
+   **K and V cache** to **Q8_0** -- this halves the memory the context takes.
+3. Download this repository and run **`SETUP.bat`**. It installs aider once and
+   creates the two agents, `OrthrosCode A\` and `OrthrosCode B\`.
+4. Run **`ORTHROS.bat --doctor`**. It changes nothing and prints OK / WARN /
+   FAIL for every check. Fix any FAIL.
+5. Run **`ORTHROS.bat`**, pick a mode on the dashboard and press **Start**.
 
-**No GPU?** `ORTHROS.bat --simulate` runs the same dashboard and orchestration
-on two stand-in agents in a temporary folder, with turns of a few seconds.
+No GPU? `ORTHROS.bat --simulate` runs the whole thing with stand-in agents.
 
-## The dashboard
+## Using it
 
-- **Mode**: *Improve itself* (with how often to practise, and recent
-  practice scores) or *Work on a task* (pick one, or create one).
-- **Agents**: who is working, on what, which round and try; rounds, changes
-  kept and sent back, tokens; each agent's version and whether it is proven.
-- **GPU**: a slowly turning lattice whose lit share is the card's utilization
-  from `nvidia-smi` -- the share of time its CUDA cores had work -- with a plane
-  for memory in use, the numbers beneath, and the settings in use. **Check
-  hardware** looks at the machine again.
-- **Raw output**: a read-only terminal of the running turn's log as it is
-  written: the agent, aider and the model's replies.
-- **Talk to Orthros**: **Ask** how it is going, what went wrong, what is next or
-  what temperatures are used, and get a few plain sentences from Orthros's own
-  records. **Suggest direction** puts your words at the top of an agent's list
-  or the task's, straight away or as soon as the running turn stops using it.
-- **Balance** of time and tokens between the two, and **recent events**.
+The dashboard (http://127.0.0.1:8770) shows who is working and on what, the
+model's raw output, GPU use, held-out scores, and where each agent's rounds
+went in the last day. From it you can:
 
-**Pause after this session** lets the turn finish, then stops. **Stop after
-this round** stops at the next safe point, once the round in flight is checked
-and committed. **Force stop** kills the turn at once.
+- switch between **Improve itself** and **Work on a task** (describe what to
+  build; the agents break it into small checkable jobs);
+- **Suggest direction** -- your words go to the top of an agent's list;
+- **Ask** how it is going, in plain sentences from Orthros's own records;
+- pause after this turn, stop after this round, or force stop.
 
-When Orthros gives up -- a machine that will not recover, idle turns, low
-memory or disk -- it writes `ORTHROS-NEEDS-YOU.txt` saying why, turns the page
-red, raises a desktop notification and beeps. Pressing **Start** clears it.
+When Orthros cannot go on, it stops, writes `ORTHROS-NEEDS-YOU.txt` saying why,
+turns the page red and beeps.
 
-## Self-configuration
+| Command | What it does |
+|---|---|
+| `ORTHROS.bat` | start the referee and dashboard |
+| `ORTHROS.bat --doctor` | check the machine and both agents; changes nothing |
+| `ORTHROS.bat --resume` | restart after a crash -- only if it was running, never if you stopped it |
+| `ORTHROS.bat --apply-patch <file>` | bring a fix into both live agents (close Orthros first) |
+| `ORTHROS.bat --export` | copy the newest proven agent into `agent\` for publishing |
+| `ORTHROS.bat --simulate` | the same dashboard with fake agents, turns of seconds |
 
-The agents' `config.cmd` is the starting point; Orthros fits it to the machine
-and remembers what works, in `hardware.json`.
-
-- **Looking at the hardware** -- the card, its memory, system memory, and what
-  the model supports -- happens only when there is reason to: the first start,
-  after `SETUP.bat` has run, when the card itself changes, or when asked
-  (**Check hardware**, or `orthros.py --probe`).
-- **Between looks**, each turn's own log shows how much of the card was left
-  free once the model loaded, and how fast it answered. From that, one step at
-  a time: more context when a lot of the card sits idle, less when it runs
-  short, longer timeouts for a slower machine.
-- **Every change is a trial.** It runs for one turn and becomes the last good
-  setting only if that turn runs clean. A change that fails to load or runs
-  out of memory puts the last good settings back and is not tried again.
-
-Set `auto_tune` to `false` in `orthros.json` to run on `config.cmd` alone.
+**What to read.** `FIELD_REPORT.md` in each agent folder: how it did, turn by
+turn, with its scores. `LESSONS.md`: mistakes it keeps making. `git log` in any
+folder: every change. `orthros.log`: what the referee did.
 
 ## Settings
 
-`orthros.json`, written on first run, holds Orthros's settings:
+`orthros.json`, written on first run. The ones worth knowing:
 
-| setting | default | |
+| Setting | Default | Meaning |
 |---|---|---|
-| `session_minutes` | 60 | a turn's length, before balancing nudges it (45--60 suits a 24 GB card) |
-| `first` | A | who goes first on a fresh start |
-| `launch_minutes` | 20 | time to reach the first round before it counts as a failed start |
-| `grace_minutes` | 30 | time past its end before a turn is asked to stop |
-| `pause_after_idle` | 4 | turns in a row with nothing kept before Orthros stops (0 = never) |
-| `practice_every` | 4 | in self-improvement, one turn in this many is a practice (0 = never) |
-| `practice_minutes` | 20 | length of a practice turn |
-| `prove_by_score` | true | changes reach the twin only after a held-out score no worse than the last |
-| `eval_every` | 4 | good turns of an agent's between scorings of its version |
-| `eval_count` | 8 | held-out exercises a scoring uses (the same ones each time, so versions compare) |
-| `eval_minutes` | 8 | length of each held-out exercise; 8 x 8 is about 90 minutes with model loads |
-| `park_after_tries` | 2 | turns in a row ending on one item without progress before it is parked |
-| `env_retry_minutes` | [2, 5, 15] | waits before retrying a start the machine made fail |
-| `auto_tune` | true | fit context and timeouts to the machine (see above) |
-| `aider_guard` | true | keep aider's prompts inside the context window (see Safety nets) |
-| `min_free_mb`, `critical_free_mb` | 4096, 1536 | memory to start a turn, and to end one early rather than be killed |
-| `min_free_disk_mb` | 2048 | disk needed to start a turn |
-| `keep_logs` | 300 | turn logs kept in `logs\` |
-| `gpu_telemetry` | true | poll `nvidia-smi` for the dashboard |
-| `install_requirements` | false | install an agent's changed `requirements.txt` into its own venv (off: it would download whatever the twin wrote there) |
+| `session_minutes` | 60 | length of a turn |
+| `practice_every` | 4 | one turn in this many is a practice exercise (0 = off) |
+| `prove_by_score` | true | changes spread only after a held-out score |
+| `eval_every` | 4 | good turns between scorings of an agent |
+| `eval_count`, `eval_minutes` | 8, 8 | exercises per scoring and minutes each (about 90 minutes in all) |
+| `pause_after_idle` | 4 | stop after this many turns in a row that kept nothing |
+| `auto_tune` | true | fit context size and timeouts to the machine from what each turn measures |
 
-Each agent's `config.cmd` holds its own settings, each with the reason beside
-it: the model, context, temperatures, tries per item, and the rest.
-Temperature follows the kind of round: cold (`LC_TEMP_CODE`, 0.2) for writing
-code and checking finished work, warm (`LC_TEMP_BRAINSTORM`, 0.85) for planning
-new work, halfway for breaking a milestone into items; the reviewer runs at 0.1.
+Each agent's own settings -- model, context, temperatures, tries per job --
+are in its `config.cmd`, each with the reason beside it. The agent itself is
+described in [agent/README.md](agent/README.md).
 
-## Steering and following along
+## Safety
 
-**Steering.** In self-improvement each agent's notes about its twin live in the
-twin's folder: `OrthrosCode B\orthros_tasks.md` is the list **A** works through
-while improving **B**, beside `PLAN.md` (milestones, broken into items as the
-list empties) and `RALPH_PROMPT.md` (the mission, sent with every round). A
-task keeps the same files in its own folder. Edit any of them, or use
-**Suggest direction**. `SETUP.bat --mission` rewrites the agents' missions from
-the templates in `orthros_setup.py`.
-
-**Following along.**
-
-- `git log` in any agent or task folder. Tags mark `orthros/baseline`,
-  `orthros/proven-N`, `orthros/failed-N` and `orthros/withdrawn-...`.
-- `FIELD_REPORT.md` in each agent folder: how that agent did, turn by turn,
-  with practice scores and task results. `LESSONS.md`: mistakes caught, fed
-  back into every round. `PROGRESS.md`: one row per session.
-- `ROLLBACK.md` after a rollback: the undone diff, for the rounds that must
-  redo the useful part.
-- `orthros.log` for what Orthros did; `logs\` for each turn's full output.
-
-**Changing the agents' code yourself.** `agent\` is the template the agents
-are made from; the agents themselves are separate git histories. To bring a
-change made in `agent\` into both, close Orthros and run
-`python orthros.py --apply-patch <file>`, where the file is a
-`git diff --relative=agent -- agent/`. Each agent takes it file by file with a
-three-way merge; what applies is checked and recorded as its newest proven
-version, and anything that clashes with the agents' own changes is listed and
-left out. `patches\` holds the patches that come with this repository.
-
-**Checking the machine.** `ORTHROS.bat --doctor` changes nothing and prints
-one line per check -- OK, WARN or FAIL: Python, free disk and memory, the
-exercises, the settings, LM Studio, and for each agent its Python, its tests
-and how long they take (rounds are failed past 240 seconds), and whether the
-model's code really runs inside the memory limits. Run it after applying a
-patch and before leaving a run overnight.
-
-**Surviving a crash or a restart.** Windows can kill Orthros when memory runs
-short, and a restart ends it. `ORTHROS.bat --resume` starts it again and, only
-if it was running when it stopped -- not paused, stopped by hand, or given up
--- presses Start by itself; a turn still running from before is waited for and
-judged. To have Windows do that at every log-on, once, in Command Prompt:
-
-    schtasks /Create /SC ONLOGON /TN "Orthros resume" /TR "\"D:\OrthrosCode\ORTHROS.bat\" --resume"
-
-(with your own folder in place of `D:\OrthrosCode`). Off by default: an
-unattended restart is the operator's decision.
-
-**Publishing.** `ORTHROS.bat --export` copies the newest proven agent into
-`agent\` and writes `EVOLUTION.md`; commit those, and this repository's history
-becomes the record of how the agents evolved.
-
-## The agents' tools
-
-| | |
-|---|---|
-| **Linter** | flake8's error rules, inside each round, so the model fixes its own slips at once |
-| **Tests** | a unittest suite, after every edit, every round and before launch |
-| **Automatic checks** | after every round, at no token cost: lint and call signatures across the whole project (only what the round added counts), placeholders where code was cut, conflict markers, deleted tests. A round they catch is undone. A test class added below `if __name__ == "__main__":` is put right instead |
-| **Test first** | an item whose `Done when:` names something a test can run gets a round that writes only that test, and the loop checks it fails; the code rounds then have to make it pass. The test is kept only together with the code that passes it |
-| **Reviewer** | a separate, cold request that reads each diff against its item, told what the automatic checks noticed and have already settled, and shown the code the item names as it stands after the round -- so a name imported above the diff, or a part an earlier round already did, is not held against the change. A rejection cites each fault with the line it objects to; a fault whose line is not there, or that calls a name undefined when the project defines it and pyflakes agrees, is dropped, and a rejection left with no fault standing keeps the change |
-| **Second look** | when the reviewer keeps a change, another read assumes there is a bug and hunts for it; a bug it names is confirmed by a third read before the change is undone. Both see what the reviewer saw |
-| `FIND: text` | every line in the project containing it, in `FOUND.md` next round |
-| `CALLERS:`, `DEF:`, `OUTLINE:` | every call to a function, where a name is defined, a file's classes and defs -- in `FOUND.md`. Every request the loop answers is added to each round's prompt |
-| `DOCS: module` | an installed library's own documentation, offline |
-| `RESEARCH: question` | a web search and page fetch, in `RESEARCH.md` |
-| `DIGEST: file -- question` | a file too big for a round, read in parts, answer in `FOUND.md` |
-| `TESTS: test_file` | one of the project's test files run on its own, its output in `FOUND.md` |
-| **Locate** | an item naming no file asks which files first, from an outline of every module |
-| **Gists** | `GISTS.md`: every module in a few lines, for planning rounds |
-| **Warming retries** | each try at an item runs warmer, so the tries differ |
-| **Lessons** | every rollback, rejection and parked item becomes a line in `LESSONS.md` |
-| **Skills** | `SKILLS.md`: how common changes are made in this codebase |
-| **Planning** | milestones in `PLAN.md`, broken into items as the list empties, with checks of finished work |
-| **Stop-path check** | a test that reads the loop's own source and fails any way of ending a session without saying why |
-
-## Safety nets
-
-| | |
-|---|---|
-| **Local only** | Every model call goes to LM Studio on your machine. No keys, no telemetry; aider's update check and remote model lists are off. |
-| **No shell** | Unattended aider edits files but never runs a command the model suggests. |
-| **Tests as a gate** | After every edit, every round and before every launch. A change that fails them is rolled back. |
-| **Many readers** | Every change is parsed, linted, imported, run, tested, checked for broken calls, placeholders and lost tests, reviewed, and read again by a reader looking for the bug. Any one of them can undo it. |
-| **Rollback** | Folders are committed before each turn. An agent that fails to start is reset, and its failed version kept as a git tag. |
-| **Proven history** | Every proven version is remembered. A change that turns out fatal after being copied into both is stepped back past, as far as the baseline if need be. |
-| **Prompts that fit** | A guard loaded into the agents' Pythons keeps aider from pulling files into a round past what the window holds, or sending a prompt the window cannot take. A refused prompt is never mistaken for a crashed engine. |
-| **Recover, then stop out loud** | Machine failures are retried after 2, 5 and 15 minutes; an item that ends two turns in a row is parked; changes sent back and items parked count as a turn working, not as a stall; an early stop becomes the twin's first item. When nothing more can be done, Orthros stops and says so. |
-| **Settings on trial** | A tuned setting is kept only after a clean turn; one that fails is withdrawn for good. |
-| **Fair turns** | Turns alternate, and their length leans towards an even split of time and tokens. |
+- **Local only.** Every model call goes to LM Studio on your machine. The
+  only outbound traffic is the agents' optional web search.
+- **No shell.** aider may edit files but never runs a command the model
+  suggests.
+- **Contained code.** The model's code does run -- that is what tests are.
+  On Windows every run is capped at 4 GB and 32 processes, and anything it
+  leaves behind is killed.
+- **Undo everything.** Every turn is committed first; every proven version is
+  tagged; a bad change, even one copied into both agents, is stepped back
+  past, as far as the original if need be.
 
 ## Memory
 
-Windows has one limit covering everything every program may need -- the
-*commit limit*, physical memory plus the page file. The graphics driver charges
-system memory against it to back what a model puts on the card, so a model
-using 18 GB of video memory needs roughly as much again in commit. At the limit
-Windows refuses allocations and kills processes: the engine reports "bad
-allocation", agents die mid-round, and Orthros itself can be killed, which
-looks like a frozen page. Free video memory is not the number to watch.
+Windows has one limit for everything programs may use: physical memory plus
+the page file. The graphics driver charges system memory to back what the
+model puts on the card, so an 18 GB model needs about 18 GB of that limit too.
+At the limit Windows starts killing things -- the engine says "bad
+allocation", agents die mid-round, Orthros vanishes.
 
-1. **Give Windows a bigger page file**: System > About > Advanced system
-   settings > Performance > Settings > Advanced > Virtual memory; system-managed,
-   or a fixed 32 GB, on an SSD.
-2. **Close browsers and Electron apps during a run.**
-3. **Use a smaller model or context** if it still happens.
-
-Orthros will not start a turn with less than `min_free_mb` of the commit limit
-free, and asks a turn to stop after its round if free memory falls below
-`critical_free_mb`. Each field report records the least memory free.
+Fix it by letting Windows grow the page file (System > About > Advanced system
+settings > Performance > Advanced > Virtual memory, on an SSD), closing
+browsers during a run, or using a smaller model. Orthros will not start a turn
+without room, and stops one early rather than be killed.
 
 ## Troubleshooting
 
-- **"Not starting an unattended run while the card is shared."** Close any other
-  LM Studio window, ollama or GPU-heavy game, then start again.
-- **"bad allocation", or the engine keeps dying.** Almost always the commit
-  limit -- see [Memory](#memory). If the log shows gigabytes of video memory
-  free, it is system memory, and a bigger page file is the answer.
-- **"aider is not installed in the venv."** The agents' venvs must use the same
-  Python as `shared-venv`. Run `SETUP.bat` again; it rebuilds any that do not.
-- **The page stopped updating and nothing handed over.** Orthros was killed,
-  usually by the memory limit. The agent finishes on its own; start
-  `ORTHROS.bat` again and it takes that turn into account.
-- **Orthros stopped with a message, or `ORTHROS-NEEDS-YOU.txt` appeared.** It
-  says why. The turn's full output is in `logs\`; the agent's session log is
-  `.localcoder-ralph.log` in the folder it was working in. Press **Start** once
-  it is dealt with.
-- **Linux or macOS?** `--simulate` and the test suites run anywhere; real runs
-  need Windows. Porting the launchers would make a good contribution.
+- **Nothing happens.** Orthros always opens paused: press **Start**. The first
+  minutes of a turn are silent -- tests before launch, then the model loading.
+- **"bad allocation" / the engine keeps dying.** Memory -- see above.
+- **"the card is shared".** Close other LM Studio windows, ollama, games.
+- **It stopped with a message.** It says why; the turn's full output is in
+  `logs\`.
 
-## Layout
+## What it could do with unlimited resources
 
-```
-ORTHROS.bat, orthros.py, orthros.html   the referee and its dashboard (standard library only)
-orthros_work.py                         what a turn works on: the twin, a task or a practice
-orthros_tune.py                         fitting the settings to the machine
-orthros_guard\                          loaded into the agents' Pythons: keeps prompts in the window
-exercises\                              practice jobs, each with hidden tests
-evals\                                  held-out jobs that score a version; never practised on
-agent\                                  the agent's code: the template both agents start from
-SETUP.bat, orthros_setup.py             builds the rest; holds the mission templates
-tests\                                  the referee's tests: python -m unittest discover -s tests
-patches\, docs\                         patches for existing agents; notes
-LICENSE, README.md
+This is speculation. OrthrosCode is two agents on one card, scored on twelve
+small exercises. The same loop, scaled:
 
-made on your machine, not in the repository:
-shared-venv\                            aider and its dependencies, installed once
-OrthrosCode A\, OrthrosCode B\          the two agents, each its own git repository
-tasks\, practice\, evals-runs\           task projects, practice copies, scoring copies
-ledger.sqlite                           one row per round from both agents
-logs\, orthros.log, orthros.json        what happened, and the settings
-hardware.json                           what Orthros found out about this machine
-```
-
-The agent's own files and settings are described in [agent/README.md](agent/README.md).
+- **Many heads, not two.** The Darwin Gödel Machine kept an archive of
+  hundreds of agent versions and bred new ones from the best and the least
+  explored, raising its benchmark score from 20% to 50%. With a data centre,
+  every version could be scored in parallel, on thousands of real tasks
+  instead of twelve toy ones, and the archive could branch freely instead of
+  moving in a line.
+- **Real software as the exam.** Scoring on full benchmarks built from real
+  GitHub issues, run in containers, would make "better" mean better at the
+  work people actually do -- and harder to game.
+- **The model improves too.** Here only the scaffolding changes; the model is
+  fixed. With training compute, every kept change is a worked example, and
+  the agents could fine-tune their own model on their own verified successes.
+- **Where it stops.** The loop improves exactly what the score measures. Its
+  ceiling is the quality of the tests and the honesty of the referee -- which
+  is why the referee here sits outside the agents' reach, and why the most
+  important resource would be better exams, not more GPUs.
 
 ## Credits
 
-Built on [aider](https://aider.chat) and [LM Studio](https://lmstudio.ai), and
-driven by the Ralph loop of [Geoffrey Huntley](https://github.com/ghuntley/how-to-ralph-wiggum):
-the same prompt in a fresh process, state on disk, one item per loop, search
-before building, backpressure from tests. Acceptance criteria on every item and
-counting attempts per item come from
-[fstandhartinger/ralph-wiggum](https://github.com/fstandhartinger/ralph-wiggum).
-The research behind the long-context techniques is credited in
-[Built on](#built-on). Released under the [MIT license](LICENSE).
+OrthrosCode is a referee and a workflow around other people's work. Thank you
+to all of them.
+
+**Software it runs on**
+
+- [aider](https://aider.chat) ([source](https://github.com/Aider-AI/aider), Apache 2.0) --
+  the AI pair programmer that makes every edit. With it come its own open-source
+  dependencies, among them [LiteLLM](https://github.com/BerriAI/litellm),
+  [Streamlit](https://streamlit.io), the [OpenAI Python library](https://github.com/openai/openai-python)
+  (used here only to talk to the local server) and [requests](https://requests.readthedocs.io).
+- [LM Studio](https://lmstudio.ai) -- runs the model on the GPU and serves it
+  locally (free, not open source), on the open-source engine
+  [llama.cpp](https://github.com/ggml-org/llama.cpp) (MIT).
+- The open-weight model you choose; the default is from the
+  [Qwen](https://github.com/QwenLM) team. Check its license before use.
+- [flake8](https://github.com/PyCQA/flake8) and [pyflakes](https://github.com/PyCQA/pyflakes)
+  (MIT) -- the lint checks inside and after every round.
+- [HTTPX](https://www.python-httpx.org) (BSD) and
+  [Beautiful Soup](https://www.crummy.com/software/BeautifulSoup/) (MIT) -- the
+  agents' web research, which searches through [DuckDuckGo](https://duckduckgo.com).
+- [Python](https://www.python.org) and its standard library (unittest, sqlite3,
+  ast, difflib) -- Orthros itself uses nothing else -- and [Git](https://git-scm.com),
+  which holds every version and every undo.
+- [SQLite](https://sqlite.org), through Python's sqlite3 -- the round ledger.
+
+**Ideas it is built from**
+
+- **The Ralph loop** -- [Geoffrey Huntley](https://github.com/ghuntley/how-to-ralph-wiggum):
+  the same prompt in a fresh process, state on disk, one job per loop, search
+  before building, tests as backpressure.
+- [fstandhartinger/ralph-wiggum](https://github.com/fstandhartinger/ralph-wiggum) --
+  acceptance criteria on every item, and counting tries per item.
+- Zhang, Hu, Lu, Lange, Clune, *Darwin Gödel Machine* (2025), and Robeyns et
+  al., *SICA* (2025) -- self-improving agents gated by a benchmark score.
+- Brown et al., *Large Language Monkeys* (2024) -- many tries plus a verifier.
+- Chen et al., *Teaching Large Language Models to Self-Debug* (2023) -- showing
+  the model the values at a failure.
+- Zhao et al., *ExpeL* (2024) -- retrieving past successes as examples.
+- Robertson and Zaragoza, BM25 -- how those examples are found.
+- Xia et al., *Agentless* (2024) -- find the file before fixing it.
+- Lee et al., *ReadAgent* (2024) -- gist memory of every module.
+- Zhang et al., *Chain of Agents* (2024) -- reading a long file in parts.
+- aider's own benchmarks -- architect mode and whole-file edits for weaker
+  models.
+
+The practice and held-out exercises were written for this repository.
+
+Released under the [MIT license](LICENSE).

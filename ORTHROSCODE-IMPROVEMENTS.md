@@ -31,7 +31,9 @@ Left out for now, and why: **8** (mypy) -- the agents' code is built from
 mixins, whose `self.x` from a sibling class mypy reports as missing, so it
 would reject sound rounds; **12** (edit format per file) -- the ladder already
 switches to whole files after a miss, and whole-file replies on larger files
-run into the reply ceiling; **4, 10, 13, 14, 15, 16** are still to do.
+run into the reply ceiling; **4, 10, 13, 14, 16** and parts 2--3 of **15** are
+still to do -- once a few nights of ledger and held-out numbers show where
+rounds are still being lost.
 
 ---
 

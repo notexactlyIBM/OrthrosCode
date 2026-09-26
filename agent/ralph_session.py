@@ -47,7 +47,14 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin, Tes
                  set_temperature=None, temps=None, review=None, list_files=None, ask=None):
         self.base_cmd = list(base_cmd)
         self.workspace = workspace
-        self.child_env = child_env
+        # aider keeps the files it sends in Python sets, and a set of strings
+        # comes out in a different order in every process: the read-only
+        # files reached the model in a new order each round, and LM Studio,
+        # which reuses the longest unchanged start of the last prompt, had to
+        # read them all again. A fixed hash seed makes the order the same
+        # every round (aider 0.86.2, base_coder.get_read_only_files_content).
+        self.child_env = dict(child_env or {})
+        self.child_env.setdefault("PYTHONHASHSEED", "0")
         self.minutes = minutes
         self.single_shot = single_shot
         self.notes_hint = notes_hint

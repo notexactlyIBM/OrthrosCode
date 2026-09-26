@@ -114,6 +114,13 @@ class TestLoop(LoopBase):
         self.assertIn("lesson 20\n", lessons)
         self.assertIn("Parked: 20", read_text(os.path.join(self.ws, "LESSONS.summary.md")))
 
+    def test_aider_runs_with_a_fixed_hash_seed(self):
+        # So the files it keeps in sets reach the model in the same order each
+        # round, and the engine's prompt cache is reused.
+        self.assertEqual(self.session().child_env["PYTHONHASHSEED"], "0")
+        self.env["PYTHONHASHSEED"] = "7"
+        self.assertEqual(self.session().child_env["PYTHONHASHSEED"], "7")
+
     def test_dead_engine_stops_cleanly(self):
         self.env["FAKE_MODE"] = "dead"
         s = self.session()

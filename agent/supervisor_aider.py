@@ -177,6 +177,29 @@ def module_available(python, module):
         return False
 
 
+# What a rejection may cite (REVIEW_PROMPT). Each fault quotes its line, so the
+# loop can check it before throwing a round away (ralph_scan.check_claims):
+# on 2026-09-24 six rejections called a name undefined that was imported
+# above the diff. ORTHROSCODE-IMPROVEMENTS.md, item 2.
+FAULT_KINDS = ("does-not-do-the-item", "cut-off", "undefined-name", "wrong-arguments",
+               "read-before-assigned", "breaks-other-code", "out-of-scope", "logic-error")
+FAULT_LINE = re.compile(r"^\s*FAULT:\s*([\w-]+)\s*\|\s*(.+?)\s*\|\s*(.+?)\s*$",
+                        re.MULTILINE | re.IGNORECASE)
+
+
+def parse_faults(text):
+    """[{'kind', 'line', 'why'}] from the FAULT: lines of a review. At most three."""
+    faults, seen = [], set()
+    for kind, line, why in FAULT_LINE.findall(text or ""):
+        line = line.strip().strip("`\"'")
+        # The answer comes first, then the thinking (_chat), which may draft
+        # the same fault again.
+        if (kind.lower(), line) not in seen:
+            seen.add((kind.lower(), line))
+            faults.append({"kind": kind.lower(), "line": line, "why": why.strip()})
+    return faults[:3]
+
+
 REVIEW_PROMPT = """You are reviewing one change made by another developer. You did not write it
 and you have no reason to defend it.
 
@@ -201,10 +224,17 @@ REJECT if any of these is true:
 
 Otherwise ACCEPT. Do not reject for style or taste.
 
-Reply in exactly two lines:
+Reply with these two lines:
 VERDICT: ACCEPT or REJECT
 REASON: one sentence
-"""
+
+When you reject, add one line for each fault, at most three:
+FAULT: <kind> | <one line copied exactly from the change or the code above> | <what is wrong>
+
+<kind> is one of: KINDS.
+The line must be copied, not described: a fault whose line is not in what you
+were shown is ignored, and so is a name called undefined that is defined.
+""".replace("KINDS", ", ".join(FAULT_KINDS))
 
 
 BUG_HUNT = """Another developer made this change for this task:
@@ -267,8 +297,10 @@ def _chat(prompt, max_tokens, timeout, temperature=0.1):
             choice.get("finish_reason"))
 
 
-def _verdict(prompt, timeout):
+def _verdict(prompt, timeout, faults=None):
     """('accept'|'reject'|'', reason) from a two-line VERDICT/REASON reply.
+
+    The reply's FAULT: lines, if any, are added to `faults` when it is a list.
 
     This model thinks before it answers, out of the same budget: when the
     thinking uses it up there is no verdict, so one retry with twice the room.
@@ -281,6 +313,8 @@ def _verdict(prompt, timeout):
         verdict = re.search(r"VERDICT:\s*(ACCEPT|REJECT)", text, re.I)
         found = re.search(r"REASON:\s*(.+)", text, re.I)
         if verdict:
+            if faults is not None:
+                faults.extend(parse_faults(text))
             return verdict.group(1).lower(), (found.group(1).strip() if found else "")
         reason = ("it ran out of room before answering" if finish == "length"
                   else "its reply had no VERDICT line")
@@ -289,7 +323,7 @@ def _verdict(prompt, timeout):
     return "", reason
 
 
-def review_change(task, diff, timeout=300, notes=(), context=""):
+def review_change(task, diff, timeout=300, notes=(), context="", faults=None):
     """A second agent's verdict on one round's change. Returns (verdict, reason).
 
     verdict is "accept", "reject", or "" when no clear answer came back -- in
@@ -309,6 +343,9 @@ def review_change(task, diff, timeout=300, notes=(), context=""):
     `context` is what the diff cannot show -- what the checks have already
     settled, and the code the item names as it stands now. All three reads
     get it, straight after the diff.
+
+    `faults`, a list, receives the faults a rejection cites (parse_faults),
+    for the loop to check before it believes them.
     """
     if not diff.strip():
         return "", "nothing to review"
@@ -317,7 +354,7 @@ def review_change(task, diff, timeout=300, notes=(), context=""):
         seen = ("\nThe automatic checks noticed (not errors by themselves, but look):\n"
                 + "\n".join("- %s" % n for n in notes[:6]) + "\n")
     shown = diff + context
-    verdict, reason = _verdict(REVIEW_PROMPT % (task, shown) + seen, timeout)
+    verdict, reason = _verdict(REVIEW_PROMPT % (task, shown) + seen, timeout, faults)
     if verdict != "accept" or REVIEW_PASSES < 2:
         return verdict, reason
     text, _ = _chat(BUG_HUNT % (task, shown), 3000, timeout)

@@ -13,7 +13,7 @@ import time
 import status
 from ralph_common import LOCATE, SCAN, read_text, say
 from ralph_locate import locate
-from ralph_scan import baseline, scan
+from ralph_scan import baseline, check_claims, lint, scan
 from ralph_prompts import compose_round_prompt, design_guide
 from ralph_rounds import SYMBOL, build_round_command, files_for_task, run_round
 from ralph_tools import FOUND_FILE, SKILLS_FILE
@@ -234,13 +234,41 @@ class SendMixin:
         """The reviewer's verdict, told what the automatic checks noticed and
         settled, and shown the code the item names (review_context)."""
         linted = bool(SCAN) and (getattr(self, "scan_before", {}) or {}).get("lint") is not None
-        extra = {"context": review_context(task, self.edit_files, linted)
-                 + getattr(self, "review_note", "")}
+        context = review_context(task, self.edit_files, linted) + getattr(self, "review_note", "")
+        extra = {"context": context}
         if notes:
             extra["notes"] = notes
-        try:
-            return self.review(task, diff, **extra)
-        except TypeError:
-            pass
-        return self.review(task, diff)
+        faults = []
+        self.review_tag = ""
+        for kwargs in (dict(extra, faults=faults), extra, {}):
+            try:
+                verdict, why = self.review(task, diff, **kwargs)
+                break
+            except TypeError:
+                if not kwargs:
+                    raise
+        if verdict != "reject":
+            return verdict, why
+        if not faults:
+            self.review_tag = "uncited: "      # counted in the ledger, still believed
+            return verdict, why
+        return self.weigh_faults(task, diff, context, faults, why)
+
+    def weigh_faults(self, task, diff, context, faults, why):
+        """A rejection stands only on a fault the checks cannot refute
+        (ralph_scan.check_claims). ORTHROSCODE-IMPROVEMENTS.md, item 2."""
+        lint_now = lint(self.edit_files) if any(f["kind"] == "undefined-name"
+                                                for f in faults) else None
+        kept, dropped = check_claims(faults, task + "\n" + diff + "\n" + context,
+                                     self.edit_files, lint_now)
+        for fault, reason in dropped:
+            self.note("  reviewer's claim dropped (%s): %s" % (reason, fault["line"][:60]))
+        if not kept:
+            self.review_tag = "refuted: "
+            return "accept", "every fault it cited was refuted -- %s (it said: %s)" % (
+                dropped[0][1], why[:120])
+        first = kept[0]
+        self.review_tag = "cited: "
+        return "reject", "%s -- `%s`: %s" % (first["kind"], first["line"][:100],
+                                            first["why"][:140])
 

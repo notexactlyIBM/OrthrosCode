@@ -90,6 +90,7 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin, Tes
         self.test_misses = {}     # item -> test rounds sent back
         self.test_budgeted = set()  # items given one more round for their test round
         self.review_note = ""     # what execution settled, for the reviewer
+        self.review_tag = ""      # cited / uncited / refuted: how a rejection stood
         self.last_kept = False
         self.last_failure_kind = ""  # kind of the latest lesson recorded, ranked first
         self.lean = False         # the last prompt was refused as too big: send less
@@ -399,6 +400,7 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin, Tes
         # whether it does what the item said.
         rejected_now = False
         verdict, why = "", ""
+        self.review_tag = ""
         diff = round_diff(ws, self.edit_files) if touched and not self.broken else ""
         moved = put_main_last(self.edit_files, diff) if diff else []
         if moved:
@@ -449,8 +451,8 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin, Tes
         if kept:
             self.commit("LocalCoder ralph: round %d" % self.rounds)
             self.refresh_files()
-        self.ledger_round(result, touched, verdict, why, caught, after_done - before_done,
-                          kept, diff)
+        self.ledger_round(result, touched, verdict, self.review_tag + (why or ""), caught,
+                          after_done - before_done, kept, diff)
 
         self.last_kept = kept
         return self.finish_round(result, counted)

@@ -139,6 +139,82 @@ def call_mismatches(files):
     return found
 
 
+# ---------------------------------------------------------------- claims
+
+IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+SHORTEST_QUOTE = 6        # below this a quote matches anything, so proves nothing
+
+
+def normalise(text):
+    """Whitespace-insensitive form for "is this quote really there?"."""
+    return " ".join((text or "").strip().lstrip("+-").split())
+
+
+def defined_names(files):
+    """Every name the project defines, assigns, imports, or sets as an attribute."""
+    names = set()
+    for path in files:
+        if not path.endswith(".py") or not os.path.isfile(path):
+            continue
+        try:
+            tree = ast.parse(read_text(path))
+        except (SyntaxError, ValueError):
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                names.add(node.name)
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                names.update((a.asname or a.name).split(".")[0] for a in node.names)
+            elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                names.add(node.id)
+            elif isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store):
+                names.add(node.attr)
+            elif isinstance(node, ast.arg):
+                names.add(node.arg)
+    return names
+
+
+def claimed_name(line, why):
+    """The name a claim is about: the first backticked word in the reason, else
+    the first identifier in the reason that also appears in the quoted line."""
+    ticked = re.findall(r"`([A-Za-z_]\w*)`", why or "")
+    if ticked:
+        return ticked[0]
+    in_line = set(IDENT.findall(line or ""))
+    return next((w for w in IDENT.findall(why or "") if w in in_line), "")
+
+
+def check_claims(faults, shown, files, lint_now):
+    """Keep the faults a program cannot refute; drop the rest.
+
+    `shown` is everything the reviewer was shown: the item, the diff and the
+    code. A fault is dropped when its quoted line is not in it, or when it
+    calls a name undefined that the project defines and pyflakes (`lint_now`,
+    None when it could not run) does not call undefined. Anything else is
+    kept: what cannot be checked is not assumed wrong.
+
+    Returns (kept, [(fault, why it was dropped)]).
+    """
+    text = normalise(shown)
+    defined = None
+    kept, dropped = [], []
+    for fault in faults:
+        quote = normalise(fault.get("line"))
+        if len(quote.replace(" ", "")) >= SHORTEST_QUOTE and quote not in text:
+            dropped.append((fault, "the line it quotes is not in the change or the code"))
+            continue
+        if fault.get("kind") == "undefined-name" and lint_now is not None:
+            name = claimed_name(fault.get("line"), fault.get("why"))
+            if defined is None:
+                defined = defined_names(files)
+            flagged = any("'%s'" % name in m and "undefined" in m for m in lint_now)
+            if name and name in defined and not flagged:
+                dropped.append((fault, "`%s` is defined, and pyflakes finds it defined" % name))
+                continue
+        kept.append(fault)
+    return kept, dropped
+
+
 def baseline(files, python=None):
     """What is already wrong before a round, so only what the round adds counts."""
     return {"lint": lint(files, python), "calls": call_mismatches(files)}

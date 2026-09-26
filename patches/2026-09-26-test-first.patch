@@ -1,0 +1,1285 @@
+diff --git a/README.md b/README.md
+index b2cda48..8686187 100644
+--- a/README.md
++++ b/README.md
+@@ -73,6 +73,7 @@ that produce nothing at all stop it early.
+ | `ralph_locate.py` | asks which files an item needs when it names none (after Agentless) |
+ | `ralph_gists.py` | GISTS.md: every module in a few lines, for planning (after ReadAgent) |
+ | `ralph_scan.py` | after each round, checks that cost no tokens: project-wide lint and call signatures, placeholders, conflict markers, lost tests; a test file's `if __name__ == "__main__":` block put back at its end |
++| `ralph_testfirst.py` | test first, then code: an item whose `Done when:` a test could check gets a round that writes only that test, which must fail; code rounds then make it pass, and the test enters the history only with them. Off with `set "LC_RALPH_TEST_FIRST=0"` |
+ | `ralph_ledger.py` | one row per round in SQLite -- item, tokens, checks, verdict, kept -- so "where do rounds go?" is a query, not an afternoon of reading logs |
+ | `ralph_digest.py` | `DIGEST:` reads a file too big for a round in parts (after Chain-of-Agents) |
+ | `ralph_prompts.py` | everything the model is told |
+diff --git a/ralph_prompts.py b/ralph_prompts.py
+index deb979f..c4e55d3 100644
+--- a/ralph_prompts.py
++++ b/ralph_prompts.py
+@@ -470,7 +470,7 @@ def relevant_lessons(workspace, task, most=5, last_failure_kind=""):
+ 
+ 
+ def compose_round_prompt(workspace, prompt_path, broken, cut_off=False, task=None,
+-                         last_failure_kind=""):
++                         last_failure_kind="", phase_note=""):
+     """The standing prompt, plus whatever the last round's output actually did.
+ 
+     This is the only feedback the model gets about its own work -- every round
+@@ -480,13 +480,14 @@ def compose_round_prompt(workspace, prompt_path, broken, cut_off=False, task=Non
+     `task` is the current item's text; when given, lessons are ranked by
+     relevance to it rather than simply by recency. Lessons of
+     `last_failure_kind`, the session's latest recorded failure, come first.
++    `phase_note` heads the prompt: a test round's orders, or the item's test.
+     """
+     body = read_text(prompt_path)
+     more = unlisted_requests(body)
+     if more:
+         body = (body.rstrip("\n") + "\n\nThese are answered too -- one line in the task list, "
+                 "then stop; the answer comes with the next round:\n\n" + "\n".join(more) + "\n")
+-    head = []
++    head = [phase_note.rstrip("\n"), ""] if phase_note else []
+     if cut_off:
+         # A round that ran out of room stops mid-sentence, and the next one
+         # arrives knowing nothing about it. Two things go wrong from there:
+diff --git a/ralph_scan.py b/ralph_scan.py
+index 828a881..fd9b9c0 100644
+--- a/ralph_scan.py
++++ b/ralph_scan.py
+@@ -139,6 +139,82 @@ def call_mismatches(files):
+     return found
+ 
+ 
++# ---------------------------------------------------------------- claims
++
++IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
++SHORTEST_QUOTE = 6        # below this a quote matches anything, so proves nothing
++
++
++def normalise(text):
++    """Whitespace-insensitive form for "is this quote really there?"."""
++    return " ".join((text or "").strip().lstrip("+-").split())
++
++
++def defined_names(files):
++    """Every name the project defines, assigns, imports, or sets as an attribute."""
++    names = set()
++    for path in files:
++        if not path.endswith(".py") or not os.path.isfile(path):
++            continue
++        try:
++            tree = ast.parse(read_text(path))
++        except (SyntaxError, ValueError):
++            continue
++        for node in ast.walk(tree):
++            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
++                names.add(node.name)
++            elif isinstance(node, (ast.Import, ast.ImportFrom)):
++                names.update((a.asname or a.name).split(".")[0] for a in node.names)
++            elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
++                names.add(node.id)
++            elif isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store):
++                names.add(node.attr)
++            elif isinstance(node, ast.arg):
++                names.add(node.arg)
++    return names
++
++
++def claimed_name(line, why):
++    """The name a claim is about: the first backticked word in the reason, else
++    the first identifier in the reason that also appears in the quoted line."""
++    ticked = re.findall(r"`([A-Za-z_]\w*)`", why or "")
++    if ticked:
++        return ticked[0]
++    in_line = set(IDENT.findall(line or ""))
++    return next((w for w in IDENT.findall(why or "") if w in in_line), "")
++
++
++def check_claims(faults, shown, files, lint_now):
++    """Keep the faults a program cannot refute; drop the rest.
++
++    `shown` is everything the reviewer was shown: the item, the diff and the
++    code. A fault is dropped when its quoted line is not in it, or when it
++    calls a name undefined that the project defines and pyflakes (`lint_now`,
++    None when it could not run) does not call undefined. Anything else is
++    kept: what cannot be checked is not assumed wrong.
++
++    Returns (kept, [(fault, why it was dropped)]).
++    """
++    text = normalise(shown)
++    defined = None
++    kept, dropped = [], []
++    for fault in faults:
++        quote = normalise(fault.get("line"))
++        if len(quote.replace(" ", "")) >= SHORTEST_QUOTE and quote not in text:
++            dropped.append((fault, "the line it quotes is not in the change or the code"))
++            continue
++        if fault.get("kind") == "undefined-name" and lint_now is not None:
++            name = claimed_name(fault.get("line"), fault.get("why"))
++            if defined is None:
++                defined = defined_names(files)
++            flagged = any("'%s'" % name in m and "undefined" in m for m in lint_now)
++            if name and name in defined and not flagged:
++                dropped.append((fault, "`%s` is defined, and pyflakes finds it defined" % name))
++                continue
++        kept.append(fault)
++    return kept, dropped
++
++
+ def baseline(files, python=None):
+     """What is already wrong before a round, so only what the round adds counts."""
+     return {"lint": lint(files, python), "calls": call_mismatches(files)}
+diff --git a/ralph_send.py b/ralph_send.py
+index 95fa770..6ebcdb4 100644
+--- a/ralph_send.py
++++ b/ralph_send.py
+@@ -13,7 +13,7 @@ import time
+ import status
+ from ralph_common import LOCATE, SCAN, read_text, say
+ from ralph_locate import locate
+-from ralph_scan import baseline, scan
++from ralph_scan import baseline, check_claims, lint, scan
+ from ralph_prompts import compose_round_prompt, design_guide
+ from ralph_rounds import SYMBOL, build_round_command, files_for_task, run_round
+ from ralph_tools import FOUND_FILE, SKILLS_FILE
+@@ -116,11 +116,16 @@ def review_context(task, files, linted):
+ 
+ class SendMixin:
+ 
+-    def send_round(self, task):
+-        """Build the prompt and the file list, run aider, record the numbers."""
++    def send_round(self, task, phase="code"):
++        """Build the prompt and the file list, run aider, record the numbers.
++
++        A test round (ralph_testfirst.py) gets the item's code to read and only
++        its test file to edit.
++        """
+         round_prompt = compose_round_prompt(self.workspace, self.prompt_path, self.broken,
+                                             cut_off=self.was_cut_off, task=task,
+-                                            last_failure_kind=self.last_failure_kind)
++                                            last_failure_kind=self.last_failure_kind,
++                                            phase_note=self.phase_note(task, phase))
+         # Only the files this item names, so a multi-module project does not
+         # pay for all of itself on every round.
+         self.set_temperature(attempt_temperature(self.rounds_on_task, self.temp_code,
+@@ -152,6 +157,11 @@ class SendMixin:
+                 sorted(set(re.findall(r"\b([\w-]+\.md)\b", task)))]
+         docs = [d for d in docs if os.path.isfile(d) and d != self.notes_path]
+         round_files = round_files + docs
++        study = []
++        if phase == "test":
++            target = os.path.join(self.workspace, self.test_target(task))
++            study = [f for f in round_files if f != target]
++            round_files = [target] if os.path.isfile(target) else []
+         # Answers go stale. Research from an hour ago, or a code search for an
+         # item three rounds back, is 2,000 tokens of the window spent on
+         # something nobody asked about any more -- and rounds were reaching
+@@ -159,7 +169,7 @@ class SendMixin:
+         # every request cost more memory in the engine.
+         answers = [p for p in (self.research_path, os.path.join(self.workspace, FOUND_FILE))
+                    if recently_written(p)]
+-        reads = [p for p in (answers + [self.conventions, design_guide(task),
++        reads = study + [p for p in (answers + [self.conventions, design_guide(task),
+                                         os.path.join(self.workspace, SKILLS_FILE)])
+                  if p and os.path.isfile(p) and p not in docs]
+         if self.lean:
+@@ -224,12 +234,41 @@ class SendMixin:
+         """The reviewer's verdict, told what the automatic checks noticed and
+         settled, and shown the code the item names (review_context)."""
+         linted = bool(SCAN) and (getattr(self, "scan_before", {}) or {}).get("lint") is not None
+-        extra = {"context": review_context(task, self.edit_files, linted)}
++        context = review_context(task, self.edit_files, linted) + getattr(self, "review_note", "")
++        extra = {"context": context}
+         if notes:
+             extra["notes"] = notes
+-        try:
+-            return self.review(task, diff, **extra)
+-        except TypeError:
+-            pass
+-        return self.review(task, diff)
++        faults = []
++        self.review_tag = ""
++        for kwargs in (dict(extra, faults=faults), extra, {}):
++            try:
++                verdict, why = self.review(task, diff, **kwargs)
++                break
++            except TypeError:
++                if not kwargs:
++                    raise
++        if verdict != "reject":
++            return verdict, why
++        if not faults:
++            self.review_tag = "uncited: "      # counted in the ledger, still believed
++            return verdict, why
++        return self.weigh_faults(task, diff, context, faults, why)
++
++    def weigh_faults(self, task, diff, context, faults, why):
++        """A rejection stands only on a fault the checks cannot refute
++        (ralph_scan.check_claims). ORTHROSCODE-IMPROVEMENTS.md, item 2."""
++        lint_now = lint(self.edit_files) if any(f["kind"] == "undefined-name"
++                                                for f in faults) else None
++        kept, dropped = check_claims(faults, task + "\n" + diff + "\n" + context,
++                                     self.edit_files, lint_now)
++        for fault, reason in dropped:
++            self.note("  reviewer's claim dropped (%s): %s" % (reason, fault["line"][:60]))
++        if not kept:
++            self.review_tag = "refuted: "
++            return "accept", "every fault it cited was refuted -- %s (it said: %s)" % (
++                dropped[0][1], why[:120])
++        first = kept[0]
++        self.review_tag = "cited: "
++        return "reject", "%s -- `%s`: %s" % (first["kind"], first["line"][:100],
++                                            first["why"][:140])
+ 
+diff --git a/ralph_session.py b/ralph_session.py
+index 3d37183..9940199 100644
+--- a/ralph_session.py
++++ b/ralph_session.py
+@@ -27,6 +27,7 @@ from ralph_rounds import round_diff
+ from ralph_scan import put_main_last
+ from ralph_tools import handle_tool_requests, record_lesson
+ from ralph_setup import SetupMixin, last_line
++from ralph_testfirst import TestFirstMixin, snapshot
+ from ralph_tasks import done_count, open_tasks, park_task, remember_review, triage
+ 
+ # Unexpected exceptions in a row before the session gives up. One is a bug in
+@@ -35,7 +36,7 @@ from ralph_tasks import done_count, open_tasks, park_task, remember_review, tria
+ # means it would only keep failing the same way.
+ MAX_INTERNAL_ERRORS = 3
+ 
+-class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin):
++class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin, TestFirstMixin):
+ 
+     def __init__(self, base_cmd, workspace, child_env, minutes, single_shot,
+                  notes_hint="", edit_files=(), iteration_timeout=420,
+@@ -85,6 +86,12 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin):
+         self.engine_streak = 0    # consecutive rounds lost to the engine
+         self.was_cut_off = False  # last round ran out of room part-way through
+         self.temperature = None   # the last one set, if it could be
++        self.pending_tests = {}   # item -> the test a test round wrote for it (ralph_testfirst)
++        self.test_misses = {}     # item -> test rounds sent back
++        self.test_budgeted = set()  # items given one more round for their test round
++        self.review_note = ""     # what execution settled, for the reviewer
++        self.review_tag = ""      # cited / uncited / refuted: how a rejection stood
++        self.last_kept = False
+         self.last_failure_kind = ""  # kind of the latest lesson recorded, ranked first
+         self.lean = False         # the last prompt was refused as too big: send less
+         self.fat_rounds = 0       # rounds lost to the prompt, not the reply
+@@ -275,6 +282,10 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin):
+         self.rounds += 1
+         self.rounds_on_task += 1
+         task = self.current_task
++        phase = self.round_phase(task)
++        if phase == "test" and task not in self.test_budgeted:
++            self.test_budgeted.add(task)
++            self.task_budget += 1           # the test round is not one of the tries
+         say("-" * 62)
+         if self.single_shot:
+             self.note("Round %d  |  %d items left" % (self.rounds, len(remaining)))
+@@ -283,6 +294,8 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin):
+                       % (self.rounds, len(remaining), int(left // 60),
+                          self.rounds_on_task, self.task_budget))
+         say("    %s" % task[:64])
++        if phase == "test":
++            say("    (test round: the test for it, no code)")
+         say("-" * 62)
+ 
+         # Commit what the loop wrote since the last round -- a refill's items,
+@@ -291,6 +304,10 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin):
+         # too, and a rejected round after a refill emptied the list again.
+         if self.commit and not self.broken:
+             self.commit("LocalCoder ralph: notes before round %d" % self.rounds)
++        if phase == "code":
++            self.put_test_back(task)
++        tests_before = snapshot(self.workspace) if phase == "test" else {}
++        code_before = code_fingerprint(self.non_test_files()) if phase == "test" else ""
+         before = (len(remaining), done_count(self.notes_path), code_fingerprint(self.edit_files),
+                   self.listing())
+         self.maybe_switch_to_whole_files()
+@@ -299,10 +316,23 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin):
+                       budget=self.task_budget, items_open=len(remaining),
+                       items_done=done_count(self.notes_path))
+         status.phase("working", task)
+-        result = self.send_round(task)
++        result = self.send_round(task, phase=phase)
++        if phase == "test":
++            if not self.react_to_symptom(result):
++                self.after_test_round(result, task, tests_before, code_before, before[3])
++                return False
++            return self.after_test_round(result, task, tests_before, code_before, before[3])
++        self.hold_test(task)
+         if not self.react_to_symptom(result):
++            self.settle_test(task, False)
+             return False
+-        return self.after_round(result, before)
++        self.last_kept = False
++        keep_going = self.after_round(result, before)
++        self.settle_test(task, self.last_kept)
++        return keep_going
++
++    def non_test_files(self):
++        return [f for f in self.edit_files if not os.path.basename(f).startswith("test_")]
+ 
+     def maybe_switch_to_whole_files(self):
+         """A small model that keeps producing SEARCH blocks which do not match
+@@ -348,6 +378,14 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin):
+             if self.rollback():
+                 self.remove_new_sources(before_files)
+                 self.reverted += 1
++                # The credit for ticking was for work now undone, as for a
++                # rejection below. Kept, a round that ticked the item and broke
++                # the tests was free, and the item was retried until the clock
++                # ran out (found 2026-09-26 by test_ralph_testfirst).
++                if after_done > before_done or after_open > before_open:
++                    self.rounds_on_task += 1
++                after_done = done_count(notes_path)
++                after_open = len(open_tasks(notes_path))
+                 record_lesson(ws, "Broke start-up and was undone: %s -- %s"
+                               % (self.current_task[:80], last_line(self.broken[0][1])[:100]))
+                 self.broken = full_check(ws, self.edit_files, self.entry, self.run_seconds)
+@@ -362,6 +400,7 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin):
+         # whether it does what the item said.
+         rejected_now = False
+         verdict, why = "", ""
++        self.review_tag = ""
+         diff = round_diff(ws, self.edit_files) if touched and not self.broken else ""
+         moved = put_main_last(self.edit_files, diff) if diff else []
+         if moved:
+@@ -412,9 +451,15 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin):
+         if kept:
+             self.commit("LocalCoder ralph: round %d" % self.rounds)
+             self.refresh_files()
+-        self.ledger_round(result, touched, verdict, why, caught, after_done - before_done,
+-                          kept, diff)
++        self.ledger_round(result, touched, verdict, self.review_tag + (why or ""), caught,
++                          after_done - before_done, kept, diff)
++
++        self.last_kept = kept
++        return self.finish_round(result, counted)
+ 
++    def finish_round(self, result, counted):
++        """What every round ends with: answer requests, report, park or stop. False to stop."""
++        notes_path, ws = self.notes_path, self.workspace
+         handle_tool_requests(ws, notes_path, find_project_python(ws), ask=self.ask)
+         status.update(ticked=done_count(notes_path) - self.started_done,
+                       accepted=self.accepted, rejected=self.rejected,
+diff --git a/ralph_testfirst.py b/ralph_testfirst.py
+new file mode 100644
+index 0000000..8a82045
+--- /dev/null
++++ b/ralph_testfirst.py
+@@ -0,0 +1,319 @@
++"""Test first, then code: an item's "Done when" made into a test that runs.
++
++Every item ends with `Done when:` and a check anyone can make. Until
++2026-09-26 that check was read by one model and judged by another, and on
++2026-09-24 about 40% of the reviewer's rejections were wrong -- mostly for
++want of context a diff does not show. A test that passes needs no context
++(ORTHROSCODE-IMPROVEMENTS.md, 1).
++
++So an item that a test could check gets two kinds of round:
++
++1. The test round writes one unittest for the `Done when:`, and nothing else.
++   The loop runs it: it must fail, or error because what it tests does not
++   exist yet. A test that already passes tests nothing.
++2. Code rounds then make it pass. The test is put back in the tree at the
++   start of each, restored if the round changed it, and runs with every other
++   test in the automatic checks.
++
++The test is never committed on its own. A failing test in the history would
++mark the project broken for every round after it, and an item parked with its
++test unpassed would leave that test failing for good. It goes into the history
++with the change that makes it pass, or not at all.
++"""
++
++import ast
++import os
++import re
++import subprocess
++
++from ralph_checks import _import_env, code_fingerprint, find_project_python
++from ralph_common import _env_flag, _env_int, read_text, write_text
++
++TEST_FIRST = _env_flag("LC_RALPH_TEST_FIRST", True)
++TEST_TRIES = _env_int("LC_RALPH_TEST_TRIES", 2)   # failed test rounds before coding without
++
++DONE_WHEN = re.compile(r"Done when:\s*(.+)$", re.I)
++NAMED = re.compile(r"`([^`]+)`")
++CHECKABLE = re.compile(r"\b(returns?|raises?|prints?|equals?|is|are|==|tests?|passes|finds?)\b",
++                       re.I)
++CODE_NAME = re.compile(r"^[A-Za-z_][\w.]*(\(\))?$")
++PROSE = (".md", ".cmd", ".bat", ".html", ".txt", ".json", ".toml", ".cfg")
++FILE_NAMED = re.compile(r"\b([\w-]+\.py)\b")
++# What a test of something not written yet dies of. Any other error means the
++# test itself is broken.
++MISSING_YET = re.compile(r"\b(ImportError|ModuleNotFoundError|AttributeError|NameError)\b")
++
++
++def acceptance(task_text):
++    """The item's `Done when:` check, if a test could state it. Else ''."""
++    match = DONE_WHEN.search(task_text or "")
++    if not match:
++        return ""
++    check = match.group(1).strip()
++    # Something code-shaped to test: a .py file, or a name like `add` or
++    # `Class.method`. An item about SKILLS.md or config.cmd has no test to write.
++    names = NAMED.findall(task_text) + FILE_NAMED.findall(task_text)
++    code = [n for n in names if n.endswith(".py")
++            or (CODE_NAME.match(n) and not n.lower().endswith(PROSE))]
++    if not code or not CHECKABLE.search(check):
++        return ""
++    return check
++
++
++def test_file_for(task_text, source_files):
++    """Where the item's test goes: a test file the item names, else
++    test_<first source file it is about>.py. '' if neither."""
++    named = [n for n in FILE_NAMED.findall(task_text or "") if n.startswith("test_")]
++    if named:
++        return named[0]
++    for path in source_files:
++        base = os.path.basename(path)
++        if base.endswith(".py") and not base.startswith("test_"):
++            return "test_" + base
++    return ""
++
++
++def test_files(workspace):
++    """The top-level test_*.py files, as test_check finds them."""
++    try:
++        return sorted(n for n in os.listdir(workspace)
++                      if n.startswith("test_") and n.endswith(".py"))
++    except OSError:
++        return []
++
++
++def _methods(text):
++    """{'Class.test_x': source of the method} for one test file. {} if it does not parse."""
++    try:
++        tree = ast.parse(text)
++    except (SyntaxError, ValueError):
++        return {}
++    found = {}
++    for node in tree.body:
++        if isinstance(node, ast.ClassDef):
++            for item in node.body:
++                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) \
++                        and item.name.startswith("test"):
++                    found["%s.%s" % (node.name, item.name)] = ast.get_source_segment(text, item)
++    return found
++
++
++def snapshot(workspace):
++    """{test file: its text} for every top-level test file."""
++    return {name: read_text(os.path.join(workspace, name)) for name in test_files(workspace)}
++
++
++def test_ids(tests):
++    """{'test_x.Class.test_y': source} across a snapshot."""
++    ids = {}
++    for name, text in tests.items():
++        for method, source in _methods(text).items():
++            ids["%s.%s" % (name[:-3], method)] = source
++    return ids
++
++
++def run_one_test(workspace, test_id, seconds=120):
++    """('passed' | 'failed' | 'error', output) for one unittest id."""
++    try:
++        proc = subprocess.run([find_project_python(workspace), "-m", "unittest", "-q", test_id],
++                              cwd=workspace, capture_output=True, text=True, timeout=seconds,
++                              encoding="utf-8", errors="replace", env=_import_env())
++    except subprocess.TimeoutExpired:
++        return "error", "timed out after %ds" % seconds
++    except OSError as exc:
++        return "error", str(exc)
++    out = (proc.stderr or "") + (proc.stdout or "")
++    if proc.returncode == 0:
++        return "passed", out
++    return ("failed" if "FAIL:" in out and "ERROR:" not in out else "error"), out
++
++
++def put_files(workspace, files):
++    """Write {name: text}; a text of None deletes the file."""
++    for name, text in files.items():
++        path = os.path.join(workspace, name)
++        if text is None:
++            try:
++                os.remove(path)
++            except OSError:
++                pass
++        else:
++            write_text(path, text)
++
++
++def untick(notes_path, task_text):
++    """Open the item again if a round ticked it. True if it did."""
++    body = read_text(notes_path)
++    pattern = re.compile(r"^([ \t]*[-*][ \t]*)\[[xX]\]([ \t]*%s[ \t]*)$" % re.escape(task_text),
++                         re.MULTILINE)
++    fixed, count = pattern.subn(r"\1[ ]\2", body, count=1)
++    return bool(count) and write_text(notes_path, fixed)
++
++
++def last_words(out):
++    lines = [l for l in (out or "").splitlines() if l.strip() and not set(l.strip()) <= set("-=")]
++    return lines[-1].strip()[:140] if lines else "(no output)"
++
++
++TEST_ROUND = """# THIS ROUND: THE TEST ONLY
++
++The item at the top of the list will be done in the next round. This round
++writes the test that proves it, and nothing else.
++
++Item: {item}
++
++Write one unittest in `{test_file}` (create it if it does not exist) that
++checks exactly this:
++
++    {check}
++
++- Import what it tests from the project; do not copy code into the test.
++- It must FAIL on the code as it stands now -- that is how we know it tests
++  something. If what it tests does not exist yet, failing to import it is fine.
++- Change no other file. Tick nothing. The loop runs the test after this round.
++"""
++
++CODE_ROUND = """# THIS ITEM HAS A TEST
++
++{tests} was written for this item in an earlier round and fails now. The item
++is done when it passes and every other test still does. Change the code, not
++the test: the test is put back as it was after every round.
++"""
++
++SETTLED_BY_TEST = ("\nSettled by execution: the item's own test ({tests}) was written in an "
++                   "earlier round and failed before this change; after it, that test and "
++                   "every other test pass. Judge scope and collateral damage, not whether "
++                   "it works.\n")
++
++
++class TestFirstMixin:
++    """Part of Session: the test round, and the code rounds after it.
++
++    pending_tests[item] = {"ids": [...], "files": {name: (before, after)},
++    "kept": bool} -- the test written for an item, the test files as they
++    were before and after the test round, and whether it is in the history.
++    """
++
++    def round_phase(self, task):
++        """'test' for an item a test could check that has none yet, else 'code'."""
++        if not TEST_FIRST or self.single_shot or self.broken or task in self.pending_tests:
++            return "code"
++        if self.test_misses.get(task, 0) >= TEST_TRIES:
++            return "code"
++        return "test" if acceptance(task) and self.test_target(task) else "code"
++
++    def test_target(self, task):
++        from ralph_rounds import files_for_task
++        return test_file_for(task, files_for_task(task, self.edit_files) or self.edit_files)
++
++    def phase_note(self, task, phase):
++        """The header this round's prompt starts with, for its phase."""
++        if phase == "test":
++            return TEST_ROUND.format(item=task, test_file=self.test_target(task),
++                                     check=acceptance(task))
++        pending = self.pending_tests.get(task)
++        if pending and not pending["kept"]:
++            return CODE_ROUND.format(tests=", ".join("`%s`" % t for t in pending["ids"]))
++        return ""
++
++    def put_test_back(self, task):
++        """Before a code round: the item's unkept test goes back in the tree."""
++        pending = self.pending_tests.get(task)
++        if not pending or pending["kept"]:
++            self.review_note = ""
++            return
++        put_files(self.workspace, {n: after for n, (_, after) in pending["files"].items()})
++        self.review_note = SETTLED_BY_TEST.format(
++            tests=", ".join("`%s`" % t for t in pending["ids"]))
++
++    def hold_test(self, task):
++        """After a code round, before its checks: undo any change to the test."""
++        pending = self.pending_tests.get(task)
++        if not pending or pending["kept"]:
++            return
++        now = snapshot(self.workspace)
++        if any(now.get(n) != after for n, (_, after) in pending["files"].items()):
++            self.note("  the round changed the item's test; put back as written.")
++            put_files(self.workspace, {n: after for n, (_, after) in pending["files"].items()})
++
++    def settle_test(self, task, kept):
++        """After a code round's checks: kept with the change, or out of the tree."""
++        pending = self.pending_tests.get(task)
++        if not pending or pending["kept"]:
++            return
++        if kept:
++            pending["kept"] = True
++            self.note("  the item's test passes, and is kept with the change.")
++            return
++        # Not kept: rolled back, rejected, or nothing changed. The test is
++        # taken out again, so no later item inherits a failing test.
++        put_files(self.workspace, {n: before for n, (before, _) in pending["files"].items()})
++        failing = [msg for where, msg in self.broken if where == "tests"]
++        if failing:
++            from ralph_tasks import remember_review
++            remember_review(self.notes_path, task, "its test still fails -- %s"
++                            % " ".join(failing[0].split())[:160])
++        if self.broken:
++            from ralph_checks import full_check
++            self.broken = full_check(self.workspace, self.edit_files, self.entry,
++                                     self.run_seconds)
++
++    def after_test_round(self, result, task, tests_before, code_before, listing_before):
++        """Judge a test round. False to stop."""
++        ws = self.workspace
++        self.refresh_files()
++        tests_after = snapshot(ws)
++        ids_before, ids_after = test_ids(tests_before), test_ids(tests_after)
++        new = sorted(t for t in ids_after if t not in ids_before)
++        changed_code = code_fingerprint(self.non_test_files()) != code_before
++        changed = {n: (tests_before.get(n), tests_after.get(n))
++                   for n in set(tests_before) | set(tests_after)
++                   if tests_before.get(n) != tests_after.get(n)}
++        if untick(self.notes_path, task):
++            self.note("  ticked it in the test round; opened again.")
++
++        # The tests already there are what every other change is held to. A
++        # test round that edits one would carry the edit in with its own test.
++        altered = sorted(t for t, source in ids_before.items() if ids_after.get(t) != source)
++        why = ""
++        if changed_code:
++            why = "the test round changed code, not only a test"
++        elif altered:
++            why = "the test round changed an existing test (%s)" % altered[0]
++        elif not new:
++            broken = [n for n, (_, after) in changed.items() if after and not _methods(after)]
++            why = ("%s does not parse" % broken[0]) if broken else \
++                "no new test method was written"
++        else:
++            outcomes = {t: run_one_test(ws, t) for t in new[:5]}
++            ran = [(t, o, out) for t, (o, out) in outcomes.items()]
++            unusable = [(t, out) for t, o, out in ran if o == "error"
++                        and not MISSING_YET.search(out)]
++            if unusable:
++                why = "the new test does not run (%s): %s" % (unusable[0][0], last_words(unusable[0][1]))
++            elif all(o == "passed" for _, o, _ in ran):
++                why = "the new test passes before any change, so it does not test the item"
++
++        # Out of the tree either way: kept aside on success, dropped on failure.
++        put_files(ws, {n: before for n, (before, _) in changed.items()})
++        if changed_code and self.rollback and self.rollback():
++            self.remove_new_sources(listing_before)
++
++        if why:
++            self.test_misses[task] = self.test_misses.get(task, 0) + 1
++            self.stalled += 1
++            self.note("Test round sent back: %s" % why[:110])
++            from ralph_tasks import remember_review
++            from ralph_tools import record_lesson
++            remember_review(self.notes_path, task, "test round: " + why)
++            record_lesson(ws, "Test round failed: %s -- %s" % (task[:80], why[:100]),
++                          kind="test-first")
++            self.last_failure_kind = "test-first"
++        else:
++            self.pending_tests[task] = {"ids": new, "files": changed, "kept": False}
++            self.stalled = 0
++            self.note("Test written: %s. Next, the code that makes it pass."
++                      % ", ".join(new)[:110])
++        self.ledger_round(result, bool(changed), "reject" if why else "accept",
++                          "test round: " + (why or "fails as it should"), [], 0, False, "")
++        return self.finish_round(result, True)
+diff --git a/supervisor_aider.py b/supervisor_aider.py
+index d7c78cc..3b296f1 100644
+--- a/supervisor_aider.py
++++ b/supervisor_aider.py
+@@ -177,6 +177,29 @@ def module_available(python, module):
+         return False
+ 
+ 
++# What a rejection may cite (REVIEW_PROMPT). Each fault quotes its line, so the
++# loop can check it before throwing a round away (ralph_scan.check_claims):
++# on 2026-09-24 six rejections called a name undefined that was imported
++# above the diff. ORTHROSCODE-IMPROVEMENTS.md, item 2.
++FAULT_KINDS = ("does-not-do-the-item", "cut-off", "undefined-name", "wrong-arguments",
++               "read-before-assigned", "breaks-other-code", "out-of-scope", "logic-error")
++FAULT_LINE = re.compile(r"^\s*FAULT:\s*([\w-]+)\s*\|\s*(.+?)\s*\|\s*(.+?)\s*$",
++                        re.MULTILINE | re.IGNORECASE)
++
++
++def parse_faults(text):
++    """[{'kind', 'line', 'why'}] from the FAULT: lines of a review. At most three."""
++    faults, seen = [], set()
++    for kind, line, why in FAULT_LINE.findall(text or ""):
++        line = line.strip().strip("`\"'")
++        # The answer comes first, then the thinking (_chat), which may draft
++        # the same fault again.
++        if (kind.lower(), line) not in seen:
++            seen.add((kind.lower(), line))
++            faults.append({"kind": kind.lower(), "line": line, "why": why.strip()})
++    return faults[:3]
++
++
+ REVIEW_PROMPT = """You are reviewing one change made by another developer. You did not write it
+ and you have no reason to defend it.
+ 
+@@ -201,10 +224,17 @@ REJECT if any of these is true:
+ 
+ Otherwise ACCEPT. Do not reject for style or taste.
+ 
+-Reply in exactly two lines:
++Reply with these two lines:
+ VERDICT: ACCEPT or REJECT
+ REASON: one sentence
+-"""
++
++When you reject, add one line for each fault, at most three:
++FAULT: <kind> | <one line copied exactly from the change or the code above> | <what is wrong>
++
++<kind> is one of: KINDS.
++The line must be copied, not described: a fault whose line is not in what you
++were shown is ignored, and so is a name called undefined that is defined.
++""".replace("KINDS", ", ".join(FAULT_KINDS))
+ 
+ 
+ BUG_HUNT = """Another developer made this change for this task:
+@@ -267,9 +297,11 @@ def _chat(prompt, max_tokens, timeout, temperature=0.1):
+             choice.get("finish_reason"))
+ 
+ 
+-def _verdict(prompt, timeout):
++def _verdict(prompt, timeout, faults=None):
+     """('accept'|'reject'|'', reason) from a two-line VERDICT/REASON reply.
+ 
++    The reply's FAULT: lines, if any, are added to `faults` when it is a list.
++
+     This model thinks before it answers, out of the same budget: when the
+     thinking uses it up there is no verdict, so one retry with twice the room.
+     """
+@@ -281,6 +313,8 @@ def _verdict(prompt, timeout):
+         verdict = re.search(r"VERDICT:\s*(ACCEPT|REJECT)", text, re.I)
+         found = re.search(r"REASON:\s*(.+)", text, re.I)
+         if verdict:
++            if faults is not None:
++                faults.extend(parse_faults(text))
+             return verdict.group(1).lower(), (found.group(1).strip() if found else "")
+         reason = ("it ran out of room before answering" if finish == "length"
+                   else "its reply had no VERDICT line")
+@@ -289,7 +323,7 @@ def _verdict(prompt, timeout):
+     return "", reason
+ 
+ 
+-def review_change(task, diff, timeout=300, notes=(), context=""):
++def review_change(task, diff, timeout=300, notes=(), context="", faults=None):
+     """A second agent's verdict on one round's change. Returns (verdict, reason).
+ 
+     verdict is "accept", "reject", or "" when no clear answer came back -- in
+@@ -309,6 +343,9 @@ def review_change(task, diff, timeout=300, notes=(), context=""):
+     `context` is what the diff cannot show -- what the checks have already
+     settled, and the code the item names as it stands now. All three reads
+     get it, straight after the diff.
++
++    `faults`, a list, receives the faults a rejection cites (parse_faults),
++    for the loop to check before it believes them.
+     """
+     if not diff.strip():
+         return "", "nothing to review"
+@@ -317,7 +354,7 @@ def review_change(task, diff, timeout=300, notes=(), context=""):
+         seen = ("\nThe automatic checks noticed (not errors by themselves, but look):\n"
+                 + "\n".join("- %s" % n for n in notes[:6]) + "\n")
+     shown = diff + context
+-    verdict, reason = _verdict(REVIEW_PROMPT % (task, shown) + seen, timeout)
++    verdict, reason = _verdict(REVIEW_PROMPT % (task, shown) + seen, timeout, faults)
+     if verdict != "accept" or REVIEW_PASSES < 2:
+         return verdict, reason
+     text, _ = _chat(BUG_HUNT % (task, shown), 3000, timeout)
+diff --git a/test_loop.py b/test_loop.py
+index 1e2b5ca..4919336 100644
+--- a/test_loop.py
++++ b/test_loop.py
+@@ -15,6 +15,7 @@ import unittest
+ 
+ import subprocess
+ 
++import ralph_ledger
+ import status
+ from ralph_common import read_text, write_text
+ from ralph_refill import refill_temperature
+@@ -50,7 +51,11 @@ print("Tokens: 1.2k sent, 300 received.")
+ '''
+ 
+ 
+-class TestLoop(unittest.TestCase):
++class LoopBase(unittest.TestCase):
++    """A workspace, a fake aider and a session to run. No tests of its own, so
++    the classes built on it do not each run the same tests again -- which,
++    with a subclass per scenario, was a third of the suite's time."""
++
+     def setUp(self):
+         self.dir = tempfile.mkdtemp()
+         self.ws = os.path.join(self.dir, "ws")
+@@ -80,6 +85,8 @@ class TestLoop(unittest.TestCase):
+         with contextlib.redirect_stdout(io.StringIO()):
+             return session.run()
+ 
++
++class TestLoop(LoopBase):
+     def test_works_the_list_and_survives_a_bad_reviewer(self):
+         calls = []
+ 
+@@ -161,7 +168,7 @@ print("Tokens: 1.2k sent, 300 received.")
+ '''
+ 
+ 
+-class TestLoopWithGit(unittest.TestCase):
++class GitLoopBase(unittest.TestCase):
+     """The rollback is real here: `git checkout -- .`, as in a managed folder."""
+ 
+     def setUp(self):
+@@ -197,6 +204,8 @@ class TestLoopWithGit(unittest.TestCase):
+             s.run()
+         return s
+ 
++
++class TestLoopWithGit(GitLoopBase):
+     def test_a_rejected_round_does_not_undo_the_refill_before_it(self):
+         s = self.run_session(lambda task, diff: ("reject", "not what was asked"))
+         log = read_text(os.path.join(self.ws, ".localcoder-ralph.log"))
+@@ -209,10 +218,7 @@ class TestLoopWithGit(unittest.TestCase):
+         # The same two ideas again are not new work: dropped, then it stops.
+         self.assertIn("repeat ones already parked", log)
+         self.assertEqual(read_text(self.notes).count("- [!] In `add`"), 1)
+-
+-    def test_every_round_goes_in_the_ledger(self):
+-        import ralph_ledger
+-        self.run_session(lambda task, diff: ("reject", "not what was asked"))
++        # Every round is in the ledger, which stays out of the commits.
+         went = dict(ralph_ledger.outcomes(os.path.join(self.ws, ralph_ledger.LEDGER_FILE), 0))
+         self.assertGreaterEqual(went.get("rejected by reviewer", 0), 2)
+         self.assertNotIn(ralph_ledger.LEDGER_FILE, self.git("status", "--short").stdout)
+@@ -228,7 +234,7 @@ class TestLoopWithGit(unittest.TestCase):
+         self.assertNotIn("Time is up", s.stop_reason)   # ended on its own, not the clock
+ 
+ 
+-class TestLocateInALoop(TestLoop):
++class TestLocateInALoop(LoopBase):
+     def test_an_item_naming_no_file_asks_which_files(self):
+         import ralph_rounds
+         other = os.path.join(self.ws, "other.py")
+@@ -255,7 +261,7 @@ class TestLocateInALoop(TestLoop):
+         self.assertEqual(len(asked), 1)
+ 
+ 
+-class TestNewProject(TestLoop):
++class TestNewProject(LoopBase):
+     def test_files_a_round_creates_are_seen_and_committed(self):
+         make = self.fake + ".make.py"
+         write_text(make, "import sys, re\n"
+@@ -291,7 +297,7 @@ print("Tokens: 1k sent, 100 received.")
+ '''
+ 
+ 
+-class TestCaughtWithoutAReviewer(TestLoopWithGit):
++class TestCaughtWithoutAReviewer(GitLoopBase):
+     def test_a_placeholder_edit_is_undone_by_the_automatic_checks(self):
+         write_fake_aider(self.fake, "lazy")
+         write_text(self.notes, "# Tasks\n\n- [ ] In `add`, handle None\n")
+@@ -310,12 +316,39 @@ class TestCaughtWithoutAReviewer(TestLoopWithGit):
+         self.assertIn("automatic check", read_text(self.notes))
+ 
+ 
++BREAKING_AIDER = r'''import re, sys
++args = sys.argv[1:]
++files = [args[i + 1] for i, a in enumerate(args) if a == "--file"]
++body = open(files[0]).read()
++open(files[0], "w").write(re.sub(r"- \[ \]", "- [x]", body, count=1))
++for f in files[1:]:
++    if f.endswith(".py"):
++        open(f, "a").write("\ndef broken(:\n")
++        print("Applied edit to %s" % f)
++print("Tokens: 1k sent, 100 received.")
++'''
++
++
++class TestTickedButBroken(GitLoopBase):
++    def test_a_round_that_ticks_and_breaks_it_still_costs_a_try(self):
++        # Rolled back, the round kept the credit for ticking and the item was
++        # tried until the clock ran out: 180 s for one test (2026-09-26).
++        write_text(self.fake, BREAKING_AIDER)
++        write_text(self.notes, "# Tasks\n\n- [ ] In `add`, handle None\n")
++        self.git("add", "-A")
++        self.git("commit", "-qm", "items")
++        s = self.run_session(lambda task, diff: ("accept", "fine"))
++        self.assertIn("- [!] In `add`", read_text(self.notes))
++        self.assertLessEqual(s.rounds, 5)
++        self.assertNotIn("broken(", read_text(self.code))
++
++
+ DO_NOTHING_AIDER = '''import sys
+ print("Tokens: 1k sent, 100 received.")
+ '''
+ 
+ 
+-class TestDeadEndRecovery(TestLoop):
++class TestDeadEndRecovery(LoopBase):
+     def test_three_dead_ends_in_a_row_do_not_stop_the_session(self):
+         write_fake_aider(self.fake, "do_nothing")
+         write_text(self.notes, "# Tasks\n\n"
+diff --git a/test_ralph_testfirst.py b/test_ralph_testfirst.py
+new file mode 100644
+index 0000000..c9500c3
+--- /dev/null
++++ b/test_ralph_testfirst.py
+@@ -0,0 +1,195 @@
++"""Test first, then code (ralph_testfirst.py), end to end against a fake aider."""
++
++import contextlib
++import io
++import os
++import shutil
++import subprocess
++import sys
++import tempfile
++import unittest
++from unittest import mock
++
++import ralph_ledger
++import status
++from ralph_common import read_text, write_text
++from ralph_session import Session
++from ralph_testfirst import acceptance, test_file_for, untick
++
++ITEM = "In `double` (calc.py), return twice the number. Done when: `double(2)` returns 4."
++
++# Plays both kinds of round. FAKE_TEST says what the test round writes;
++# FAKE_CODE what the code round does.
++FAKE = r'''import os, re, sys
++args = sys.argv[1:]
++message = open(args[args.index("--message-file") + 1], encoding="utf-8").read()
++notes = [args[i + 1] for i, a in enumerate(args) if a == "--file"][0]
++here = os.path.dirname(notes)
++test_kind, code_kind = os.environ["FAKE_TEST"], os.environ["FAKE_CODE"]
++if "THIS ROUND: THE TEST ONLY" in message:
++    check = "calc.double(2), 4" if test_kind != "passes" else "calc.add(2, 2), 4"
++    open(os.path.join(here, "test_calc.py"), "w").write(
++        "import unittest\nimport calc\n\n\nclass TestDouble(unittest.TestCase):\n"
++        "    def test_double(self):\n"
++        "        self.assertEqual(%s)\n" % check)
++    if test_kind == "and_old":
++        path = os.path.join(here, "test_old.py")
++        open(path, "w").write(open(path).read().replace("(1, 1)", "(1, 1 + 0)"))
++    if test_kind == "and_code":
++        open(os.path.join(here, "calc.py"), "a").write("\n\ndef double(x):\n    return 2 * x\n")
++    # A habit worth guarding against: ticking the item anyway.
++    body = open(notes).read()
++    open(notes, "w").write(body.replace("- [ ] In `double`", "- [x] In `double`"))
++else:
++    body = open(notes).read()
++    if code_kind in ("right", "cheat"):
++        open(os.path.join(here, "calc.py"), "a").write("\n\ndef double(x):\n    return 2 * x\n")
++        open(notes, "w").write(body.replace("- [ ] In `double`", "- [x] In `double`"))
++    if code_kind == "cheat":
++        path = os.path.join(here, "test_calc.py")
++        open(path, "w").write(open(path).read().replace("calc.double(2), 4", "4, 4"))
++        open(os.path.join(here, "calc.py"), "a").write("\n\ndef double(x):\n    return 0\n")
++    if code_kind == "nothing_useful":
++        open(os.path.join(here, "calc.py"), "a").write("\n\ndef double(x):\n    return x\n")
++print("Tokens: 1k sent, 100 received.")
++'''
++
++
++class TestAcceptance(unittest.TestCase):
++    def test_a_code_item_with_a_checkable_done_when(self):
++        self.assertEqual(acceptance(ITEM), "`double(2)` returns 4.")
++
++    def test_items_with_nothing_to_run(self):
++        self.assertEqual(acceptance("In `double` (calc.py), return twice the number."), "")
++        self.assertEqual(acceptance("In SKILLS.md, explain FIND:. Done when: it is there."), "")
++        self.assertEqual(acceptance("Tidy things up. Done when: it is tidy."), "")
++
++    def test_where_the_test_goes(self):
++        self.assertEqual(test_file_for(ITEM, ["/w/calc.py"]), "test_calc.py")
++        self.assertEqual(test_file_for("Done when: a test in test_report.py passes",
++                                       ["/w/calc.py"]), "test_report.py")
++        self.assertEqual(test_file_for(ITEM, []), "")
++
++    def test_untick(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            notes = os.path.join(tmp, "tasks.md")
++            write_text(notes, "- [x] %s\n- [x] other\n" % ITEM)
++            self.assertTrue(untick(notes, ITEM))
++            self.assertEqual(read_text(notes), "- [ ] %s\n- [x] other\n" % ITEM)
++            self.assertFalse(untick(notes, "missing"))
++
++
++class TestTestFirstLoop(unittest.TestCase):
++    def setUp(self):
++        self.dir = tempfile.mkdtemp()
++        self.ws = os.path.join(self.dir, "ws")
++        os.makedirs(self.ws)
++        self.fake = os.path.join(self.dir, "fake_aider.py")
++        write_text(self.fake, FAKE)
++        self.notes = os.path.join(self.ws, "tasks.md")
++        write_text(self.notes, "# Tasks\n\n- [ ] %s\n" % ITEM)
++        self.code = os.path.join(self.ws, "calc.py")
++        write_text(self.code, "def add(a, b):\n    return a + b\n")
++        self.git("init", "-q")
++        self.git("add", "-A")
++        self.git("commit", "-qm", "base")
++        status._path = None
++        # The checks run tests with the project's own Windows venv, which is
++        # not here; this interpreter stands in for it.
++        self.python = [mock.patch(where + ".find_project_python", return_value=sys.executable)
++                       for where in ("ralph_checks", "ralph_testfirst")]
++        for patch in self.python:
++            patch.start()
++
++    def tearDown(self):
++        for patch in self.python:
++            patch.stop()
++        status._path = None
++        shutil.rmtree(self.dir, ignore_errors=True)
++
++    def git(self, *args):
++        return subprocess.run(["git", "-C", self.ws, "-c", "user.name=t", "-c", "user.email=t@t"]
++                              + list(args), capture_output=True, text=True)
++
++    def run_session(self, test_kind, code_kind, review=None):
++        env = dict(os.environ, FAKE_TEST=test_kind, FAKE_CODE=code_kind)
++        files = lambda: sorted(os.path.join(self.ws, n) for n in os.listdir(self.ws)  # noqa: E731
++                               if n.endswith(".py"))
++        s = Session([sys.executable, self.fake, "--edit-format", "diff"], self.ws, env,
++                    minutes=3, single_shot=False, edit_files=files(), entry_hint="none",
++                    iteration_timeout=30, review=review or (lambda task, diff: ("accept", "ok")),
++                    list_files=files,
++                    rollback=lambda: self.git("checkout", "--", ".").returncode == 0,
++                    commit=lambda m: (self.git("add", "-A"), self.git("commit", "-qm", m)) and True)
++        with contextlib.redirect_stdout(io.StringIO()):
++            s.run()
++        self.log = read_text(os.path.join(self.ws, ".localcoder-ralph.log"))
++        return s
++
++    def committed(self, name):
++        return self.git("show", "HEAD:%s" % name).stdout
++
++    def test_the_test_then_the_code_and_both_are_kept(self):
++        s = self.run_session("fails", "right")
++        self.assertIn("Test written: test_calc.TestDouble.test_double", self.log)
++        self.assertIn("- [x] In `double`", read_text(self.notes))
++        self.assertIn("calc.double(2), 4", self.committed("test_calc.py"))
++        self.assertIn("def double", self.committed("calc.py"))
++        # Never on its own: no commit holds the test without the code.
++        for sha in self.git("log", "--format=%H").stdout.split():
++            test = self.git("show", "%s:test_calc.py" % sha)
++            if test.returncode == 0:
++                self.assertIn("def double", self.git("show", "%s:calc.py" % sha).stdout)
++        self.assertEqual(s.rejected, 0)
++        went = dict(ralph_ledger.outcomes(os.path.join(self.ws, ralph_ledger.LEDGER_FILE), 0))
++        self.assertGreaterEqual(went.get("kept", 0), 1)
++
++    def test_a_test_that_already_passes_is_sent_back(self):
++        self.run_session("passes", "right")
++        self.assertIn("passes before any change", self.log)
++        # After two, the item is coded without one, and no test file is left over.
++        self.assertIn("- [x] In `double`", read_text(self.notes))
++        self.assertFalse(os.path.exists(os.path.join(self.ws, "test_calc.py")))
++
++    def test_a_test_round_that_writes_code_is_undone(self):
++        self.run_session("and_code", "nothing_useful")
++        self.assertIn("changed code, not only a test", self.log)
++        self.assertNotIn("return 2 * x", read_text(self.code))
++
++    def test_a_test_round_that_edits_an_old_test_is_sent_back(self):
++        old = os.path.join(self.ws, "test_old.py")
++        write_text(old, "import unittest\n\n\nclass TestOld(unittest.TestCase):\n"
++                        "    def test_one(self):\n        self.assertEqual(1, 1)\n")
++        self.git("add", "-A")
++        self.git("commit", "-qm", "old test")
++        self.run_session("and_old", "right")
++        self.assertIn("changed an existing test (test_old.TestOld.test_one)", self.log)
++        self.assertIn("(1, 1)", read_text(old))
++        self.assertIn("(1, 1)", self.committed("test_old.py"))
++
++    def test_code_that_never_passes_leaves_no_failing_test_behind(self):
++        s = self.run_session("fails", "nothing_useful")
++        self.assertIn("- [!] In `double`", read_text(self.notes))     # parked
++        self.assertFalse(os.path.exists(os.path.join(self.ws, "test_calc.py")))
++        self.assertEqual(self.committed("test_calc.py"), "")
++        self.assertFalse(s.broken)
++
++    def test_a_round_that_changes_the_test_gets_it_back(self):
++        self.run_session("fails", "cheat")
++        self.assertIn("changed the item's test; put back", self.log)
++        self.assertNotIn("return 0", self.committed("calc.py"))
++        self.assertNotIn("4, 4", read_text(os.path.join(self.ws, "test_calc.py"))
++                         if os.path.exists(os.path.join(self.ws, "test_calc.py")) else "")
++
++    def test_the_reviewer_is_told_what_the_test_settled(self):
++        told = []
++
++        def review(task, diff, context="", notes=()):
++            told.append(context)
++            return "accept", "ok"
++        self.run_session("fails", "right", review=review)
++        self.assertTrue(any("Settled by execution" in c for c in told))
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/test_review_claims.py b/test_review_claims.py
+new file mode 100644
+index 0000000..f723205
+--- /dev/null
++++ b/test_review_claims.py
+@@ -0,0 +1,155 @@
++"""Reviewers who must cite what they object to (ORTHROSCODE-IMPROVEMENTS.md, 2).
++
++No model: the reviewer's replies are scripted, and the loop's own checks
++decide which of its claims stand.
++"""
++
++import contextlib
++import io
++import os
++import shutil
++import sys
++import tempfile
++import unittest
++
++import status
++import supervisor_aider
++from ralph_common import read_text, write_text
++from ralph_scan import check_claims, lint
++from ralph_session import Session
++
++LIB = "import re\n\n\ndef words(text):\n    return re.findall(r\"\\w+\", text)\n"
++DIFF = "+def words(text):\n+    return re.findall(r\"\\w+\", text)\n"
++
++
++def fault(kind, line, why):
++    return {"kind": kind, "line": line, "why": why}
++
++
++class TestParseFaults(unittest.TestCase):
++    def setUp(self):
++        self.real = supervisor_aider._chat
++
++    def tearDown(self):
++        supervisor_aider._chat = self.real
++
++    def test_a_rejection_hands_back_its_cited_faults(self):
++        reply = ("VERDICT: REJECT\nREASON: re is not imported\n"
++                 "FAULT: undefined-name | `return re.findall(r\"\\w+\", text)` | `re` is undefined\n"
++                 "\n(thinking) FAULT: undefined-name | return re.findall(r\"\\w+\", text) | again")
++        supervisor_aider._chat = lambda prompt, max_tokens, timeout, temperature=0.1: (reply, "stop")
++        faults = []
++        verdict, _ = supervisor_aider.review_change("count words", DIFF, faults=faults)
++        self.assertEqual(verdict, "reject")
++        self.assertEqual(faults, [fault("undefined-name", 'return re.findall(r"\\w+", text)',
++                                        "`re` is undefined")])
++
++    def test_the_prompt_lists_the_kinds(self):
++        self.assertIn("undefined-name", supervisor_aider.REVIEW_PROMPT)
++        self.assertNotIn("KINDS", supervisor_aider.REVIEW_PROMPT)
++
++
++class TestCheckClaims(unittest.TestCase):
++    def setUp(self):
++        self.dir = tempfile.mkdtemp()
++        self.lib = os.path.join(self.dir, "lib.py")
++        write_text(self.lib, LIB)
++
++    def tearDown(self):
++        shutil.rmtree(self.dir, ignore_errors=True)
++
++    def check(self, *faults, lint_now=frozenset()):
++        return check_claims(list(faults), "count words\n" + DIFF, [self.lib], lint_now)
++
++    def test_a_name_imported_above_the_diff_is_not_undefined(self):
++        kept, dropped = self.check(fault("undefined-name", 'return re.findall(r"\\w+", text)',
++                                         "`re` is never imported"))
++        self.assertEqual(kept, [])
++        self.assertIn("`re` is defined", dropped[0][1])
++
++    def test_a_name_pyflakes_also_calls_undefined_stands(self):
++        claim = fault("undefined-name", 'return re.findall(r"\\w+", text)', "`re` is undefined")
++        kept, _ = self.check(claim, lint_now={"lib.py: undefined name 're'"})
++        self.assertEqual(kept, [claim])
++
++    def test_a_quote_that_is_not_there_is_dropped(self):
++        kept, dropped = self.check(fault("logic-error", "return len(text.split())",
++                                         "counts spaces"))
++        self.assertEqual(kept, [])
++        self.assertIn("not in the change", dropped[0][1])
++
++    def test_what_cannot_be_checked_is_kept(self):
++        short = fault("does-not-do-the-item", "re", "it does not count")
++        unchecked = fault("undefined-name", 'return re.findall(r"\\w+", text)', "`re`")
++        self.assertEqual(self.check(short)[0], [short])
++        self.assertEqual(self.check(unchecked, lint_now=None)[0], [unchecked])
++
++    @unittest.skipIf(lint([__file__]) is None, "pyflakes is not installed")
++    def test_real_pyflakes_output_confirms_a_real_undefined_name(self):
++        write_text(self.lib, "def words(text):\n    return re.findall(r\"\\w+\", text)\n")
++        claim = fault("undefined-name", 'return re.findall(r"\\w+", text)', "`re` is undefined")
++        self.assertEqual(self.check(claim, lint_now=lint([self.lib]))[0], [claim])
++
++
++FAKE = r'''import sys
++args = sys.argv[1:]
++files = [args[i + 1] for i, a in enumerate(args) if a == "--file"]
++body = open(files[0]).read()
++open(files[0], "w").write(body.replace("- [ ]", "- [x]", 1))
++for f in files[1:]:
++    if f.endswith(".py"):
++        open(f, "a").write("\n\ndef count(text):\n    return len(words(text))\n")
++print("Tokens: 1k sent, 100 received.")
++'''
++
++
++class TestTheLoopWeighsClaims(unittest.TestCase):
++    def setUp(self):
++        self.dir = tempfile.mkdtemp()
++        self.ws = os.path.join(self.dir, "ws")
++        os.makedirs(self.ws)
++        self.fake = os.path.join(self.dir, "fake.py")
++        write_text(self.fake, FAKE)
++        self.notes = os.path.join(self.ws, "tasks.md")
++        write_text(self.notes, "# Tasks\n\n- [ ] In `count` (lib.py), count the words\n")
++        self.lib = os.path.join(self.ws, "lib.py")
++        write_text(self.lib, LIB)
++        status._path = None
++
++    def tearDown(self):
++        status._path = None
++        shutil.rmtree(self.dir, ignore_errors=True)
++
++    def run_with(self, faults, why="bad"):
++        def review(task, diff, context="", notes=(), faults=None):
++            faults.extend(cited)
++            return "reject", why
++        cited = faults
++        s = Session([sys.executable, self.fake], self.ws, os.environ.copy(), minutes=3,
++                    single_shot=True, edit_files=[self.lib], entry_hint="none",
++                    iteration_timeout=30, review=review, rollback=lambda: True)
++        with contextlib.redirect_stdout(io.StringIO()):
++            s.run()
++        return s
++
++    def test_a_rejection_on_refuted_claims_keeps_the_change(self):
++        s = self.run_with([fault("undefined-name", "return len(words(text))",
++                                 "`words` is not defined")])
++        self.assertEqual((s.accepted, s.rejected), (1, 0))
++        self.assertIn("reviewer's claim dropped", read_text(
++            os.path.join(self.ws, ".localcoder-ralph.log")))
++
++    def test_a_rejection_that_cites_nothing_still_stands(self):
++        s = self.run_with([])
++        self.assertEqual((s.accepted, s.rejected), (0, 1))
++
++    def test_a_cited_fault_that_holds_rejects_with_the_quote(self):
++        s = self.run_with([fault("logic-error", "return len(words(text))",
++                                 "counts words twice")])
++        self.assertEqual(s.rejected, 1)
++        self.assertIn("Reviewer rejected it: logic-error -- `return len(words(text))`",
++                      read_text(os.path.join(self.ws, ".localcoder-ralph.log")))
++
++
++if __name__ == "__main__":
++    unittest.main()

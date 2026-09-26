@@ -247,6 +247,39 @@ def run_tests(folder, python, tests_dir=None, timeout=300):
     return (max(0, ran - bad), ran)
 
 
+def practice_failures(folder, exercise, python, most=4, timeout=300):
+    """["test_name: the line that says why"] for the practice exercise's hidden
+    tests that fail -- never for a held-out one, whose tests must stay unseen.
+
+    A score says how many; this says which and why, which is what the twin
+    can act on: "test_punctuation: AssertionError: {'hi,': 1} != {'hi': 1}".
+    """
+    hidden = os.path.join(EXERCISES, exercise, "hidden")
+    if not os.path.isdir(hidden):
+        return []
+    env = dict(os.environ, PYTHONPATH=folder, PYTHONDONTWRITEBYTECODE="1")
+    try:
+        proc = subprocess.run([python, "-m", "unittest", "discover", "-s", hidden, "-t", hidden,
+                               "-p", "test_*.py"], cwd=folder, env=env, capture_output=True,
+                              text=True, timeout=timeout, encoding="utf-8", errors="replace")
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    lines = ((proc.stderr or "") + (proc.stdout or "")).splitlines()
+    found = []
+    for i, line in enumerate(lines):
+        head = re.match(r"^(?:FAIL|ERROR): (\w+)", line)
+        if not head:
+            continue
+        why = ""
+        for later in lines[i + 1:]:
+            if re.match(r"^(?:FAIL|ERROR): ", later):
+                break
+            if re.match(r"^(?:[A-Za-z_][\w.]*)?(?:Error|Exception)\b", later):
+                why = later.strip()
+        found.append("%s: %s" % (head.group(1), why[:140] or "failed"))
+    return found[:most]
+
+
 def score_practice(folder, exercise, python, held_out=False):
     """(passed, total) of the hidden tests against the practice folder's code."""
     return run_tests(folder, python, os.path.join(EVALS if held_out else EXERCISES,

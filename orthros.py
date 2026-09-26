@@ -1117,6 +1117,9 @@ class Orthros:
         if kind == "practice":
             lines.append("**Practice** on %s: %s of the hidden tests passed."
                          % (result["label"], "%d of %d" % tuple(score) if score else "none"))
+            if score and score[0] < score[1] and result.get("exercise"):
+                lines += ["Practice test failed -- %s" % f for f in work.practice_failures(
+                    result["folder"], result["exercise"], self.python_for(name))]
         elif kind == "task":
             lines.append("**Task** %s%s." % (result["label"], ": its own tests, %d of %d passing"
                                                % tuple(score) if score and score[1] else ""))

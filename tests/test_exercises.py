@@ -56,5 +56,21 @@ class TestExercises(unittest.TestCase):
         self.assertFalse(set(work.exercises()) & set(work.eval_exercises()))
 
 
+class TestPracticeFailures(unittest.TestCase):
+    def test_which_hidden_tests_failed_and_why(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "pangram.py"), "w") as h:
+                h.write("def is_pangram(s):\n    return len(set(s.lower())) >= 26\n\n\n"
+                        "def missing_letters(s):\n    return ''\n")
+            failures = work.practice_failures(tmp, "pangram", sys.executable)
+        self.assertTrue(any(f.startswith("test_missing_letters: AssertionError") for f in failures),
+                        failures)
+
+    def test_never_for_a_held_out_exercise(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(work.practice_failures(tmp, work.eval_exercises()[0],
+                                                    sys.executable), [])
+
+
 if __name__ == "__main__":
     unittest.main()

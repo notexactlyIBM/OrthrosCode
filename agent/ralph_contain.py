@@ -84,6 +84,12 @@ def _terminate(job):
 
 def start(cmd, memory_mb=None, **kwargs):
     """subprocess.Popen, inside a limited job where there is one. Returns (proc, job)."""
+    # The code checked never gets Orthros's ledger, which is for rounds: with it
+    # the ledger's own tests wrote their fixtures there, failed every check and
+    # filled the ledger with made-up rounds (2026-09-26).
+    env = dict(os.environ if kwargs.get("env") is None else kwargs["env"])
+    env.pop("ORTHROS_LEDGER", None)
+    kwargs["env"] = env
     job = _limited_job(CHECK_MEMORY_MB if memory_mb is None else memory_mb, CHECK_PROCESSES)
     if os.name != "nt":
         kwargs.setdefault("start_new_session", True)    # its own group, to kill whole

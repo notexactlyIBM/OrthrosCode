@@ -45,6 +45,15 @@ class TestRun(unittest.TestCase):
             proc.wait()
             self.assertIsNone(job)
 
+    def test_the_code_checked_never_gets_orthros_ledger(self):
+        show = [sys.executable, "-c", "import os; print(os.environ.get('ORTHROS_LEDGER', '-'))"]
+        with mock.patch.dict(os.environ, {"ORTHROS_LEDGER": "shared.sqlite"}):
+            inherited = contain.run(show, text=True, timeout=30).stdout.strip()
+            given = contain.run(show, text=True, timeout=30,
+                                env=dict(os.environ, KEEP="1")).stdout.strip()
+            self.assertEqual(os.environ["ORTHROS_LEDGER"], "shared.sqlite")   # ours is untouched
+        self.assertEqual((inherited, given), ("-", "-"))
+
     @unittest.skipUnless(os.name == "nt", "Windows job objects")
     def test_a_test_that_eats_memory_is_stopped(self):
         proc = contain.run([sys.executable, "-c", "x = bytearray(600 * 1024 * 1024)"],

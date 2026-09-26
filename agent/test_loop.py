@@ -128,6 +128,10 @@ class TestLoop(LoopBase):
         self.env["PYTHONHASHSEED"] = "7"
         self.assertEqual(self.session().child_env["PYTHONHASHSEED"], "7")
 
+    def test_aiders_test_runs_never_get_orthros_ledger(self):
+        self.env["ORTHROS_LEDGER"] = os.path.join(self.dir, "shared.sqlite")
+        self.assertNotIn("ORTHROS_LEDGER", self.session().child_env)
+
     def test_dead_engine_stops_cleanly(self):
         self.env["FAKE_MODE"] = "dead"
         s = self.session()

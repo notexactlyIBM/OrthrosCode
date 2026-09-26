@@ -6,7 +6,9 @@ rejections were sound?" and "does a warmer retry ever win?" took hours of
 reading logs by hand. Here each is one query (ORTHROSCODE-IMPROVEMENTS.md, 0).
 
 Orthros points both agents at one file, ORTHROS_LEDGER, next to the agents'
-folders. On its own a session writes into the folder it works on.
+folders. On its own a session writes into the folder it works on. Tests never
+see ORTHROS_LEDGER -- Orthros's pre-launch check, ralph_contain and aider's env
+all drop it -- so what they record stays in their own folders.
 """
 
 import hashlib

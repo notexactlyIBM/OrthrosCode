@@ -1013,6 +1013,11 @@ class Orthros:
         """
         folder, python = self.folders[name], self.python_for(name)
         env = self.agent_env(name)
+        # The tests are not a turn. Given the ledger, its own tests wrote their
+        # fixtures into it and looked for them in their temporary folder: A
+        # failed this check on its baseline, and ledger.sqlite held 86 made-up
+        # rounds (2026-09-26).
+        env.pop("ORTHROS_LEDGER", None)
         flags = CREATE_NO_WINDOW if os.name == "nt" else 0
         problems = []
         try:

@@ -234,6 +234,17 @@ class TestDoctor(Sandbox):
         self.assertTrue(any(l.startswith("FAIL  B: no agent") for l in lines))
 
 
+class TestPreflight(Sandbox):
+    def test_the_tests_never_get_the_ledger(self):
+        # Given it, the ledger's own tests wrote into it and failed (2026-09-26).
+        self.write(self.o.folders["A"], "test_ledger_unseen.py",
+                   "import os\nimport unittest\n\n\nclass T(unittest.TestCase):\n"
+                   "    def test_unseen(self):\n"
+                   "        self.assertNotIn('ORTHROS_LEDGER', os.environ)\n")
+        self.assertIn("ORTHROS_LEDGER", self.o.agent_env("A"))     # a turn still gets it
+        self.assertEqual(self.o.preflight("A"), [])
+
+
 class TestSurrender(Sandbox):
     def test_giving_up_is_loud_and_start_clears_it(self):
         self.o.pause("the card is gone", error=True)

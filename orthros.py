@@ -2599,131 +2599,106 @@ def port_in_use(port):
         return False
 
 
-def split_patch(text):
-    """[(path, one file's part of the patch)], from `git diff` output."""
-    parts = re.split(r"(?m)^(?=diff --git )", text)
-    out = []
-    for part in parts:
-        match = re.match(r"diff --git a/(\S+) b/(\S+)", part)
-        if match:
-            out.append((match.group(2), part if part.endswith("\n") else part + "\n"))
-    return out
+def repo_in_step(root):
+    """'' when this folder's code is exactly what GitHub has, else what differs.
 
-
-def match_line_endings(part, target):
-    """Give a patch's hunk lines CRLF endings when the file it patches has them.
-
-    A `git diff` is written with LF. The agents keep their .cmd files in CRLF
-    -- cmd.exe misreads labels without it -- and their repositories have no
-    rule to convert, so an LF patch does not match a CRLF file at all.
+    A fresh start rebuilds both agents from agent\\, so agent\\ has to be the
+    latest: no edits left uncommitted here, nothing unpushed, nothing not yet
+    pulled.
     """
-    try:
-        with open(target, "rb") as handle:
-            crlf = b"\r\n" in handle.read(65536)
-    except OSError:
-        return part
-    if not crlf or "\n@@" not in part:
-        return part
-    head, body = part.split("\n@@", 1)
-    lines = ("@@" + body).split("\n")
-    fixed = [l if (not l or l.endswith("\r") or l.startswith(("@@", "\\"))) else l + "\r"
-             for l in lines]
-    return head + "\n" + "\n".join(fixed)
+    def run(*args):
+        try:
+            proc = subprocess.run(["git", "-C", root] + list(args), capture_output=True,
+                                  text=True, timeout=120)
+            return proc.returncode, (proc.stdout or "").strip()
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return 1, str(exc)
+    code, dirty = run("status", "--porcelain", "--untracked-files=no")
+    if code:
+        return "this folder is not a git clone of OrthrosCode"
+    if dirty:
+        return "files here were changed and not committed:\n" + dirty
+    if run("fetch", "-q")[0]:
+        return "could not reach GitHub to compare (git fetch failed)"
+    code, upstream = run("rev-parse", "--abbrev-ref", "@{u}")
+    if code:
+        return "this branch does not follow one on GitHub"
+    _, counts = run("rev-list", "--left-right", "--count", "HEAD...@{u}")
+    ahead, behind = (int(n) for n in (counts.split() + ["0", "0"])[:2])
+    if behind:
+        return "GitHub has %d newer commit(s) on %s: run  git pull  first" % (behind, upstream)
+    if ahead:
+        return "%d commit(s) here are not on GitHub yet: run  git push  first" % ahead
+    return ""
 
 
-def apply_patch(root, patch_path):
-    """Put the operator's own change into both live agents, and count it as proven.
+def fresh(root, ask=input, out=print):
+    """Rebuild both agents from agent\\, and start Orthros's records again.
 
-    agent\\ is only the template the agents were made from, and `--export`
-    overwrites it with an agent's code -- so a fix made there never reaches
-    the agents that are running. This applies a `git diff` of agent\\ (made
-    with --relative=agent) to each, file by file with a three-way merge. What
-    applies is checked with the same pre-launch checks Orthros uses, committed,
-    and recorded as the agent's newest proven version: the operator vouches
-    for it, and if it then fails to start, the usual retreat undoes it. What
-    does not apply is left out and listed.
+    Replaces patches. The agents' code is agent\\, exactly; their task lists,
+    plans and missions are written new from the templates; lessons, field
+    reports, scores, proofs and the ledger start empty. Each agent's own
+    config.cmd (the model and machine settings) and venv are kept. Nothing is
+    lost: each agent's old state is a git tag, and Orthros's old records are
+    kept beside the new ones. Returns an exit code.
     """
+    import orthros_setup as setup
     settings = dict(DEFAULTS, **(read_json(os.path.join(root, "orthros.json"), {}) or {}))
     if port_in_use(int(settings.get("port") or 8770)):
-        print("Orthros is running. Close its window first: it keeps its own copy of which "
-              "versions are proven, and would overwrite this.")
+        out("Orthros is running. Close its window first.")
         return 1
-    parts = split_patch(read_text(patch_path))
-    if not parts:
-        print("%s holds no file changes." % patch_path)
+    problem = repo_in_step(root)
+    if problem:
+        out("Not starting fresh: " + problem)
         return 1
-    orthros = Orthros(root)
-    status = 0
+    folders = {n: agent_folder(root, n) for n in NAMES}
+    missing = [n for n in NAMES if not os.path.isdir(os.path.join(folders[n], ".git"))]
+    if missing:
+        out("No agent %s yet: run SETUP.bat, which makes them fresh anyway." % ", ".join(missing))
+        return 1
+    _, sha = git(root, "rev-parse", "--short", "HEAD")
+    out("This rebuilds both agents from agent\\ (version %s) and clears their notes,\n"
+        "scores and proofs. Their old state is kept as a git tag." % sha.strip())
+    if ask("Type FRESH to go ahead: ").strip() != "FRESH":
+        out("Nothing changed.")
+        return 1
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    template = os.path.join(root, "agent")
     for n in NAMES:
-        folder = orthros.folders[n]
-        if not os.path.isdir(os.path.join(folder, ".git")):
-            print("%s: not set up; skipped." % n)
-            continue
-        before = commit_all(folder, "Orthros: before the operator's patch")
-        applied, missed = [], []
-        for rel, part in parts:
-            ok, out = False, ""
-            # Exact first, in the file's own line endings; then forgiving of
-            # whitespace (a file an editor left with mixed endings); then a
-            # three-way merge, which needs the patch's base in the history.
-            for text, how in ((match_line_endings(part, os.path.join(folder, rel)), []),
-                              (part, ["--ignore-whitespace"]), (part, ["--3way"])):
-                fd, tmp = tempfile.mkstemp(suffix=".patch")
-                with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-                    handle.write(text)
-                ok, out = git(folder, "apply", "--whitespace=nowarn", *how, tmp)
-                os.remove(tmp)
-                if ok:
-                    break
-                # A failed 3-way leaves markers in this file: put it alone
-                # back. This was `checkout -- .`, which put back every file
-                # applied before it as well -- in each patch up to 2026-09-24,
-                # README.md and SKILLS.md, undone by config.cmd's clash with the
-                # agents' own settings and reported as applied all the same.
-                git(folder, "reset", "-q", "--", rel)
-                git(folder, "checkout", "-q", "--", rel)
-            if ok:
-                applied.append(rel)
-                continue
-            missed.append("%s (%s)" % (rel, " ".join(out.split())[:100]))
-            git(folder, "reset", "-q", "--", rel)
-            if git(folder, "cat-file", "-e", "HEAD:%s" % rel)[0]:
-                git(folder, "checkout", "HEAD", "--", rel)
-            else:
-                try:
-                    os.remove(os.path.join(folder, rel))
-                except OSError:
-                    pass
-        if not applied:
-            print("%s: nothing applied. Left out: %s" % (n, "; ".join(missed)))
-            status = 1
-            continue
-        problems = orthros.preflight(n)
-        if problems:
-            git(folder, "reset", "--hard", "-q", before)
-            git(folder, "clean", "-fdq")
-            print("%s: the patched version fails its checks, so it was put back as it was: %s"
-                  % (n, "; ".join(problems)[:600]))
-            if missed:
-                print("   Left out because they did not fit %s's code: %s"
-                      % (n, "; ".join(m.split(" (")[0] for m in missed)))
-                print("   Most likely %s's code has moved on from the version this patch was "
-                      "made against, so tests arrived without the code they test." % n)
-            status = 1
-            continue
-        sha = commit_all(folder, "Orthros: operator patch %s" % os.path.basename(patch_path))
-        me = orthros.agent(n)
-        if sha not in me["goods"]:
-            me["goods"].append(sha)
-            git(folder, "tag", "-f", "orthros/proven-%d" % len(me["goods"]), sha)
-        me["good"], me["pending"], me["weak_streak"] = sha, [], 0
-        print("%s: applied %d file(s), passed its checks, now proven at %s.%s"
-              % (n, len(applied), short(sha),
-                 (" Left out: " + "; ".join(missed)) if missed else ""))
-        if missed:
-            status = 1
-    orthros.save()
-    return status
+        folder = folders[n]
+        commit_all(folder, "Orthros: %s before a fresh start" % n)
+        git(folder, "tag", "-f", "orthros/before-fresh-%s" % stamp)
+        config = read_text(os.path.join(folder, "config.cmd"))
+        _, tracked = git(folder, "ls-files", "-z")
+        for rel in tracked.split("\0"):
+            path = os.path.join(folder, rel)
+            if rel and rel != "config.cmd" and os.path.isfile(path):
+                os.remove(path)
+        for name in MEMORY_FILES:
+            try:
+                os.remove(os.path.join(folder, name))
+            except OSError:
+                pass
+        shutil.copytree(template, folder, dirs_exist_ok=True, ignore=shutil.ignore_patterns(
+            "venv", "__pycache__", ".localcoder*", ".aider*", "config.cmd"))
+        if config:
+            with open(os.path.join(folder, "config.cmd"), "w", encoding="utf-8",
+                      newline="") as handle:
+                handle.write(config)
+        else:
+            shutil.copy2(os.path.join(template, "config.cmd"), folder)
+        setup.point_at_peer(n, root)
+        setup.write_mission(n, root)
+        commit_all(folder, "Orthros: %s started fresh from agent\\ at %s" % (n, sha.strip()))
+        out("%s: rebuilt from agent\\; its old state is tag orthros/before-fresh-%s" % (n, stamp))
+    for name in (".orthros-state.json", "ledger.sqlite"):
+        path = os.path.join(root, name)
+        if os.path.isfile(path):
+            base, ext = os.path.splitext(name)
+            os.replace(path, os.path.join(root, "%s.before-fresh-%s%s" % (base, stamp, ext)))
+    out("Orthros's records start again (the old ones are kept as *.before-fresh-%s).\n"
+        "Run  ORTHROS.bat --doctor , then ORTHROS.bat and press Start." % stamp)
+    return 0
 
 
 def write_evolution(root, state):
@@ -2890,16 +2865,16 @@ def main():
     parser.add_argument("--resume", action="store_true",
                         help="start straight away if Orthros was running when it last "
                              "stopped -- killed, or the machine restarted -- and not paused")
-    parser.add_argument("--apply-patch", metavar="PATCH",
-                        help="apply a `git diff --relative=agent` of agent\\ to both live "
-                             "agents, check it, and count it as proven")
+    parser.add_argument("--fresh", action="store_true",
+                        help="after a git pull: rebuild both agents from agent\\ and start "
+                             "Orthros's records again (their old state is kept as a git tag)")
     args = parser.parse_args()
     if args.fake_agent:
         return fake_agent(args.minutes)
     if args.export:
         return export(HERE, args.export)
-    if args.apply_patch:
-        return apply_patch(HERE, args.apply_patch)
+    if args.fresh:
+        return fresh(HERE)
     if args.doctor:
         return 1 if doctor(HERE) else 0
     if args.probe:

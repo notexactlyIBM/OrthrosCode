@@ -311,12 +311,12 @@ def run(cmd, **kw):
     return subprocess.run(cmd, **kw).returncode == 0
 
 
-def write_mission(x):
+def write_mission(x, root=ROOT):
     """RALPH_PROMPT.md, orthros_tasks.md and PLAN.md for agent x's folder --
     read by its twin, which is the one working there."""
     p = PEER[x]
     mine, theirs = FOCUS[x]
-    folder = os.path.join(ROOT, "OrthrosCode %s" % x)
+    folder = os.path.join(root, "OrthrosCode %s" % x)
 
     def fill(text):
         return (text.replace("{X}", x).replace("{P}", p)
@@ -330,9 +330,10 @@ def write_mission(x):
         h.write(PLAN_HEAD + PLAN[x])
 
 
-def point_at_peer(x):
-    path = os.path.join(ROOT, "OrthrosCode %s" % x, "config.cmd")
-    body = open(path, encoding="utf-8").read()
+def point_at_peer(x, root=ROOT):
+    path = os.path.join(root, "OrthrosCode %s" % x, "config.cmd")
+    with open(path, encoding="utf-8") as h:
+        body = h.read()
     body = re.sub(r'^set "LC_WORKSPACE=.*"$',
                   lambda m: 'set "LC_WORKSPACE=%%~dp0..\\OrthrosCode %s"' % PEER[x], body, flags=re.M)
     with open(path, "w", encoding="utf-8", newline="") as h:

@@ -4,8 +4,6 @@ the chat box, operator patches and the aider guard. No model, no GPU.
     python -m unittest discover -s tests
 """
 
-import contextlib
-import io
 import os
 import shutil
 import sys
@@ -355,78 +353,76 @@ class TestChat(Sandbox):
         self.assertIn("From the operator: cache research answers", self.notes("B"))
 
 
-class TestApplyPatch(Sandbox):
-    def test_applies_checks_commits_and_proves(self):
-        patch = ("diff --git a/agent.py b/agent.py\n--- a/agent.py\n+++ b/agent.py\n"
-                 "@@ -1,2 +1,2 @@\n def f():\n-    return 1\n+    return 7\n")
-        self.write(self.root, "fix.patch", patch)
-        with contextlib.redirect_stdout(io.StringIO()) as out:
-            self.assertEqual(orthros.apply_patch(self.root, os.path.join(self.root, "fix.patch")),
-                             0)
-        state = orthros.read_json(os.path.join(self.root, ".orthros-state.json"))
+class TestFresh(Sandbox):
+    def setUp(self):
+        super().setUp()
+        # The repository whose agent\ the agents are rebuilt from.
+        agent = os.path.join(self.root, "agent")
+        os.makedirs(agent)
+        self.write(agent, "agent.py", "def f():\n    return 42\n")
+        self.write(agent, "config.cmd", 'set "LC_MODEL_KEY=template"\r\n'
+                                        'set "LC_WORKSPACE=%~dp0..\\OrthrosCode B"\r\n')
+        self.write(self.root, ".gitignore", "OrthrosCode A/\nOrthrosCode B/\nlogs/\n"
+                                            "*.json\n*.sqlite\n")
+        git(self.root, "init", "-q")
+        orthros.commit_all(self.root, "repo")
+        self.o.save()
         for n in orthros.NAMES:
             folder = self.o.folders[n]
-            self.assertIn("return 7", orthros.read_text(os.path.join(folder, "agent.py")))
-            self.assertEqual(state["agents"][n]["goods"][-1], orthros.head(folder))
-        self.assertIn("now proven", out.getvalue())
+            self.write(folder, "config.cmd", 'set "LC_MODEL_KEY=mine"\r\n')
+            self.write(folder, "LESSONS.md", "- old lesson\n")
+            self.write(folder, "grown.py", "x = 1\n")
+            orthros.commit_all(folder, "evolved")
+        self.lines = []
+        self.in_step = mock.patch.object(orthros, "repo_in_step", return_value="")
+        self.in_step.start()
 
-    def test_tests_without_their_code_put_everything_back_and_say_why(self):
-        patch = ("diff --git a/agent.py b/agent.py\n--- a/agent.py\n+++ b/agent.py\n"
-                 "@@ -1,2 +1,2 @@\n def f():\n-    return 99\n+    return 7\n"
-                 "diff --git a/test_agent.py b/test_agent.py\nnew file mode 100644\n"
-                 "--- /dev/null\n+++ b/test_agent.py\n@@ -0,0 +1,5 @@\n+import unittest\n"
-                 "+import agent\n+class T(unittest.TestCase):\n+    def test_f(self):\n"
-                 "+        self.assertEqual(agent.f(), 7)\n")
-        self.write(self.root, "half.patch", patch)
+    def tearDown(self):
+        self.in_step.stop()
+        super().tearDown()
+
+    def run_fresh(self, answer="FRESH"):
+        return orthros.fresh(self.root, ask=lambda prompt: answer, out=self.lines.append)
+
+    def test_both_agents_are_agent_exactly_with_their_own_settings(self):
+        old = orthros.head(self.o.folders["A"])
+        self.assertEqual(self.run_fresh(), 0)
+        for n in orthros.NAMES:
+            folder = self.o.folders[n]
+            self.assertIn("return 42", orthros.read_text(os.path.join(folder, "agent.py")))
+            self.assertFalse(os.path.exists(os.path.join(folder, "grown.py")))
+            self.assertFalse(os.path.exists(os.path.join(folder, "LESSONS.md")))
+            self.assertIn("LC_MODEL_KEY=mine", orthros.read_text(os.path.join(folder, "config.cmd")))
+            self.assertTrue(os.path.isfile(os.path.join(folder, "orthros_tasks.md")))
+            self.assertEqual(git(folder, "status", "--porcelain")[1].strip(), "")
+        _, tags = git(self.o.folders["A"], "tag", "--points-at", old)
+        self.assertIn("orthros/before-fresh-", tags)
+        self.assertFalse(os.path.exists(os.path.join(self.root, ".orthros-state.json")))
+        again = orthros.Orthros(self.root, simulate=True)
+        self.assertEqual(again.agent("A")["goods"], [])
+
+    def test_nothing_changes_without_the_word(self):
         before = orthros.head(self.o.folders["A"])
-        with contextlib.redirect_stdout(io.StringIO()) as out:
-            self.assertEqual(orthros.apply_patch(self.root, os.path.join(self.root, "half.patch")),
-                             1)
-        self.assertIn("did not fit A's code: agent.py", out.getvalue())
-        self.assertFalse(os.path.exists(os.path.join(self.o.folders["A"], "test_agent.py")))
-        self.assertEqual(orthros.git(self.o.folders["A"], "diff", "--quiet", before)[0], True)
+        self.assertEqual(self.run_fresh("yes"), 1)
+        self.assertEqual(orthros.head(self.o.folders["A"]), before)
 
-    def test_a_crlf_file_takes_an_lf_patch(self):
-        for n in orthros.NAMES:
-            folder = self.o.folders[n]
-            with open(os.path.join(folder, "config.cmd"), "wb") as handle:
-                handle.write(b"@echo off\r\nset \"X=1\"\r\n")
-            orthros.commit_all(folder, "cmd")
-        patch = ("diff --git a/config.cmd b/config.cmd\n--- a/config.cmd\n+++ b/config.cmd\n"
-                 "@@ -1,2 +1,3 @@\n @echo off\n set \"X=1\"\n+set \"Y=2\"\n")
-        self.write(self.root, "cmd.patch", patch)
-        with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(orthros.apply_patch(self.root, os.path.join(self.root, "cmd.patch")), 0)
-        with open(os.path.join(self.o.folders["A"], "config.cmd"), "rb") as handle:
-            self.assertEqual(handle.read(), b"@echo off\r\nset \"X=1\"\r\nset \"Y=2\"\r\n")
+    def test_not_while_the_repository_differs_from_github(self):
+        self.in_step.stop()
+        with mock.patch.object(orthros, "repo_in_step", return_value="GitHub has 2 newer"):
+            self.assertEqual(self.run_fresh(), 1)
+        self.in_step.start()
+        self.assertIn("Not starting fresh: GitHub has 2 newer", self.lines[0])
 
-    def test_a_file_that_fails_does_not_undo_the_files_before_it(self):
-        for n in orthros.NAMES:
-            self.write(self.o.folders[n], "NOTES.md", "one\n")
-            orthros.commit_all(self.o.folders[n], "notes")
-        patch = ("diff --git a/NOTES.md b/NOTES.md\n--- a/NOTES.md\n+++ b/NOTES.md\n"
-                 "@@ -1 +1,2 @@\n one\n+two\n"
-                 "diff --git a/agent.py b/agent.py\n--- a/agent.py\n+++ b/agent.py\n"
-                 "@@ -1,2 +1,2 @@\n def f():\n-    return 99\n+    return 7\n")
-        self.write(self.root, "mixed.patch", patch)
-        with contextlib.redirect_stdout(io.StringIO()) as out:
-            self.assertEqual(orthros.apply_patch(self.root, os.path.join(self.root, "mixed.patch")),
-                             1)
-        self.assertIn("Left out: agent.py", out.getvalue())
-        for n in orthros.NAMES:
-            folder = self.o.folders[n]
-            self.assertEqual(orthros.read_text(os.path.join(folder, "NOTES.md")), "one\ntwo\n")
-            self.assertTrue(orthros.git(folder, "diff", "--quiet", "HEAD")[0])   # and committed
+    def test_a_repo_with_uncommitted_changes_is_not_in_step(self):
+        self.write(os.path.join(self.root, "agent"), "agent.py", "changed\n")
+        self.assertIn("not committed", self.real_in_step())
 
-    def test_a_file_that_does_not_apply_is_left_out(self):
-        patch = ("diff --git a/agent.py b/agent.py\n--- a/agent.py\n+++ b/agent.py\n"
-                 "@@ -1,2 +1,2 @@\n def f():\n-    return 99\n+    return 7\n")
-        self.write(self.root, "bad.patch", patch)
-        with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(orthros.apply_patch(self.root, os.path.join(self.root, "bad.patch")),
-                             1)
-        self.assertIn("return 1", orthros.read_text(os.path.join(self.o.folders["A"],
-                                                                 "agent.py")))
+    def real_in_step(self):
+        self.in_step.stop()
+        try:
+            return orthros.repo_in_step(self.root)
+        finally:
+            self.in_step.start()
 
 
 class FakeCoder:

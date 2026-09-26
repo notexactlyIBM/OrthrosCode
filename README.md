@@ -93,9 +93,23 @@ turns the page red and beeps.
 | `ORTHROS.bat` | start the referee and dashboard |
 | `ORTHROS.bat --doctor` | check the machine and both agents; changes nothing |
 | `ORTHROS.bat --resume` | restart after a crash -- only if it was running, never if you stopped it |
-| `ORTHROS.bat --apply-patch <file>` | bring a fix into both live agents (close Orthros first) |
-| `ORTHROS.bat --export` | copy the newest proven agent into `agent\` for publishing |
+| `ORTHROS.bat --fresh` | rebuild both agents from `agent\` after an update (see below) |
+| `ORTHROS.bat --export` | copy the newest proven agent into `agent\`, to keep what it learned |
 | `ORTHROS.bat --simulate` | the same dashboard with fake agents, turns of seconds |
+
+**Updating.** The two agents are separate git repositories that rewrite
+themselves, so `git pull` updates Orthros and `agent\` -- the template -- but
+not the agents built from it. To bring them up to date, close Orthros, then:
+
+    git pull
+    ORTHROS.bat --fresh
+
+`--fresh` first checks that this folder matches GitHub exactly (nothing
+uncommitted, unpushed or not yet pulled), then rebuilds both agents from
+`agent\`, writes them new task lists, and starts Orthros's records again.
+Each agent keeps its own `config.cmd`; its old state is kept as a git tag.
+Want to keep what the agents taught themselves first? `ORTHROS.bat --export`,
+commit and push, then pull and `--fresh`.
 
 **What to read.** `FIELD_REPORT.md` in each agent folder: how it did, turn by
 turn, with its scores. `LESSONS.md`: mistakes it keeps making. `git log` in any

@@ -15,6 +15,7 @@ import unittest
 
 import subprocess
 
+import ralph_ledger
 import status
 from ralph_common import read_text, write_text
 from ralph_refill import refill_temperature
@@ -50,7 +51,11 @@ print("Tokens: 1.2k sent, 300 received.")
 '''
 
 
-class TestLoop(unittest.TestCase):
+class LoopBase(unittest.TestCase):
+    """A workspace, a fake aider and a session to run. No tests of its own, so
+    the classes built on it do not each run the same tests again -- which,
+    with a subclass per scenario, was a third of the suite's time."""
+
     def setUp(self):
         self.dir = tempfile.mkdtemp()
         self.ws = os.path.join(self.dir, "ws")
@@ -80,6 +85,8 @@ class TestLoop(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             return session.run()
 
+
+class TestLoop(LoopBase):
     def test_works_the_list_and_survives_a_bad_reviewer(self):
         calls = []
 
@@ -161,7 +168,7 @@ print("Tokens: 1.2k sent, 300 received.")
 '''
 
 
-class TestLoopWithGit(unittest.TestCase):
+class GitLoopBase(unittest.TestCase):
     """The rollback is real here: `git checkout -- .`, as in a managed folder."""
 
     def setUp(self):
@@ -197,6 +204,8 @@ class TestLoopWithGit(unittest.TestCase):
             s.run()
         return s
 
+
+class TestLoopWithGit(GitLoopBase):
     def test_a_rejected_round_does_not_undo_the_refill_before_it(self):
         s = self.run_session(lambda task, diff: ("reject", "not what was asked"))
         log = read_text(os.path.join(self.ws, ".localcoder-ralph.log"))
@@ -209,10 +218,7 @@ class TestLoopWithGit(unittest.TestCase):
         # The same two ideas again are not new work: dropped, then it stops.
         self.assertIn("repeat ones already parked", log)
         self.assertEqual(read_text(self.notes).count("- [!] In `add`"), 1)
-
-    def test_every_round_goes_in_the_ledger(self):
-        import ralph_ledger
-        self.run_session(lambda task, diff: ("reject", "not what was asked"))
+        # Every round is in the ledger, which stays out of the commits.
         went = dict(ralph_ledger.outcomes(os.path.join(self.ws, ralph_ledger.LEDGER_FILE), 0))
         self.assertGreaterEqual(went.get("rejected by reviewer", 0), 2)
         self.assertNotIn(ralph_ledger.LEDGER_FILE, self.git("status", "--short").stdout)
@@ -228,7 +234,7 @@ class TestLoopWithGit(unittest.TestCase):
         self.assertNotIn("Time is up", s.stop_reason)   # ended on its own, not the clock
 
 
-class TestLocateInALoop(TestLoop):
+class TestLocateInALoop(LoopBase):
     def test_an_item_naming_no_file_asks_which_files(self):
         import ralph_rounds
         other = os.path.join(self.ws, "other.py")
@@ -255,7 +261,7 @@ class TestLocateInALoop(TestLoop):
         self.assertEqual(len(asked), 1)
 
 
-class TestNewProject(TestLoop):
+class TestNewProject(LoopBase):
     def test_files_a_round_creates_are_seen_and_committed(self):
         make = self.fake + ".make.py"
         write_text(make, "import sys, re\n"
@@ -291,7 +297,7 @@ print("Tokens: 1k sent, 100 received.")
 '''
 
 
-class TestCaughtWithoutAReviewer(TestLoopWithGit):
+class TestCaughtWithoutAReviewer(GitLoopBase):
     def test_a_placeholder_edit_is_undone_by_the_automatic_checks(self):
         write_fake_aider(self.fake, "lazy")
         write_text(self.notes, "# Tasks\n\n- [ ] In `add`, handle None\n")
@@ -323,7 +329,7 @@ print("Tokens: 1k sent, 100 received.")
 '''
 
 
-class TestTickedButBroken(TestLoopWithGit):
+class TestTickedButBroken(GitLoopBase):
     def test_a_round_that_ticks_and_breaks_it_still_costs_a_try(self):
         # Rolled back, the round kept the credit for ticking and the item was
         # tried until the clock ran out: 180 s for one test (2026-09-26).
@@ -342,7 +348,7 @@ print("Tokens: 1k sent, 100 received.")
 '''
 
 
-class TestDeadEndRecovery(TestLoop):
+class TestDeadEndRecovery(LoopBase):
     def test_three_dead_ends_in_a_row_do_not_stop_the_session(self):
         write_fake_aider(self.fake, "do_nothing")
         write_text(self.notes, "# Tasks\n\n"

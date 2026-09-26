@@ -73,6 +73,7 @@ that produce nothing at all stop it early.
 | `ralph_locate.py` | asks which files an item needs when it names none (after Agentless) |
 | `ralph_gists.py` | GISTS.md: every module in a few lines, for planning (after ReadAgent) |
 | `ralph_scan.py` | after each round, checks that cost no tokens: project-wide lint and call signatures, placeholders, conflict markers, lost tests; a test file's `if __name__ == "__main__":` block put back at its end |
+| `ralph_testfirst.py` | test first, then code: an item whose `Done when:` a test could check gets a round that writes only that test, which must fail; code rounds then make it pass, and the test enters the history only with them. Off with `set "LC_RALPH_TEST_FIRST=0"` |
 | `ralph_ledger.py` | one row per round in SQLite -- item, tokens, checks, verdict, kept -- so "where do rounds go?" is a query, not an afternoon of reading logs |
 | `ralph_digest.py` | `DIGEST:` reads a file too big for a round in parts (after Chain-of-Agents) |
 | `ralph_prompts.py` | everything the model is told |

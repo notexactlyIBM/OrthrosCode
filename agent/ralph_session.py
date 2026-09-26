@@ -27,6 +27,7 @@ from ralph_rounds import round_diff
 from ralph_scan import put_main_last
 from ralph_tools import handle_tool_requests, record_lesson
 from ralph_setup import SetupMixin, last_line
+from ralph_testfirst import TestFirstMixin, snapshot
 from ralph_tasks import done_count, open_tasks, park_task, remember_review, triage
 
 # Unexpected exceptions in a row before the session gives up. One is a bug in
@@ -35,7 +36,7 @@ from ralph_tasks import done_count, open_tasks, park_task, remember_review, tria
 # means it would only keep failing the same way.
 MAX_INTERNAL_ERRORS = 3
 
-class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin):
+class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin, TestFirstMixin):
 
     def __init__(self, base_cmd, workspace, child_env, minutes, single_shot,
                  notes_hint="", edit_files=(), iteration_timeout=420,
@@ -85,6 +86,11 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin):
         self.engine_streak = 0    # consecutive rounds lost to the engine
         self.was_cut_off = False  # last round ran out of room part-way through
         self.temperature = None   # the last one set, if it could be
+        self.pending_tests = {}   # item -> the test a test round wrote for it (ralph_testfirst)
+        self.test_misses = {}     # item -> test rounds sent back
+        self.test_budgeted = set()  # items given one more round for their test round
+        self.review_note = ""     # what execution settled, for the reviewer
+        self.last_kept = False
         self.last_failure_kind = ""  # kind of the latest lesson recorded, ranked first
         self.lean = False         # the last prompt was refused as too big: send less
         self.fat_rounds = 0       # rounds lost to the prompt, not the reply
@@ -275,6 +281,10 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin):
         self.rounds += 1
         self.rounds_on_task += 1
         task = self.current_task
+        phase = self.round_phase(task)
+        if phase == "test" and task not in self.test_budgeted:
+            self.test_budgeted.add(task)
+            self.task_budget += 1           # the test round is not one of the tries
         say("-" * 62)
         if self.single_shot:
             self.note("Round %d  |  %d items left" % (self.rounds, len(remaining)))
@@ -283,6 +293,8 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin):
                       % (self.rounds, len(remaining), int(left // 60),
                          self.rounds_on_task, self.task_budget))
         say("    %s" % task[:64])
+        if phase == "test":
+            say("    (test round: the test for it, no code)")
         say("-" * 62)
 
         # Commit what the loop wrote since the last round -- a refill's items,
@@ -291,6 +303,10 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin):
         # too, and a rejected round after a refill emptied the list again.
         if self.commit and not self.broken:
             self.commit("LocalCoder ralph: notes before round %d" % self.rounds)
+        if phase == "code":
+            self.put_test_back(task)
+        tests_before = snapshot(self.workspace) if phase == "test" else {}
+        code_before = code_fingerprint(self.non_test_files()) if phase == "test" else ""
         before = (len(remaining), done_count(self.notes_path), code_fingerprint(self.edit_files),
                   self.listing())
         self.maybe_switch_to_whole_files()
@@ -299,10 +315,23 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin):
                       budget=self.task_budget, items_open=len(remaining),
                       items_done=done_count(self.notes_path))
         status.phase("working", task)
-        result = self.send_round(task)
+        result = self.send_round(task, phase=phase)
+        if phase == "test":
+            if not self.react_to_symptom(result):
+                self.after_test_round(result, task, tests_before, code_before, before[3])
+                return False
+            return self.after_test_round(result, task, tests_before, code_before, before[3])
+        self.hold_test(task)
         if not self.react_to_symptom(result):
+            self.settle_test(task, False)
             return False
-        return self.after_round(result, before)
+        self.last_kept = False
+        keep_going = self.after_round(result, before)
+        self.settle_test(task, self.last_kept)
+        return keep_going
+
+    def non_test_files(self):
+        return [f for f in self.edit_files if not os.path.basename(f).startswith("test_")]
 
     def maybe_switch_to_whole_files(self):
         """A small model that keeps producing SEARCH blocks which do not match
@@ -423,6 +452,12 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin):
         self.ledger_round(result, touched, verdict, why, caught, after_done - before_done,
                           kept, diff)
 
+        self.last_kept = kept
+        return self.finish_round(result, counted)
+
+    def finish_round(self, result, counted):
+        """What every round ends with: answer requests, report, park or stop. False to stop."""
+        notes_path, ws = self.notes_path, self.workspace
         handle_tool_requests(ws, notes_path, find_project_python(ws), ask=self.ask)
         status.update(ticked=done_count(notes_path) - self.started_done,
                       accepted=self.accepted, rejected=self.rejected,

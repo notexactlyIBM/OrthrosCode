@@ -315,6 +315,7 @@ becomes the record of how the agents evolved.
 | **Linter** | flake8's error rules, inside each round, so the model fixes its own slips at once |
 | **Tests** | a unittest suite, after every edit, every round and before launch |
 | **Automatic checks** | after every round, at no token cost: lint and call signatures across the whole project (only what the round added counts), placeholders where code was cut, conflict markers, deleted tests. A round they catch is undone. A test class added below `if __name__ == "__main__":` is put right instead |
+| **Test first** | an item whose `Done when:` names something a test can run gets a round that writes only that test, and the loop checks it fails; the code rounds then have to make it pass. The test is kept only together with the code that passes it |
 | **Reviewer** | a separate, cold request that reads each diff against its item, told what the automatic checks noticed and have already settled, and shown the code the item names as it stands after the round -- so a name imported above the diff, or a part an earlier round already did, is not held against the change |
 | **Second look** | when the reviewer keeps a change, another read assumes there is a bug and hunts for it; a bug it names is confirmed by a third read before the change is undone. Both see what the reviewer saw |
 | `FIND: text` | every line in the project containing it, in `FOUND.md` next round |

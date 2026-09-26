@@ -470,7 +470,7 @@ def relevant_lessons(workspace, task, most=5, last_failure_kind=""):
 
 
 def compose_round_prompt(workspace, prompt_path, broken, cut_off=False, task=None,
-                         last_failure_kind=""):
+                         last_failure_kind="", phase_note=""):
     """The standing prompt, plus whatever the last round's output actually did.
 
     This is the only feedback the model gets about its own work -- every round
@@ -480,13 +480,14 @@ def compose_round_prompt(workspace, prompt_path, broken, cut_off=False, task=Non
     `task` is the current item's text; when given, lessons are ranked by
     relevance to it rather than simply by recency. Lessons of
     `last_failure_kind`, the session's latest recorded failure, come first.
+    `phase_note` heads the prompt: a test round's orders, or the item's test.
     """
     body = read_text(prompt_path)
     more = unlisted_requests(body)
     if more:
         body = (body.rstrip("\n") + "\n\nThese are answered too -- one line in the task list, "
                 "then stop; the answer comes with the next round:\n\n" + "\n".join(more) + "\n")
-    head = []
+    head = [phase_note.rstrip("\n"), ""] if phase_note else []
     if cut_off:
         # A round that ran out of room stops mid-sentence, and the next one
         # arrives knowing nothing about it. Two things go wrong from there:

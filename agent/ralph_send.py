@@ -116,11 +116,16 @@ def review_context(task, files, linted):
 
 class SendMixin:
 
-    def send_round(self, task):
-        """Build the prompt and the file list, run aider, record the numbers."""
+    def send_round(self, task, phase="code"):
+        """Build the prompt and the file list, run aider, record the numbers.
+
+        A test round (ralph_testfirst.py) gets the item's code to read and only
+        its test file to edit.
+        """
         round_prompt = compose_round_prompt(self.workspace, self.prompt_path, self.broken,
                                             cut_off=self.was_cut_off, task=task,
-                                            last_failure_kind=self.last_failure_kind)
+                                            last_failure_kind=self.last_failure_kind,
+                                            phase_note=self.phase_note(task, phase))
         # Only the files this item names, so a multi-module project does not
         # pay for all of itself on every round.
         self.set_temperature(attempt_temperature(self.rounds_on_task, self.temp_code,
@@ -152,6 +157,11 @@ class SendMixin:
                 sorted(set(re.findall(r"\b([\w-]+\.md)\b", task)))]
         docs = [d for d in docs if os.path.isfile(d) and d != self.notes_path]
         round_files = round_files + docs
+        study = []
+        if phase == "test":
+            target = os.path.join(self.workspace, self.test_target(task))
+            study = [f for f in round_files if f != target]
+            round_files = [target] if os.path.isfile(target) else []
         # Answers go stale. Research from an hour ago, or a code search for an
         # item three rounds back, is 2,000 tokens of the window spent on
         # something nobody asked about any more -- and rounds were reaching
@@ -159,7 +169,7 @@ class SendMixin:
         # every request cost more memory in the engine.
         answers = [p for p in (self.research_path, os.path.join(self.workspace, FOUND_FILE))
                    if recently_written(p)]
-        reads = [p for p in (answers + [self.conventions, design_guide(task),
+        reads = study + [p for p in (answers + [self.conventions, design_guide(task),
                                         os.path.join(self.workspace, SKILLS_FILE)])
                  if p and os.path.isfile(p) and p not in docs]
         if self.lean:
@@ -224,7 +234,8 @@ class SendMixin:
         """The reviewer's verdict, told what the automatic checks noticed and
         settled, and shown the code the item names (review_context)."""
         linted = bool(SCAN) and (getattr(self, "scan_before", {}) or {}).get("lint") is not None
-        extra = {"context": review_context(task, self.edit_files, linted)}
+        extra = {"context": review_context(task, self.edit_files, linted)
+                 + getattr(self, "review_note", "")}
         if notes:
             extra["notes"] = notes
         try:

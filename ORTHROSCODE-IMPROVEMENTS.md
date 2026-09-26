@@ -24,7 +24,8 @@ Built, with tests; not yet measured on the real machine:
 | 7 | New items that repeat done, parked or listed work dropped (the deterministic part) | `ralph_tasks.drop_repeats` |
 | 9 | Values at a failing test's failure, for the next round | `agent/ralph_explain.py` |
 | 11 | Prompt-cache order: aider's file sets made stable (the draft model is a setting in LM Studio) | `ralph_session.py` |
-| 17 | `--resume`; practice finishes not reported as early stops | `orthros.py` |
+| 15 | The model's code run in a Windows job: 4 GB, 32 processes, nothing left behind (part 1 of 3) | `agent/ralph_contain.py`, `orthros_work.contained_run` |
+| 17 | `--resume`, `--doctor`; practice finishes not early stops; which practice tests failed | `orthros.py` |
 
 Left out for now, and why: **8** (mypy) -- the agents' code is built from
 mixins, whose `self.x` from a sibling class mypy reports as missing, so it

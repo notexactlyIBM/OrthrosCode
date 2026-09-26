@@ -280,7 +280,7 @@ class TestNewProject(LoopBase):
                     commit=lambda m: commits.append(m) or True, list_files=glob_files)
         with contextlib.redirect_stdout(io.StringIO()):
             s.run()
-        self.assertIn("LocalCoder ralph: round 1", commits)
+        self.assertTrue(any(c.startswith("LocalCoder ralph: round 1\n") for c in commits))
         self.assertIn(os.path.join(self.ws, "made.py"), s.edit_files)
 
 

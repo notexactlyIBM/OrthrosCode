@@ -11,6 +11,7 @@ import status
 from ralph_checks import ensure_ignored, find_entry_point, full_check, keep_files_small
 from ralph_common import (ARCHIVE_FILE, BRIEF_FILE, CHECKPOINT_MINUTES, LOG_FILE, PLAN_FILE,
     PROMPT_FILE, RESEARCH_FILE, _env_int, read_text, say)
+from ralph_memory import EXAMPLES, Memory
 from ralph_prompts import ensure_prompt, seed_sections
 from ralph_tools import FOUND_FILE, fold_old_lessons
 from ralph_tasks import (add_items, archive_done, done_count, ensure_conventions, extract_brief,
@@ -73,6 +74,11 @@ class SetupMixin:
             say("    task list is %d bytes, down from %d (~%d fewer tokens per round)"
                 % (now, was, (was - now) // 4))
         self.research_path = os.path.join(ws, RESEARCH_FILE)
+        if EXAMPLES:
+            self.memory = Memory(ws)
+            if self.memory.items:
+                say("    memory     : %d kept round(s) to draw examples from"
+                    % len(self.memory.items))
         self.plan_path = os.path.join(os.path.dirname(notes_path), PLAN_FILE)
 
         # Opened now and flushed line by line, not gathered up and written at

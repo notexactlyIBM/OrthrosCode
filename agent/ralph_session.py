@@ -29,6 +29,7 @@ from ralph_tools import handle_tool_requests, record_lesson
 from ralph_setup import SetupMixin, last_line
 from ralph_testfirst import TestFirstMixin, snapshot
 from ralph_ladder import next_rung, outcome
+from ralph_memory import git_head
 from ralph_tasks import done_count, open_tasks, park_task, remember_review, triage
 
 # Unexpected exceptions in a row before the session gives up. One is a bug in
@@ -94,6 +95,7 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin, Tes
         self.review_tag = ""      # cited / uncited / refuted: how a rejection stood
         self.last_kept = False
         self.item_history = {}    # item -> what each round on it came to (ralph_ladder)
+        self.memory = None        # past kept rounds, for examples (ralph_memory)
         self.rung = "plain"       # how this round is being tried
         self.last_failure_kind = ""  # kind of the latest lesson recorded, ranked first
         self.lean = False         # the last prompt was refused as too big: send less
@@ -368,6 +370,7 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin, Tes
         """Check, review, record and commit what the round did. False to stop."""
         before_open, before_done, before_print, before_files = before
         notes_path, ws = self.notes_path, self.workspace
+        task_text = self.current_task or ""
         after_open = len(open_tasks(notes_path))
         after_done = done_count(notes_path)
         # Files the round created count as its work. A new project has none to
@@ -468,8 +471,13 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin, Tes
         # revert` never lands on a broken snapshot.
         kept = bool(self.commit and touched and not self.broken)
         if kept:
-            self.commit("LocalCoder ralph: round %d" % self.rounds)
+            # The item goes in the message: it is how ralph_memory finds this
+            # change again as an example for a similar item.
+            self.commit("LocalCoder ralph: round %d\n\nItem: %s" % (self.rounds,
+                                                                   " ".join(task_text.split())))
             self.refresh_files()
+            if self.memory is not None:
+                self.memory.remember(git_head(ws), " ".join(task_text.split()))
         self.ledger_round(result, touched, verdict, self.review_tag + (why or ""), caught,
                           after_done - before_done, kept, diff)
         if self.current_task:

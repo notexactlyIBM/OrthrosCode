@@ -13,6 +13,7 @@ import time
 import status
 from ralph_common import LOCATE, SCAN, read_text, say
 from ralph_ladder import rung_command, split_note
+from ralph_memory import examples_note
 from ralph_locate import locate
 from ralph_scan import baseline, check_claims, lint, scan
 from ralph_prompts import compose_round_prompt, design_guide
@@ -127,7 +128,8 @@ class SendMixin:
                                             cut_off=self.was_cut_off, task=task,
                                             last_failure_kind=self.last_failure_kind,
                                             phase_note=split_note(self.item_history.get(task, []))
-                                            if rung == "split" else self.phase_note(task, phase))
+                                            if rung == "split" else self.phase_note(task, phase),
+                                            examples=self.examples_for(task, phase, rung))
         # Only the files this item names, so a multi-module project does not
         # pay for all of itself on every round.
         self.set_temperature(attempt_temperature(self.rounds_on_task, self.temp_code,
@@ -220,6 +222,19 @@ class SendMixin:
                 self.note("  Headroom is under 1 GB. This is where the engine dies -")
                 self.note("  lower LC_CONTEXT, or close whatever else wants the card.")
         return result
+
+    def examples_for(self, task, phase, rung):
+        """How similar items were done here (ralph_memory), for a code round."""
+        if phase != "code" or rung == "split" or getattr(self, "memory", None) is None:
+            return ""
+        try:
+            found = self.memory.similar(task)
+        except Exception as exc:         # a memory that cannot be read costs nothing
+            self.note("  could not look up similar items: %s" % exc)
+            return ""
+        if found:
+            say("    examples   : %s" % "; ".join(item[:40] for item, _ in found))
+        return examples_note(found)
 
     def scan_round(self, diff):
         """The no-token checks on this round: [(kind, message)]. See ralph_scan.py."""

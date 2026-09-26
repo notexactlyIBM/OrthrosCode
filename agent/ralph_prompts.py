@@ -470,7 +470,7 @@ def relevant_lessons(workspace, task, most=5, last_failure_kind=""):
 
 
 def compose_round_prompt(workspace, prompt_path, broken, cut_off=False, task=None,
-                         last_failure_kind="", phase_note=""):
+                         last_failure_kind="", phase_note="", examples=""):
     """The standing prompt, plus whatever the last round's output actually did.
 
     This is the only feedback the model gets about its own work -- every round
@@ -513,6 +513,8 @@ def compose_round_prompt(workspace, prompt_path, broken, cut_off=False, task=Non
     lessons = relevant_lessons(workspace, task, last_failure_kind=last_failure_kind)
     if lessons:
         head += ["# Lessons from earlier rounds -- do not repeat these", ""] + lessons + [""]
+    if examples:
+        head += [examples.rstrip("\n"), ""]
     if head:
         body = "\n".join(head + ["---", ""]) + body
     round_path = os.path.join(workspace, ROUND_FILE)

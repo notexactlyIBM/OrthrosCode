@@ -319,6 +319,13 @@ three-way merge; what applies is checked and recorded as its newest proven
 version, and anything that clashes with the agents' own changes is listed and
 left out. `patches\` holds the patches that come with this repository.
 
+**Checking the machine.** `ORTHROS.bat --doctor` changes nothing and prints
+one line per check -- OK, WARN or FAIL: Python, free disk and memory, the
+exercises, the settings, LM Studio, and for each agent its Python, its tests
+and how long they take (rounds are failed past 240 seconds), and whether the
+model's code really runs inside the memory limits. Run it after applying a
+patch and before leaving a run overnight.
+
 **Surviving a crash or a restart.** Windows can kill Orthros when memory runs
 short, and a restart ends it. `ORTHROS.bat --resume` starts it again and, only
 if it was running when it stopped -- not paused, stopped by hand, or given up

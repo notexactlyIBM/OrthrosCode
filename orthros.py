@@ -2771,6 +2771,109 @@ def open_window(url):
     webbrowser.open(url)
 
 
+# The memory hog --doctor runs inside an agent's own check limits: it must end
+# in a MemoryError, not in the machine running short.
+DOCTOR_HOG = r"""import sys
+import ralph_contain as contain
+proc = contain.run([sys.executable, "-c", "x = bytearray(3 * 1024 ** 3)"], memory_mb=512,
+                   text=True, capture_output=True, timeout=120)
+print("CONTAINED" if "MemoryError" in (proc.stderr or "") else "NOT CONTAINED rc=%s" % proc.returncode)
+"""
+
+
+def doctor(root, out=print):
+    """Check what can only be checked on this machine. Returns how many FAILs.
+
+    Read-only: it starts no turn and changes nothing. Most of the setup
+    trouble so far -- a Python 3.14 venv, a page file too small -- would have
+    been one line of this; and several of the loop's parts (the limits on the
+    model's code, the test suite's time against its 240-second gate) can only
+    be tried on the machine that runs them.
+    """
+    fails = [0]
+
+    def say(level, text):
+        if level == "FAIL":
+            fails[0] += 1
+        out("%-4s  %s" % (level, text))
+
+    say("OK" if sys.version_info >= (3, 8) else "FAIL",
+        "Orthros's Python: %s" % sys.version.split()[0])
+    try:
+        free_disk = shutil.disk_usage(root).free // 1048576
+        say("OK" if free_disk > 10240 else "WARN", "free disk: %d GB" % (free_disk // 1024))
+    except OSError:
+        pass
+    reading = memory()
+    if reading:
+        say("OK" if reading[0] > 8192 else "WARN",
+            "free commit (RAM + page file) now: %d GB -- a 27B model needs a lot of it"
+            % (reading[0] // 1024))
+    say("OK" if len(work.eval_exercises()) >= 8 else "FAIL",
+        "%d held-out exercises, %d to practise on" % (len(work.eval_exercises()),
+                                                     len(work.exercises())))
+    settings = dict(DEFAULTS, **(read_json(os.path.join(root, "orthros.json"), {}) or {}))
+    say("OK", "proof by score %s (every %s good turns, %s exercises at %s min); practice every %s"
+        % ("on" if settings.get("prove_by_score") else "OFF", settings.get("eval_every"),
+           settings.get("eval_count"), settings.get("eval_minutes"),
+           settings.get("practice_every")))
+    lms = shutil.which("lms") or next((p for p in (
+        os.path.expandvars(r"%USERPROFILE%\.lmstudio\bin\lms.exe"),) if os.path.isfile(p)), "")
+    say("OK" if lms else "WARN", "LM Studio's lms: %s" % (lms or "not found on PATH"))
+    for name in NAMES:
+        folder = agent_folder(root, name)
+        if not os.path.isdir(os.path.join(folder, ".git")):
+            say("FAIL", "%s: no agent at %s -- run SETUP.bat" % (name, folder))
+            continue
+        python = os.path.join(folder, "venv", "Scripts", "python.exe")
+        python = python if os.path.isfile(python) else sys.executable
+        try:
+            proc = subprocess.run([python, "--version"], capture_output=True, text=True,
+                                  timeout=60)
+            version = (proc.stdout or proc.stderr).strip()
+        except (OSError, subprocess.TimeoutExpired):
+            version = ""
+        say("OK" if version else "FAIL", "%s's Python: %s" % (name, version or "does not run"))
+        started = now()
+        try:
+            proc = subprocess.run([python, "-m", "unittest", "discover", "-s", ".", "-p",
+                                   "test_*.py", "-q"], cwd=folder, capture_output=True,
+                                  text=True, timeout=600, encoding="utf-8", errors="replace")
+            took = now() - started
+            tail_ = ((proc.stderr or "") + (proc.stdout or "")).strip().splitlines()[-1:]
+            if proc.returncode == 5 or "Ran 0 tests" in " ".join(tail_) + (proc.stderr or ""):
+                say("WARN", "%s has no tests" % name)
+            elif proc.returncode != 0:
+                say("FAIL", "%s's tests fail: %s" % (name, " ".join(tail_)))
+            else:
+                say("OK" if took < 120 else "WARN",
+                    "%s's tests pass in %d s%s" % (name, took, "" if took < 120 else
+                                                  " -- rounds are failed past 240 s; find the "
+                                                  "slow ones"))
+        except subprocess.TimeoutExpired:
+            say("FAIL", "%s's tests did not finish in 10 minutes" % name)
+        except OSError as exc:
+            say("FAIL", "%s's tests could not run: %s" % (name, exc))
+        if os.name != "nt":
+            say("WARN", "%s: the limits on the model's code apply on Windows only" % name)
+        elif os.path.isfile(os.path.join(folder, "ralph_contain.py")):
+            try:
+                proc = subprocess.run([python, "-c", DOCTOR_HOG], cwd=folder,
+                                      capture_output=True, text=True, timeout=180)
+                verdict = (proc.stdout or proc.stderr or "").strip().splitlines()[-1:] or [""]
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                verdict = [str(exc)]
+            ok = verdict[0] == "CONTAINED"
+            say("OK" if ok else "FAIL", "%s: the model's code runs inside memory limits%s" % (
+                name, "" if ok else " -- it does not (%s)" % verdict[0][:120]))
+        else:
+            say("WARN", "%s has no ralph_contain.py yet: apply the latest patch" % name)
+    out("")
+    out("%s" % ("All clear." if not fails[0] else
+                "%d problem(s) to fix before an unattended run." % fails[0]))
+    return fails[0]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--simulate", action="store_true")
@@ -2781,6 +2884,9 @@ def main():
                         help="copy an agent's newest proven version into agent\\ and exit")
     parser.add_argument("--probe", action="store_true",
                         help="look at the hardware now and put fitting settings on trial")
+    parser.add_argument("--doctor", action="store_true",
+                        help="check this machine and both agents, change nothing, and say "
+                             "what to fix")
     parser.add_argument("--resume", action="store_true",
                         help="start straight away if Orthros was running when it last "
                              "stopped -- killed, or the machine restarted -- and not paused")
@@ -2794,6 +2900,8 @@ def main():
         return export(HERE, args.export)
     if args.apply_patch:
         return apply_patch(HERE, args.apply_patch)
+    if args.doctor:
+        return 1 if doctor(HERE) else 0
     if args.probe:
         orthros = Orthros(HERE)
         orthros.event = lambda text, kind="info": print(text)

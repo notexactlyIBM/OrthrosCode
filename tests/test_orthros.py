@@ -218,6 +218,24 @@ class TestResume(Sandbox):
         self.assertFalse(orthros.Orthros(self.root, simulate=True).state["wanted"])
 
 
+class TestDoctor(Sandbox):
+    def test_it_reports_and_changes_nothing(self):
+        before = {n: orthros.head(self.o.folders[n]) for n in orthros.NAMES}
+        lines = []
+        fails = orthros.doctor(self.root, out=lines.append)
+        text = "\n".join(lines)
+        self.assertEqual(fails, 0, text)
+        self.assertIn("held-out exercises", text)
+        self.assertIn("A's Python", text)
+        self.assertEqual(before, {n: orthros.head(self.o.folders[n]) for n in orthros.NAMES})
+
+    def test_a_missing_agent_is_a_failure(self):
+        shutil.rmtree(os.path.join(self.o.folders["B"], ".git"))
+        lines = []
+        self.assertEqual(orthros.doctor(self.root, out=lines.append), 1)
+        self.assertTrue(any(l.startswith("FAIL  B: no agent") for l in lines))
+
+
 class TestSurrender(Sandbox):
     def test_giving_up_is_loud_and_start_clears_it(self):
         self.o.pause("the card is gone", error=True)

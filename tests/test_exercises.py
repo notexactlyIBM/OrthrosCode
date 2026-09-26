@@ -1,0 +1,60 @@
+"""Every practice and held-out exercise is well formed, and its stub fails.
+
+A stub that already passes its hidden tests would score every version full
+marks and prove nothing. The reference solutions are kept outside the
+repository; this checks what can be checked without them.
+"""
+
+import os
+import re
+import sys
+import tempfile
+import shutil
+import unittest
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+
+import orthros_work as work  # noqa: E402
+
+
+def folders():
+    for base in ("exercises", "evals"):
+        path = os.path.join(ROOT, base)
+        for name in sorted(os.listdir(path)):
+            if os.path.isdir(os.path.join(path, name, "hidden")):
+                yield base, name, os.path.join(path, name)
+
+
+class TestExercises(unittest.TestCase):
+    def test_each_has_a_task_a_stub_and_hidden_tests_the_stub_fails(self):
+        seen = {}
+        for base, name, folder in folders():
+            with self.subTest(exercise=name):
+                task = work.read(os.path.join(folder, "task.md"))
+                first, _, items = task.partition("\n\n")
+                self.assertTrue(first.strip())
+                self.assertGreaterEqual(len(re.findall(r"^- \[ \] .+Done when:", items, re.M)), 1)
+                stubs = [f for f in os.listdir(folder) if f.endswith(".py")]
+                self.assertEqual(len(stubs), 1)
+                self.assertNotIn(stubs[0][:-3], getattr(sys, "stdlib_module_names", ()))
+                with tempfile.TemporaryDirectory() as tmp:
+                    shutil.copy(os.path.join(folder, stubs[0]), tmp)
+                    passed, total = work.run_tests(tmp, sys.executable,
+                                                   os.path.join(folder, "hidden"))
+                self.assertGreater(total, 0)
+                self.assertEqual(passed, 0)
+                self.assertNotIn(name, seen, "%s is in both %s and %s" % (name, seen.get(name), base))
+                seen[name] = base
+
+    def test_there_are_enough_held_out_exercises_to_tell_versions_apart(self):
+        held_out = [n for b, n, _ in folders() if b == "evals"]
+        self.assertGreaterEqual(len(held_out), 8)
+        self.assertEqual(work.eval_exercises(), sorted(held_out))
+
+    def test_practice_never_picks_a_held_out_exercise(self):
+        self.assertFalse(set(work.exercises()) & set(work.eval_exercises()))
+
+
+if __name__ == "__main__":
+    unittest.main()

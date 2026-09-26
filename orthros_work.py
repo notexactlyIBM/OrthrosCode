@@ -18,6 +18,7 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 EXERCISES = os.path.join(HERE, "exercises")
+EVALS = os.path.join(HERE, "evals")     # held out: scoring versions, never practice
 KEEP_PRACTICE = 6            # practice folders kept per agent, newest first
 
 TASK_PROMPT = """# How to work
@@ -161,12 +162,16 @@ def list_tasks(root):
 
 # ---------------------------------------------------------------- practice
 
-def exercises():
+def exercises(base=EXERCISES):
     try:
-        return sorted(d for d in os.listdir(EXERCISES)
-                      if os.path.isdir(os.path.join(EXERCISES, d, "hidden")))
+        return sorted(d for d in os.listdir(base)
+                      if os.path.isdir(os.path.join(base, d, "hidden")))
     except OSError:
         return []
+
+
+def eval_exercises():
+    return exercises(EVALS)
 
 
 def next_exercise(history):
@@ -178,26 +183,33 @@ def next_exercise(history):
     return min(names, key=lambda n: (last.get(n, 0), n))
 
 
-def start_practice(root, agent, exercise):
-    """A fresh copy of an exercise, without its hidden tests. Returns the folder."""
-    source = os.path.join(EXERCISES, exercise)
-    base = os.path.join(root, "practice")
-    folder = os.path.join(base, "%s-%s-%s" % (agent, exercise, time.strftime("%Y%m%d-%H%M%S")))
+def start_practice(root, agent, exercise, held_out=False):
+    """A fresh copy of an exercise, without its hidden tests. Returns the folder.
+
+    A held-out exercise goes to evals-runs\ rather than practice\, and its
+    folder is named by number, not by exercise: the name is not to turn up in
+    anything the agents keep.
+    """
+    source = os.path.join(EVALS if held_out else EXERCISES, exercise)
+    base = os.path.join(root, "evals-runs" if held_out else "practice")
+    label = "eval%02d" % eval_exercises().index(exercise) if held_out else exercise
+    folder = os.path.join(base, "%s-%s-%s" % (agent, label, time.strftime("%Y%m%d-%H%M%S")))
     shutil.copytree(source, folder, ignore=shutil.ignore_patterns("hidden", "__pycache__"))
     brief = read(os.path.join(folder, "task.md"))
     first, _, items = brief.partition("\n\n")
     seed(folder, TASK_PROMPT % first.strip(),
-         "# Practice: %s\n\n## Tasks\n\n%s\n" % (exercise, items.strip()))
-    prune_practice(base, agent)
+         "# Practice: %s\n\n## Tasks\n\n%s\n" % (label, items.strip()))
+    prune_practice(base, agent, keep=KEEP_PRACTICE * (3 if held_out else 1))
     return folder
 
 
-def prune_practice(base, agent):
+def prune_practice(base, agent, keep=KEEP_PRACTICE):
     try:
-        mine = sorted(d for d in os.listdir(base) if d.startswith(agent + "-"))
+        mine = sorted((d for d in os.listdir(base) if d.startswith(agent + "-")),
+                      key=lambda d: d.rsplit("-", 2)[-2:])
     except OSError:
         return
-    for old in mine[:-KEEP_PRACTICE]:
+    for old in mine[:-keep]:
         shutil.rmtree(os.path.join(base, old), ignore_errors=True)
 
 
@@ -235,9 +247,10 @@ def run_tests(folder, python, tests_dir=None, timeout=300):
     return (max(0, ran - bad), ran)
 
 
-def score_practice(folder, exercise, python):
+def score_practice(folder, exercise, python, held_out=False):
     """(passed, total) of the hidden tests against the practice folder's code."""
-    return run_tests(folder, python, os.path.join(EXERCISES, exercise, "hidden"))
+    return run_tests(folder, python, os.path.join(EVALS if held_out else EXERCISES,
+                                                  exercise, "hidden"))
 
 
 # ---------------------------------------------------------------- what "better" means

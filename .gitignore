@@ -34,6 +34,8 @@ ORTHROS-NEEDS-YOU.txt
 # Each is its own git repository.
 tasks/
 practice/
+# Fresh copies of held-out exercises, worked on to score a version.
+evals-runs/
 
 # What Orthros found out about this machine, and the settings that work on it.
 hardware.json

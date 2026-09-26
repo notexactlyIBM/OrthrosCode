@@ -73,8 +73,12 @@ class TestRungs(unittest.TestCase):
 IDLE = r'''import json, os, sys
 args = sys.argv[1:]
 message = open(args[args.index("--message-file") + 1], encoding="utf-8").read()
-with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "calls.jsonl"), "a") as h:
+calls = os.path.join(os.path.dirname(os.path.abspath(__file__)), "calls.jsonl")
+with open(calls, "a") as h:
     h.write(json.dumps({"args": args, "split": "SPLIT THE ITEM" in message}) + "\n")
+if len(open(calls).read().splitlines()) >= int(os.environ["FAKE_ROUNDS"]):
+    # Enough seen: ask the session to stop, as the dashboard would.
+    open(os.path.join(os.getcwd(), os.environ["FAKE_STOP_FILE"]), "w").close()
 if "SPLIT THE ITEM" in message:
     notes = [args[i + 1] for i, a in enumerate(args) if a == "--file"][0]
     body = open(notes).read().replace("handle None\n", "handle None\n  - [ ] In `add` (calc.py), "
@@ -102,7 +106,8 @@ class TestTheLadderInALoop(unittest.TestCase):
         status._path = None
         shutil.rmtree(self.dir, ignore_errors=True)
 
-    def calls(self, **env):
+    def calls(self, rounds, **env):
+        env.update(FAKE_ROUNDS=str(rounds), FAKE_STOP_FILE=status.STOP_FILE)
         s = Session([sys.executable, self.fake, "--edit-format", "diff"], self.ws,
                     dict(os.environ, **env), minutes=3, single_shot=False,
                     edit_files=[self.code], entry_hint="none", iteration_timeout=30)
@@ -112,7 +117,7 @@ class TestTheLadderInALoop(unittest.TestCase):
         return [json.loads(l) for l in read_text(os.path.join(self.dir, "calls.jsonl")).splitlines()]
 
     def test_changed_nothing_then_architect_then_a_split(self):
-        calls = self.calls()
+        calls = self.calls(4)
         self.assertNotIn("--architect", calls[0]["args"])
         self.assertIn("--architect", calls[1]["args"])
         self.assertTrue(calls[2]["split"])
@@ -120,11 +125,11 @@ class TestTheLadderInALoop(unittest.TestCase):
         self.assertIn("asking for it to be split", log)
         self.assertIn("split into 2 item(s), which come first now", log)
         # The round after the split works the first new item, not the parent.
-        after_split = log.split("which come first now", 1)[1]
-        self.assertIn("Parked after 3 rounds: In `add` (calc.py), check a", after_split)
+        self.assertIn("- [ ] In `add` (calc.py), check a\n", read_text(
+            os.path.join(self.ws, "tasks.md")).split("handle None")[0])
 
     def test_edits_that_miss_are_made_whole(self):
-        calls = self.calls(FAKE_MISS="1")
+        calls = self.calls(2, FAKE_MISS="1")
         second = calls[1]["args"]
         self.assertEqual(second[second.index("--edit-format") + 1], "whole")
 

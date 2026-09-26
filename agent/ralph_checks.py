@@ -109,8 +109,7 @@ def smoke_run(workspace, entry, seconds=6):
     try:
         out, _ = proc.communicate(timeout=seconds)
     except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.communicate()
+        contain.stop(proc, job)      # it and anything it started, before draining
         return True, ""
     finally:
         contain.finish(job)

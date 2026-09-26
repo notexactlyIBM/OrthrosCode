@@ -895,9 +895,11 @@ class Orthros:
         self.release(name)
         post = commit_all(peer, "Orthros: after %s's turn" % name)
         score = None
+        failures = []
         if work_["kind"] in ("practice", "eval"):
-            score = work.score_practice(peer, work_["exercise"], self.python_for(name),
-                                        held_out=work_["kind"] == "eval")
+            score, failures = work.score_practice_detail(peer, work_["exercise"],
+                                                         self.python_for(name),
+                                                         held_out=work_["kind"] == "eval")
         elif work_["kind"] == "task":
             score = work.run_tests(peer, self.python_for(name))
         result = {
@@ -912,7 +914,7 @@ class Orthros:
             "item": st.get("item") or "", "minutes": minutes,
             "kind": work_["kind"], "label": work_["label"], "folder": peer,
             "exercise": work_.get("exercise", ""),
-            "score": list(score) if score else None,
+            "score": list(score) if score else None, "failures": failures,
         }
         with self.lock:
             self.state["running"] = None
@@ -1117,9 +1119,8 @@ class Orthros:
         if kind == "practice":
             lines.append("**Practice** on %s: %s of the hidden tests passed."
                          % (result["label"], "%d of %d" % tuple(score) if score else "none"))
-            if score and score[0] < score[1] and result.get("exercise"):
-                lines += ["Practice test failed -- %s" % f for f in work.practice_failures(
-                    result["folder"], result["exercise"], self.python_for(name))]
+            if result.get("failures"):
+                lines.append("Hidden tests it failed: %s." % ", ".join(result["failures"]))
         elif kind == "task":
             lines.append("**Task** %s%s." % (result["label"], ": its own tests, %d of %d passing"
                                                % tuple(score) if score and score[1] else ""))

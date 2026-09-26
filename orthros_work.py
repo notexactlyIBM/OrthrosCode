@@ -213,6 +213,90 @@ def prune_practice(base, agent, keep=KEEP_PRACTICE):
         shutil.rmtree(os.path.join(base, old), ignore_errors=True)
 
 
+# ---------------------------------------------------------------- running their code
+
+# The solutions scored here are the model's code. Like the agents' own checks
+# (agent/ralph_contain.py), each run gets a Windows job: 4 GB between its
+# processes, 32 of them, all killed when it ends -- or a process group of its
+# own elsewhere. Written again here rather than imported: the agents rewrite
+# agent\, and the referee must not depend on anything they can break.
+SCORE_MEMORY_MB = 4096
+
+
+def _job():
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class Basic(ctypes.Structure):
+            _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64),
+                        ("PerJobUserTimeLimit", ctypes.c_int64),
+                        ("LimitFlags", wintypes.DWORD),
+                        ("MinimumWorkingSetSize", ctypes.c_size_t),
+                        ("MaximumWorkingSetSize", ctypes.c_size_t),
+                        ("ActiveProcessLimit", wintypes.DWORD),
+                        ("Affinity", ctypes.c_size_t),
+                        ("PriorityClass", wintypes.DWORD),
+                        ("SchedulingClass", wintypes.DWORD)]
+
+        class Extended(ctypes.Structure):
+            _fields_ = [("BasicLimitInformation", Basic),
+                        ("IoInfo", ctypes.c_ulonglong * 6),
+                        ("ProcessMemoryLimit", ctypes.c_size_t),
+                        ("JobMemoryLimit", ctypes.c_size_t),
+                        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                        ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        job = kernel32.CreateJobObjectW(None, None)
+        if not job:
+            return None
+        info = Extended()
+        info.BasicLimitInformation.LimitFlags = 0x200 | 0x8 | 0x2000   # memory, count, kill
+        info.BasicLimitInformation.ActiveProcessLimit = 32
+        info.JobMemoryLimit = SCORE_MEMORY_MB * 1024 * 1024
+        if not kernel32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info)):
+            kernel32.CloseHandle(job)
+            return None
+        return (kernel32, job)
+    except Exception:
+        return None
+
+
+def contained_run(cmd, timeout, **kwargs):
+    """subprocess.run with captured text output, inside the limits above."""
+    job = _job()
+    if os.name != "nt":
+        kwargs["start_new_session"] = True
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            encoding="utf-8", errors="replace", **kwargs)
+    try:
+        if job:
+            job[0].AssignProcessToJobObject(job[1], int(proc._handle))
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            if job:
+                job[0].TerminateJobObject(job[1], 1)
+            elif os.name != "nt":
+                try:
+                    os.killpg(proc.pid, 9)
+                except OSError:
+                    pass
+            proc.kill()
+            try:
+                proc.communicate(timeout=10)
+            except (subprocess.TimeoutExpired, ValueError, OSError):
+                pass
+            raise
+        return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+    finally:
+        if job:
+            job[0].CloseHandle(job[1])
+
+
 RAN = re.compile(r"^Ran (\d+) tests?", re.M)
 FAILED = re.compile(r"^FAILED \((.*?)\)", re.M)
 
@@ -220,70 +304,69 @@ FAILED = re.compile(r"^FAILED \((.*?)\)", re.M)
 def run_tests(folder, python, tests_dir=None, timeout=300):
     """(passed, total) for the unittest tests in `tests_dir` (default: the folder's own),
     run against the code in `folder`. (0, 0) when there are none; None if they could not run."""
+    return run_tests_output(folder, python, tests_dir, timeout)[0]
+
+
+def run_tests_output(folder, python, tests_dir=None, timeout=300):
+    """run_tests, and the runner's output with it: ((passed, total), text)."""
     tests_dir = tests_dir or folder
     try:
         expected = sum(read(os.path.join(tests_dir, f)).count("def test_")
                        for f in os.listdir(tests_dir) if f.startswith("test_") and f.endswith(".py"))
     except OSError:
-        return None
+        return None, ""
     if not expected:
-        return (0, 0)
+        return (0, 0), ""
     env = dict(os.environ, PYTHONPATH=folder, PYTHONDONTWRITEBYTECODE="1")
     try:
-        proc = subprocess.run([python, "-m", "unittest", "discover", "-s", tests_dir, "-t", tests_dir,
-                               "-p", "test_*.py"], cwd=folder, env=env, capture_output=True,
-                              text=True, timeout=timeout, encoding="utf-8", errors="replace")
+        proc = contained_run([python, "-m", "unittest", "discover", "-s", tests_dir, "-t",
+                              tests_dir, "-p", "test_*.py"], timeout, cwd=folder, env=env)
     except (OSError, subprocess.TimeoutExpired):
-        return (0, expected)
+        return (0, expected), ""
     out = (proc.stderr or "") + (proc.stdout or "")
     ran = RAN.search(out)
     if not ran:
-        return (0, expected)
+        return (0, expected), out
     ran = int(ran.group(1))
     bad = sum(int(n) for n in re.findall(r"(?:failures|errors)=(\d+)",
                                           (FAILED.search(out) or re.match("", "")).group(0)))
     if ran < expected:                     # a module that would not even import
-        return (max(0, ran - bad), expected)
-    return (max(0, ran - bad), ran)
-
-
-def practice_failures(folder, exercise, python, most=4, timeout=300):
-    """["test_name: the line that says why"] for the practice exercise's hidden
-    tests that fail -- never for a held-out one, whose tests must stay unseen.
-
-    A score says how many; this says which and why, which is what the twin
-    can act on: "test_punctuation: AssertionError: {'hi,': 1} != {'hi': 1}".
-    """
-    hidden = os.path.join(EXERCISES, exercise, "hidden")
-    if not os.path.isdir(hidden):
-        return []
-    env = dict(os.environ, PYTHONPATH=folder, PYTHONDONTWRITEBYTECODE="1")
-    try:
-        proc = subprocess.run([python, "-m", "unittest", "discover", "-s", hidden, "-t", hidden,
-                               "-p", "test_*.py"], cwd=folder, env=env, capture_output=True,
-                              text=True, timeout=timeout, encoding="utf-8", errors="replace")
-    except (OSError, subprocess.TimeoutExpired):
-        return []
-    lines = ((proc.stderr or "") + (proc.stdout or "")).splitlines()
-    found = []
-    for i, line in enumerate(lines):
-        head = re.match(r"^(?:FAIL|ERROR): (\w+)", line)
-        if not head:
-            continue
-        why = ""
-        for later in lines[i + 1:]:
-            if re.match(r"^(?:FAIL|ERROR): ", later):
-                break
-            if re.match(r"^(?:[A-Za-z_][\w.]*)?(?:Error|Exception)\b", later):
-                why = later.strip()
-        found.append("%s: %s" % (head.group(1), why[:140] or "failed"))
-    return found[:most]
+        return (max(0, ran - bad), expected), out
+    return (max(0, ran - bad), ran), out
 
 
 def score_practice(folder, exercise, python, held_out=False):
     """(passed, total) of the hidden tests against the practice folder's code."""
-    return run_tests(folder, python, os.path.join(EVALS if held_out else EXERCISES,
-                                                  exercise, "hidden"))
+    return score_practice_detail(folder, exercise, python, held_out)[0]
+
+
+def score_practice_detail(folder, exercise, python, held_out=False, most=4):
+    """((passed, total), ["test_name (ErrorType)"]) -- which hidden tests failed
+    and how, for a practice exercise; never for a held-out one.
+
+    Names and the kind of error only, not the values: the practice exercises
+    repeat, and the expected values in a note the twin reads are answers it
+    could tune the agent to, which would make the score measure memory.
+    """
+    score, out = run_tests_output(folder, python, os.path.join(
+        EVALS if held_out else EXERCISES, exercise, "hidden"))
+    if held_out or not out:
+        return score, []
+    lines = out.splitlines()
+    failed = []
+    for i, line in enumerate(lines):
+        head = re.match(r"^(?:FAIL|ERROR): (\w+)", line)
+        if not head:
+            continue
+        kind = "failed"
+        for later in lines[i + 1:]:
+            if re.match(r"^(?:FAIL|ERROR): ", later):
+                break
+            found = re.match(r"^((?:[A-Za-z_][\w.]*)?(?:Error|Exception))\b", later)
+            if found:
+                kind = found.group(1)
+        failed.append("%s (%s)" % (head.group(1), kind))
+    return score, failed[:most]
 
 
 # ---------------------------------------------------------------- what "better" means

@@ -10,6 +10,7 @@ import re
 import sys
 import tempfile
 import shutil
+import subprocess
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -57,19 +58,34 @@ class TestExercises(unittest.TestCase):
 
 
 class TestPracticeFailures(unittest.TestCase):
-    def test_which_hidden_tests_failed_and_why(self):
+    def test_which_hidden_tests_failed_and_how_but_not_the_answers(self):
         with tempfile.TemporaryDirectory() as tmp:
             with open(os.path.join(tmp, "pangram.py"), "w") as h:
                 h.write("def is_pangram(s):\n    return len(set(s.lower())) >= 26\n\n\n"
                         "def missing_letters(s):\n    return ''\n")
-            failures = work.practice_failures(tmp, "pangram", sys.executable)
-        self.assertTrue(any(f.startswith("test_missing_letters: AssertionError") for f in failures),
-                        failures)
+            score, failures = work.score_practice_detail(tmp, "pangram", sys.executable)
+        self.assertEqual(score[1], 5)
+        self.assertIn("test_missing_letters (AssertionError)", failures)
+        self.assertFalse(any("defg" in f for f in failures))     # no expected values
 
     def test_never_for_a_held_out_exercise(self):
         with tempfile.TemporaryDirectory() as tmp:
-            self.assertEqual(work.practice_failures(tmp, work.eval_exercises()[0],
-                                                    sys.executable), [])
+            score, failures = work.score_practice_detail(
+                tmp, work.eval_exercises()[0], sys.executable, held_out=True)
+        self.assertEqual(failures, [])
+        self.assertEqual(score[0], 0)
+
+
+class TestContainedRun(unittest.TestCase):
+    def test_a_timeout_takes_everything_the_run_started(self):
+        import time
+        started = time.time()
+        with self.assertRaises(subprocess.TimeoutExpired):
+            work.contained_run([sys.executable, "-c",
+                                "import subprocess, sys, time; "
+                                "subprocess.Popen([sys.executable, '-c', "
+                                "'import time; time.sleep(20)']); time.sleep(20)"], 1)
+        self.assertLess(time.time() - started, 8)
 
 
 if __name__ == "__main__":

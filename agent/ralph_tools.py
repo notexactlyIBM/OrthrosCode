@@ -160,7 +160,7 @@ def outline_file(workspace, filename):
 def library_docs(workspace, name, python, lines=DOCS_LINES):
     """`pydoc` for an installed module or name, trimmed. Offline, no model."""
     try:
-        proc = subprocess.run([python, "-m", "pydoc", name], cwd=workspace,
+        proc = contain.run([python, "-m", "pydoc", name], cwd=workspace,
                               capture_output=True, text=True, timeout=60,
                               encoding="utf-8", errors="replace")
     except (OSError, subprocess.TimeoutExpired) as exc:

@@ -425,7 +425,9 @@ def find_test_cmd():
     if not os.path.isfile(python):
         python = sys.executable
     if module_available(python, "pytest"):
-        return "\"%s\" -m pytest -q -x --no-header -p no:cacheprovider" % python
+        # -l: the values in each frame of a failure, which the model fixes
+        # from far better than from the message alone (ralph_explain.py).
+        return "\"%s\" -m pytest -q -x -l --no-header -p no:cacheprovider" % python
     # No pytest, and an unattended round cannot install one -- but unittest
     # ships with Python and runs the same test_*.py files, as long as they
     # are written as unittest.TestCase classes.

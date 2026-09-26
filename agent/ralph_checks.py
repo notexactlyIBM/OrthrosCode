@@ -6,6 +6,7 @@ The checks for invented attributes are in ralph_inventions.py.
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 
@@ -302,8 +303,9 @@ def test_check(workspace, seconds=240):
         for line in block:
             if line.startswith(("FAIL:", "ERROR:")):
                 break
-            if line.startswith(("AssertionError", "AttributeError", "ValueError", "TypeError",
-                               "KeyError", "IndexError", "OSError", "RuntimeError", "Exception")):
+            # Any exception's own line: the list of names this used to check
+            # missed ZeroDivisionError, NameError and the rest.
+            if EXCEPTION_LINE.match(line):
                 detail = line
                 break
         if not detail:
@@ -325,7 +327,44 @@ def test_check(workspace, seconds=240):
         parts.append(detail)
     if len(failing) > 1:
         parts.append("%d more" % (len(failing) - 1))
-    return [("tests", "tests fail: " + "; ".join(parts)[:300])]
+    broken = [("tests", "tests fail: " + "; ".join(parts)[:300])]
+    values = explain_failure(workspace, failing[0] if failing else "", seconds)
+    if values:
+        broken.append(("the values where it failed", "\n" + values))
+    return broken
+
+
+EXCEPTION_LINE = re.compile(r"^[A-Za-z_][\w.]*(Error|Exception|Exit|Interrupt|Warning)\b(:|$)")
+EXPLAIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ralph_explain.py")
+
+
+def failing_test_id(line):
+    """'test_calc.TestCalc.test_add' from unittest's FAIL:/ERROR: line, or ''.
+
+    Python 3.11 writes "FAIL: test_add (test_calc.TestCalc.test_add)"; older
+    ones "FAIL: test_add (test_calc.TestCalc)".
+    """
+    match = re.match(r"^(?:FAIL|ERROR):\s+(\w+)\s+\(([\w.]+)\)", line or "")
+    if not match:
+        return ""
+    method, where = match.groups()
+    return where if where.endswith("." + method) else "%s.%s" % (where, method)
+
+
+def explain_failure(workspace, line, seconds=60):
+    """The first failing test run again alone, with the values at the failure. '' if none."""
+    test_id = failing_test_id(line)
+    if not test_id or not os.path.isfile(EXPLAIN):
+        return ""
+    try:
+        proc = subprocess.run([find_project_python(workspace), EXPLAIN, test_id],
+                              cwd=workspace, capture_output=True, text=True,
+                              timeout=min(seconds, 60), encoding="utf-8", errors="replace",
+                              env=_import_env())
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    out = (proc.stdout or "").strip()
+    return "" if proc.returncode == 0 or not out else out
 
 
 def keep_files_small(workspace, edit_files, entry, run_seconds=6):

@@ -2618,18 +2618,22 @@ def repo_in_step(root):
         return "this folder is not a git clone of OrthrosCode"
     if dirty:
         return "files here were changed and not committed:\n" + dirty
-    if run("fetch", "-q")[0]:
+    if run("fetch", "-q", "origin")[0]:
         return "could not reach GitHub to compare (git fetch failed)"
-    code, upstream = run("rev-parse", "--abbrev-ref", "@{u}")
-    if code:
-        return "this branch does not follow one on GitHub"
-    _, counts = run("rev-list", "--left-right", "--count", "HEAD...@{u}")
-    ahead, behind = (int(n) for n in (counts.split() + ["0", "0"])[:2])
-    if behind:
-        return "GitHub has %d newer commit(s) on %s: run  git pull  first" % (behind, upstream)
-    if ahead:
-        return "%d commit(s) here are not on GitHub yet: run  git push  first" % ahead
-    return ""
+    # Any branch on GitHub will do, not only the one this branch follows: a
+    # branch pulled into a local main is still GitHub's code.
+    _, head_sha = run("rev-parse", "HEAD")
+    _, holding = run("branch", "-r", "--contains", "HEAD")
+    holding = [b.strip() for b in holding.splitlines() if b.strip() and "->" not in b]
+    if not holding:
+        return "commits here are not on GitHub yet: run  git push  first"
+    for branch in holding:
+        if run("rev-parse", branch)[1] == head_sha:
+            return ""
+    newest = holding[0]
+    _, behind = run("rev-list", "--count", "HEAD..%s" % newest)
+    return ("GitHub has %s newer commit(s) on %s: run  git pull origin %s  first"
+            % (behind, newest, newest.split("/", 1)[-1]))
 
 
 def fresh(root, ask=input, out=print):

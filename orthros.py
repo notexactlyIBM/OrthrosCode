@@ -1892,6 +1892,7 @@ class Orthros:
         see surrender()."""
         with self.lock:
             self.state["paused"] = True
+            self.state["wanted"] = False     # --resume brings back only a run that died
             self.save()
         self.set_phase("error" if error else "paused", message)
         self.event(message.splitlines()[0], "bad" if (error or loud) else "info")
@@ -1947,6 +1948,7 @@ class Orthros:
             except OSError:
                 pass
             self.stop_mode = ""
+            self.state["wanted"] = True
             self.save()
         self.set_phase("handover", "starting %s" % self.state["next"])
         self.event("Orthros started; %s goes first" % self.state["next"], "start")
@@ -2740,6 +2742,9 @@ def main():
                         help="copy an agent's newest proven version into agent\\ and exit")
     parser.add_argument("--probe", action="store_true",
                         help="look at the hardware now and put fitting settings on trial")
+    parser.add_argument("--resume", action="store_true",
+                        help="start straight away if Orthros was running when it last "
+                             "stopped -- killed, or the machine restarted -- and not paused")
     parser.add_argument("--apply-patch", metavar="PATCH",
                         help="apply a `git diff --relative=agent` of agent\\ to both live "
                              "agents, check it, and count it as proven")
@@ -2778,6 +2783,13 @@ def main():
         open_window(url)
     loop = threading.Thread(target=orthros.loop, daemon=True)
     loop.start()
+    if args.resume:
+        if orthros.state.get("wanted"):
+            orthros.event("resuming: Orthros was running when it last stopped", "start")
+            orthros.start()
+        else:
+            print("Not resuming: Orthros was paused or stopped by hand, or gave up. "
+                  "Press Start when ready.")
     if orthros.settings.get("gpu_telemetry", True):
         threading.Thread(target=orthros.watch_gpu, daemon=True).start()
     try:

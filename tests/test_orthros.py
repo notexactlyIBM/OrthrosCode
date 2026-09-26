@@ -210,6 +210,14 @@ class TestRestart(Sandbox):
         self.assertEqual(again.state["next"], "B")
 
 
+class TestResume(Sandbox):
+    def test_only_a_run_that_died_is_resumed(self):
+        self.o.start()
+        self.assertTrue(orthros.Orthros(self.root, simulate=True).state["wanted"])
+        self.o.pause("Paused after the session, as asked.")
+        self.assertFalse(orthros.Orthros(self.root, simulate=True).state["wanted"])
+
+
 class TestSurrender(Sandbox):
     def test_giving_up_is_loud_and_start_clears_it(self):
         self.o.pause("the card is gone", error=True)

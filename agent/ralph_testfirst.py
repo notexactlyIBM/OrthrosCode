@@ -212,6 +212,12 @@ SETTLED_BY_TEST = ("\nSettled by execution: the item's own test ({tests}) was wr
                    "it works.\n")
 
 
+TEST_STILL_FAILS = ("\nNot settled: the item's own test ({tests}) still fails after this change "
+                    "-- {failure}. The test is not part of the diff. Keep the change only if "
+                    "it is a sound step towards passing it; reject one that is wrong, or that "
+                    "only looks finished.\n")
+
+
 class TestFirstMixin:
     """Part of Session: the test round, and the code rounds after it.
 
@@ -279,8 +285,11 @@ class TestFirstMixin:
             put_files(self.workspace, {n: after for n, (_, after) in pending["files"].items()})
             return broken
         self.test_state = "fails"
-        self.review_note = ""           # it does not pass: nothing is settled
         self.test_failure = " ".join(" ".join(m.split()) for w, m in broken if w == "tests")
+        # Nothing is settled: the reviewer is told so, and that such a change
+        # stays only as a sound step towards passing it.
+        self.review_note = TEST_STILL_FAILS.format(
+            tests=", ".join("`%s`" % t for t in pending["ids"]), failure=self.test_failure[:300])
         return []
 
     def test_target(self, task):

@@ -275,7 +275,8 @@ function agentCard(name, d) {
   let role = "Waiting", now = "";
   if (on) {
     role = run.kind === "task" ? `Working on the task ${esc(run.label)}`
-      : run.kind === "practice" ? `Practising: ${esc(run.label)}` : `Working on ${peer}`;
+      : run.kind === "practice" ? `Practising: ${esc(run.label)}`
+      : run.kind === "eval" ? `Being scored: held-out exercise ${esc(run.label)}` : `Working on ${peer}`;
     const total = run.minutes * 60, gone = live.elapsed || 0, left = Math.max(0, total - gone);
     const pct = Math.min(100, gone / total * 100);
     const tries = live.attempt && live.budget ? ` · try ${live.attempt} of ${live.budget}` : "";
@@ -316,10 +317,12 @@ function agentCard(name, d) {
   const pr = (a.practice || []).slice(-1)[0];
   const practiced = pr ? ` · practice ${esc(pr[1])} ${pr[2]}/${pr[3]}` : "";
   const proof = a.unproven ? `${a.unproven} change set${a.unproven > 1 ? "s" : ""} waiting to prove` :
+    a.unscored ? `${a.unscored} change set${a.unscored > 1 ? "s" : ""} waiting for a score` :
     (a.version === a.proven ? "proven" : "");
+  const held = a.held_out ? ` · held-out ${a.held_out[0]}/${a.held_out[1]} (${a.held_out[2]}/${a.held_out[3]} tests)` : "";
   return `<div class="top"><div class="letter">${name}</div>
       <div style="min-width:0"><div class="role">${role} ${on ? '<span class="dot" style="display:inline-block;margin-left:4px"></span>' : ""}</div>
-      <div class="ver">version ${esc(a.version)}${proof ? " · " + proof : ""}${practiced}</div></div></div>
+      <div class="ver">version ${esc(a.version)}${proof ? " · " + proof : ""}${held}${practiced}</div></div></div>
     <div class="now">${now}</div>
     <div class="nums">
       <div class="num"><b>${s.rounds ?? 0}</b><span>rounds</span></div>

@@ -261,18 +261,32 @@ BETTER = """
 Better means writing working code on projects it has never seen -- fewer
 rounds per item, fewer changes sent back, more tests passing -- not only
 getting better at editing itself. FIELD_REPORT.md has the evidence: lines
-starting **Practice** are exercises scored by tests the agent never saw, and
-lines starting **Task** are real projects. A change is worth making when it
-moves those numbers. Improving the machinery that improves itself counts only
-when it shows up there too.
+starting **Held-out score** say how a version did on exercises it never
+practises on, compared with the version before it -- a version that does
+worse is rolled back, and its changes never reach the twin. Lines starting
+**Practice** are exercises scored by tests the agent never saw, and lines
+starting **Task** are real projects. A change is worth making when it moves
+those numbers. Improving the machinery that improves itself counts only when
+it shows up there too.
 """
 
 
 def ensure_better(folder):
-    """Put the definition of better into a folder's standing prompt, once."""
+    """Put the current definition of better into a folder's standing prompt."""
     path = os.path.join(folder, "RALPH_PROMPT.md")
     body = read(path)
-    if body and "# What better means" not in body:
+    if not body:
+        return False
+    if "# What better means" not in body:
         write(path, body.rstrip() + "\n" + BETTER)
+        return True
+    # An older definition is replaced, up to the next heading or the end.
+    start = body.index("# What better means")
+    rest = body[start + 1:]
+    nxt = rest.find("\n# ")
+    end = len(body) if nxt < 0 else start + 1 + nxt + 1
+    fixed = body[:start].rstrip() + "\n" + BETTER + ("\n" + body[end:] if nxt >= 0 else "")
+    if fixed != body:
+        write(path, fixed)
         return True
     return False

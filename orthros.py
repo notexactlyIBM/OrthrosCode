@@ -28,6 +28,7 @@ import argparse
 import ctypes
 import http.server
 import json
+import math
 import os
 import random
 import re
@@ -91,6 +92,18 @@ DEFAULTS = {
     # 0 = never.
     "practice_every": 4,
     "practice_minutes": 20,
+    # Proof by score (ORTHROSCODE-IMPROVEMENTS.md, item 3). Starting and doing
+    # some work proves a version is not broken, not that it is better. Every
+    # `eval_every` good turns, an agent's version works through the first
+    # `eval_count` held-out exercises in evals\, `eval_minutes` each, and is
+    # compared exercise by exercise with the last version that passed. Until
+    # it passes, the changes in it do not reach the twin; if it does worse,
+    # it goes back to that version. 8 exercises at 8 minutes is about an
+    # hour and a half with model loads, every 4 good turns.
+    "prove_by_score": True,
+    "eval_every": 4,
+    "eval_count": 8,
+    "eval_minutes": 8,
     # Fit context and timeouts to the machine, from what each turn measures
     # (see orthros_tune.py). The agents' config.cmd holds the starting point.
     "auto_tune": True,
@@ -502,6 +515,39 @@ def short(sha):
     return (sha or "")[:7]
 
 
+def sign_test(wins, losses):
+    """One-sided p-value that `wins` against `losses` (ties dropped) is chance."""
+    n = wins + losses
+    if n == 0:
+        return 1.0
+    return sum(math.comb(n, k) for k in range(wins, n + 1)) / 2.0 ** n
+
+
+def compare_scores(child, parent, alpha=0.2):
+    """(wins, losses, not_worse) of `child` against `parent`, both
+    {exercise: [passed, total]}, on the exercises both were scored on.
+
+    Paired and by exercise, because one exercise is a large share of so few:
+    a win is a larger share of its hidden tests passed. "Not worse" is the bar
+    for proof, and deliberately loose -- to stop real regressions, not to
+    demand significance from a handful of samples. Four losses and no wins in
+    eight is a regression; two and none is not yet.
+    """
+    def share(score):
+        return score[0] / float(score[1]) if score and score[1] else 0.0
+    common = [e for e in child if e in parent]
+    wins = sum(1 for e in common if share(child[e]) > share(parent[e]))
+    losses = sum(1 for e in common if share(child[e]) < share(parent[e]))
+    return wins, losses, losses <= wins or sign_test(losses, wins) > alpha
+
+
+def score_totals(scores):
+    """(exercises fully passed, exercises, hidden tests passed, hidden tests)."""
+    full = sum(1 for p, t in scores.values() if t and p == t)
+    return (full, len(scores), sum(p for p, _ in scores.values()),
+            sum(t for _, t in scores.values()))
+
+
 # --------------------------------------------------------------------------
 # the orchestrator
 # --------------------------------------------------------------------------
@@ -531,7 +577,8 @@ class Orthros:
                                ("pending", []), ("seconds", 0), ("tokens", 0),
                                ("sessions", 0), ("kept", 0), ("launch_failures", 0),
                                ("rollbacks", 0), ("carried_in", 0), ("weak_streak", 0),
-                               ("last", {})):
+                               ("last", {}), ("scored", {}), ("scored_good", ""),
+                               ("since_eval", 0), ("proven_pending", [])):
                 a.setdefault(key, value)
         for n in NAMES:
             a = self.state["agents"][n]
@@ -742,7 +789,8 @@ class Orthros:
     @staticmethod
     def describe(work_):
         return {"task": "the task %s" % work_["label"],
-                "practice": "the practice exercise %s" % work_["label"]}.get(
+                "practice": "the practice exercise %s" % work_["label"],
+                "eval": "held-out exercise %s, to score its version" % work_["label"]}.get(
                     work_["kind"], "%s's code" % work_["label"])
 
     def launch(self, name, minutes, token, work_=None):
@@ -785,6 +833,7 @@ class Orthros:
             except OSError:
                 pass
         minutes = (int(self.settings.get("practice_minutes") or 20) if work_["kind"] == "practice"
+                   else int(self.settings.get("eval_minutes") or 8) if work_["kind"] == "eval"
                    else self.plan_minutes(name))
         token = "%s-%d" % (name, int(now() * 1000))
         started = now()
@@ -792,7 +841,8 @@ class Orthros:
         self.proc = proc
         running = {"agent": name, "pid": proc.pid, "started": started, "minutes": minutes,
                    "log": log_path, "own": own_sha, "pre": pre, "token": token,
-                   "workspace": peer, "kind": work_["kind"], "label": work_["label"]}
+                   "workspace": peer, "kind": work_["kind"], "label": work_["label"],
+                   "exercise": work_.get("exercise", "")}
         with self.lock:
             self.state["running"] = running
             self.save()
@@ -845,8 +895,9 @@ class Orthros:
         self.release(name)
         post = commit_all(peer, "Orthros: after %s's turn" % name)
         score = None
-        if work_["kind"] == "practice":
-            score = work.score_practice(peer, work_["exercise"], self.python_for(name))
+        if work_["kind"] in ("practice", "eval"):
+            score = work.score_practice(peer, work_["exercise"], self.python_for(name),
+                                        held_out=work_["kind"] == "eval")
         elif work_["kind"] == "task":
             score = work.run_tests(peer, self.python_for(name))
         result = {
@@ -860,6 +911,7 @@ class Orthros:
             "own": own_sha, "pre": pre, "post": post,
             "item": st.get("item") or "", "minutes": minutes,
             "kind": work_["kind"], "label": work_["label"], "folder": peer,
+            "exercise": work_.get("exercise", ""),
             "score": list(score) if score else None,
         }
         with self.lock:
@@ -1175,7 +1227,18 @@ class Orthros:
             me["weak_streak"] = 0
             me["spared"] = False
             self.prove(name, result["own"])    # this version has proven itself
-            self.carry_over(name)
+            if self.score_gated(name):
+                # Proven to work, not yet to be better: its changes wait for
+                # the held-out score before they reach the twin.
+                me["proven_pending"] = me["proven_pending"] + me["pending"]
+                me["pending"] = []
+                if not self.same_code(name, result["own"], me["scored_good"]):
+                    me["since_eval"] += 1
+            else:
+                if self.state.get("mode") != "task" and self.settings.get("prove_by_score") \
+                        and work.eval_exercises() and result.get("kind", "self") == "self":
+                    me["since_eval"] += 1          # towards the first, baseline score
+                self.carry_over(name)
         else:
             self.state["idle_streak"] += 1
             if self.is_good(name, result["own"]):
@@ -1395,6 +1458,7 @@ class Orthros:
             git(self.folders[name], "tag", "-f", "orthros/withdrawn-%s" % short(dropped), dropped)
             self.event("%s's proven version %s failed after all; withdrawing it"
                        % (name, short(dropped)), "bad")
+            me["proven_pending"] = []    # what they held may be what failed
             why += " -- on a version that had been proven, so that proof is withdrawn"
         me["good"] = self.good(name)
         me["good_failures"] = 0
@@ -1462,12 +1526,13 @@ class Orthros:
         with open(path, "w", encoding="utf-8") as handle:
             handle.write(body.rstrip() + block)
 
-    def carry_over(self, name):
+    def carry_over(self, name, ranges=None):
         """The agent just proved the changes its peer made to it; copy them into
         the peer as well, so both agents have them."""
         me = self.agent(name)
         src, dst = self.folders[name], self.folders[PEER[name]]
-        ranges, me["pending"] = me["pending"], []
+        if ranges is None:
+            ranges, me["pending"] = me["pending"], []
         if not ranges:
             return
         ok, out = git(dst, "fetch", "-q", "--no-tags", src, "+HEAD:refs/orthros/peer")
@@ -1503,6 +1568,167 @@ class Orthros:
             self.event("%d change set(s) from %s did not apply cleanly to %s; left out"
                        % (skipped, name, PEER[name]))
 
+    # ---------------------------------------------------------------- proof by score
+
+    def score_gated(self, name):
+        """Do this agent's changes wait for a held-out score before carrying over?"""
+        return bool(self.settings.get("prove_by_score") and self.state.get("mode") != "task"
+                    and work.eval_exercises() and self.agent(name).get("scored_good"))
+
+    def same_code(self, name, a, b):
+        """Same code in the agent's folder at `a` and `b`, notes aside."""
+        if not a or not b:
+            return False
+        # Compiled files too: the pre-launch import check writes them, and in a
+        # folder that does not ignore them they would make every version new.
+        excludes = [":(exclude)%s" % f for f in MEMORY_FILES] + [
+            ":(exclude)*.pyc", ":(exclude)**/__pycache__/**"]
+        ok, _ = git(self.folders[name], "diff", "--quiet", a, b, "--", ".", *excludes)
+        return ok
+
+    def maybe_start_eval(self, name):
+        """The evaluation under way, or a new one for `name` if its version is due."""
+        if self.state.get("evaluating"):
+            return self.state["evaluating"]
+        me = self.agent(name)
+        exercises = work.eval_exercises()[:max(1, int(self.settings.get("eval_count") or 8))]
+        if (not self.settings.get("prove_by_score") or self.state.get("mode") == "task"
+                or not work.eval_exercises()
+                or me["since_eval"] < max(1, int(self.settings.get("eval_every") or 4))):
+            return None
+        sha = commit_all(self.folders[name], "Orthros: %s's version, to be scored" % name)
+        if self.same_code(name, sha, me["scored_good"]):
+            me["since_eval"] = 0
+            return None
+        ev = {"agent": name, "sha": sha, "parent": me["scored_good"], "todo": exercises,
+              "scores": {}, "resume": self.state["next"], "started": now()}
+        with self.lock:
+            self.state["evaluating"] = ev
+            self.save()
+        self.event("scoring %s's version %s on %d held-out exercises%s"
+                   % (name, short(sha), len(exercises),
+                      " against %s" % short(ev["parent"]) if ev["parent"] else
+                      " -- the first score, which later versions are held to"), "start")
+        return ev
+
+    def eval_work(self, ev):
+        exercise = ev["todo"][0]
+        return {"kind": "eval", "exercise": exercise,
+                "label": "%d of %d" % (len(ev["scores"]) + 1, len(ev["scores"]) + len(ev["todo"])),
+                "folder": work.start_practice(self.root, ev["agent"], exercise, held_out=True)}
+
+    def judge_eval(self, result):
+        """One held-out exercise done: record it, and decide when all are."""
+        ev = self.state.get("evaluating")
+        name = result["agent"]
+        if not ev or ev["agent"] != name:
+            return
+        if not result["launched"]:
+            # Cannot even start: that is the launch-failure path's to handle,
+            # and the score waits for a version that runs.
+            self.event("scoring %s stopped: it did not start" % name, "bad")
+            self.state.pop("evaluating", None)
+            self.judge(dict(result, kind="self"))
+            self.state["next"] = ev.get("resume") or self.state["next"]
+            self.save()
+            return
+        exercise = result.get("exercise") or ev["todo"][0]
+        score = result.get("score") or [0, 0]
+        ev["scores"][exercise] = [int(score[0]), int(score[1])]
+        ev["todo"] = [e for e in ev["todo"] if e != exercise]
+        self.event("%s scored %d of %d on held-out exercise %d of %d"
+                   % (name, score[0], score[1], len(ev["scores"]),
+                      len(ev["scores"]) + len(ev["todo"])))
+        self.save()
+        if not ev["todo"]:
+            self.decide_eval(ev)
+
+    def decide_eval(self, ev):
+        """Prove the version by its score, or send it back to the last that passed."""
+        name, me = ev["agent"], self.agent(ev["agent"])
+        self.state.pop("evaluating", None)
+        self.state["next"] = ev.get("resume") or PEER[name]
+        me["since_eval"] = 0
+        parent = me["scored"].get(ev["parent"], {}).get("scores", {}) if ev["parent"] else {}
+        wins, losses, not_worse = compare_scores(ev["scores"], parent)
+        full, count, passed, total = score_totals(ev["scores"])
+        mine = "%d of %d held-out exercises fully passed, %d of %d hidden tests" % (
+            full, count, passed, total)
+        if parent:
+            p_full, p_count, p_passed, p_total = score_totals(
+                {e: s for e, s in parent.items() if e in ev["scores"]})
+            theirs = "the version before it: %d of %d, %d of %d hidden tests" % (
+                p_full, p_count, p_passed, p_total)
+        verdict = "baseline" if not parent else "kept" if not_worse else "rolled back"
+        me["scored"][ev["sha"]] = {"scores": ev["scores"], "parent": ev["parent"], "at": now(),
+                                   "verdict": verdict, "wins": wins, "losses": losses}
+        if len(me["scored"]) > 40:
+            for old in sorted(me["scored"], key=lambda s: me["scored"][s]["at"])[:-40]:
+                if old != me["scored_good"]:
+                    me["scored"].pop(old)
+        self.warn_if_gamed(name)
+        if not parent:
+            me["scored_good"] = ev["sha"]
+            self.carry_over(name, me["proven_pending"] + me["pending"])
+            me["proven_pending"], me["pending"] = [], []
+            self.event("%s's first held-out score: %s. Later versions are held to it."
+                       % (name, mine), "good")
+            self.field_note(name, "**Held-out score** of this version: %s. The first score; "
+                            "later versions must not do worse." % mine)
+        elif not_worse:
+            me["scored_good"] = ev["sha"]
+            self.prove(name, ev["sha"])
+            ranges = me["proven_pending"] + me["pending"]
+            me["proven_pending"], me["pending"] = [], []
+            self.carry_over(name, ranges)
+            self.event("%s's version %s proven by score: %s (%s; %d better, %d worse)"
+                       % (name, short(ev["sha"]), mine, theirs, wins, losses), "good")
+            self.field_note(name, "**Held-out score** of this version: %s -- %s. %d exercises "
+                            "went better and %d worse, so the changes were kept and copied "
+                            "into %s." % (mine, theirs, wins, losses, PEER[name]))
+        else:
+            why = ("its held-out score fell: %s -- %s; %d exercises went worse and only %d "
+                   "better" % (mine, theirs, losses, wins))
+            self.field_note(name, "**Held-out score** of this version: %s -- %s. That is worse, "
+                            "so it was rolled back to the version that scored better." % (
+                                mine, theirs))
+            self.rollback_to_scored(name, why)
+        self.save()
+
+    def rollback_to_scored(self, name, why):
+        """Back to the last version that passed its score: newer proofs withdrawn."""
+        me = self.agent(name)
+        target = me["scored_good"]
+        goods = me["goods"]
+        if target in goods:
+            me["goods"] = goods[:goods.index(target) + 1]
+        else:
+            me["goods"] = goods + [target]
+        me["good"] = self.good(name)
+        me["proven_pending"] = []
+        self.rollback(name, why)
+
+    def warn_if_gamed(self, name):
+        """The held-out exercises' names should never turn up in an agent's code.
+
+        Only the distinctive ones, `phone_number` and the like: "clock" in an
+        agent's code is no evidence of anything.
+        """
+        names = [e for e in work.eval_exercises() if "_" in e]
+        folder = self.folders[name]
+        for root_, dirs, files in os.walk(folder):
+            dirs[:] = [d for d in dirs if not d.startswith((".", "venv", "__pycache__"))]
+            for f in files:
+                if not f.endswith(".py"):
+                    continue
+                body = read_text(os.path.join(root_, f))
+                hit = next((e for e in names if e in body), "")
+                if hit:
+                    self.event("warning: %s's %s mentions a held-out exercise (%s); its "
+                               "score may not mean what it seems" % (name, f, hit), "bad")
+                    return True
+        return False
+
     def fix_workspace_line(self, name):
         """Keep an agent's config pointing at its peer, whatever was carried over."""
         path = os.path.join(self.folders[name], "config.cmd")
@@ -1537,13 +1763,31 @@ class Orthros:
                 # Read after adopting: judging an adopted turn decides who is next,
                 # and reading it before meant the same agent ran twice in a row.
                 name = self.state["next"]
+                ev = self.maybe_start_eval(name)
+                if ev:
+                    name = ev["agent"]
                 if not self.memory_is_free_enough(name) or not self.cleared_for_launch(name):
                     continue
+                if ev and not self.same_code(name, ev["sha"], head(self.folders[name])):
+                    # The pre-launch checks rolled it back: that version is gone.
+                    self.event("scoring %s dropped: its version changed before it was scored"
+                               % name)
+                    self.state.pop("evaluating", None)
+                    self.state["next"] = ev.get("resume") or self.state["next"]
+                    self.save()
+                    continue
                 self.maybe_look()            # cheap unless there is a reason to look
-                result = self.run_turn(name)
+                result = self.run_turn(name, self.eval_work(ev) if ev else None)
                 if self.stop_mode and not result["launched"]:
                     # Stopped by hand before it got going: not the code's fault.
                     self.event("%s was stopped before it started working" % name)
+                elif ev and self.stop_mode in ("now", "force"):
+                    # Cut short by hand: a part-done exercise would score the
+                    # stop, not the version. It is done again on the restart.
+                    self.event("scoring %s interrupted; that exercise will be done again" % name)
+                elif ev:
+                    self.judge_eval(result)
+                    self.tune_after(result)
                 else:
                     self.field_report(result)
                     self.judge(result)
@@ -1593,7 +1837,17 @@ class Orthros:
             "log": running["log"], "own": running["own"], "pre": running["pre"], "post": post,
             "lowest_free_mb": None, "item": st.get("item") or "",
             "minutes": running.get("minutes") or 0,
+            "kind": running.get("kind", "self"), "label": running.get("label", ""),
+            "exercise": running.get("exercise", ""), "folder": peer, "score": None,
         }
+        if result["kind"] in ("practice", "eval") and result["exercise"]:
+            score = work.score_practice(peer, result["exercise"], self.python_for(agent),
+                                        held_out=result["kind"] == "eval")
+            result["score"] = list(score) if score else None
+        if result["kind"] == "eval":
+            self.judge_eval(result)
+            self.save()
+            return
         self.field_report(result)
         self.judge(result)
         self.save()
@@ -2039,6 +2293,9 @@ class Orthros:
             agents[n]["proven"] = short((a.get("goods") or [a.get("good")])[-1])
             agents[n]["proven_count"] = len(a.get("goods") or [])
             agents[n]["unproven"] = len(a.get("pending") or [])
+            agents[n]["unscored"] = len(a.get("proven_pending") or [])
+            best = (a.get("scored") or {}).get(a.get("scored_good") or "")
+            agents[n]["held_out"] = list(score_totals(best["scores"])) if best else None
         return {"phase": self.phase, "message": self.message, "paused": st["paused"],
                 "next": st["next"], "running": running, "live": live, "agents": agents,
                 "events": st["events"][-12:][::-1], "settings": self.settings,
@@ -2050,6 +2307,8 @@ class Orthros:
                 "tasks": [{k: t[k] for k in ("key", "name", "folder", "open", "done", "parked")}
                           for t in work.list_tasks(self.root)],
                 "exercises": work.exercises(),
+                "evaluating": ({k: (st["evaluating"] or {}).get(k) for k in ("agent", "sha")}
+                               if st.get("evaluating") else None),
                 "hardware": {"look": self.tuner.data.get("look", {}),
                              "good": self.tuner.data.get("good", {}),
                              "trial": self.tuner.data.get("trial", {}),

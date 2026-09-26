@@ -64,6 +64,17 @@ The score goes into the agent's field report, which its twin reads when
 deciding what to improve, and the standing mission says that these scores are
 the measure that matters.
 
+**Proof by score.** A version that starts and does some work is not broken;
+that does not make it better. So every few good turns (`eval_every`), an
+agent's current version works through held-out exercises from `evals\` --
+ones it never practises on -- and is compared, exercise by exercise, with the
+last version that passed. Until it passes, the changes in it wait and do not
+reach its twin. If it does clearly worse, it goes back to that version, and
+the twin that made the changes reads the scores in its field report. This is
+the loop the published self-improving coding agents (the Darwin Gödel
+Machine, SICA) put at their centre: without a score, changes drift; with one,
+only the ones that hold up spread.
+
 ## How a turn works
 
 ```mermaid
@@ -258,6 +269,10 @@ Set `auto_tune` to `false` in `orthros.json` to run on `config.cmd` alone.
 | `pause_after_idle` | 4 | turns in a row with nothing kept before Orthros stops (0 = never) |
 | `practice_every` | 4 | in self-improvement, one turn in this many is a practice (0 = never) |
 | `practice_minutes` | 20 | length of a practice turn |
+| `prove_by_score` | true | changes reach the twin only after a held-out score no worse than the last |
+| `eval_every` | 4 | good turns of an agent's between scorings of its version |
+| `eval_count` | 8 | held-out exercises a scoring uses (the same ones each time, so versions compare) |
+| `eval_minutes` | 8 | length of each held-out exercise; 8 x 8 is about 90 minutes with model loads |
 | `park_after_tries` | 2 | turns in a row ending on one item without progress before it is parked |
 | `env_retry_minutes` | [2, 5, 15] | waits before retrying a start the machine made fail |
 | `auto_tune` | true | fit context and timeouts to the machine (see above) |
@@ -394,6 +409,7 @@ orthros_work.py                         what a turn works on: the twin, a task o
 orthros_tune.py                         fitting the settings to the machine
 orthros_guard\                          loaded into the agents' Pythons: keeps prompts in the window
 exercises\                              practice jobs, each with hidden tests
+evals\                                  held-out jobs that score a version; never practised on
 agent\                                  the agent's code: the template both agents start from
 SETUP.bat, orthros_setup.py             builds the rest; holds the mission templates
 tests\                                  the referee's tests: python -m unittest discover -s tests
@@ -403,7 +419,8 @@ LICENSE, README.md
 made on your machine, not in the repository:
 shared-venv\                            aider and its dependencies, installed once
 OrthrosCode A\, OrthrosCode B\          the two agents, each its own git repository
-tasks\, practice\                       task projects and practice copies
+tasks\, practice\, evals-runs\           task projects, practice copies, scoring copies
+ledger.sqlite                           one row per round from both agents
 logs\, orthros.log, orthros.json        what happened, and the settings
 hardware.json                           what Orthros found out about this machine
 ```

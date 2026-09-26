@@ -1,0 +1,558 @@
+diff --git a/README.md b/README.md
+index afcd924..b8eaca2 100644
+--- a/README.md
++++ b/README.md
+@@ -76,6 +76,7 @@ that produce nothing at all stop it early.
+ | `ralph_testfirst.py` | test first, then code: an item whose `Done when:` a test could check gets a round that writes only that test, which must fail; code rounds then make it pass, and the test enters the history only with them. Off with `set "LC_RALPH_TEST_FIRST=0"` |
+ | `ralph_memory.py` | how similar items were done here: BM25 over past kept rounds (each commit names its item), the closest one or two shown with their diffs. Off with `set "LC_RALPH_EXAMPLES=0"` |
+ | `ralph_ladder.py` | each try at a failing item made differently: whole-file edits after a miss, architect mode after a break or no change, a split after two failures. Off with `set "LC_RALPH_LADDER=0"` |
++| `ralph_contain.py` | the model's code -- tests, imports, a start -- run inside a Windows job: 4 GB between them (`LC_CHECK_MEMORY_MB`), 32 processes, and whatever they leave running killed at the end |
+ | `ralph_explain.py` | a failing test run again alone, with the values at the failure, for the next round |
+ | `ralph_ledger.py` | one row per round in SQLite -- item, tokens, checks, verdict, kept -- so "where do rounds go?" is a query, not an afternoon of reading logs |
+ | `ralph_digest.py` | `DIGEST:` reads a file too big for a round in parts (after Chain-of-Agents) |
+diff --git a/ralph_checks.py b/ralph_checks.py
+index 5a15c44..b05fa97 100644
+--- a/ralph_checks.py
++++ b/ralph_checks.py
+@@ -10,6 +10,7 @@ import re
+ import shutil
+ import subprocess
+ 
++import ralph_contain as contain
+ import status
+ from ralph_ledger import LEDGER_FILE
+ from ralph_common import (FILE_TOKEN_CAP, LOG_FILE, ROUND_FILE,
+@@ -97,7 +98,7 @@ def smoke_run(workspace, entry, seconds=6):
+     env["SDL_AUDIODRIVER"] = "dummy"
+     env["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
+     try:
+-        proc = subprocess.Popen(
++        proc, job = contain.start(
+             [find_project_python(workspace), os.path.basename(entry)],
+             cwd=os.path.dirname(entry) or workspace, env=env,
+             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+@@ -108,9 +109,10 @@ def smoke_run(workspace, entry, seconds=6):
+     try:
+         out, _ = proc.communicate(timeout=seconds)
+     except subprocess.TimeoutExpired:
+-        proc.kill()
+-        proc.communicate()
++        contain.stop(proc, job)      # it and anything it started, before draining
+         return True, ""
++    finally:
++        contain.finish(job)
+     # A clean exit with nothing printed is healthy too. Failing it (tried
+     # 2026-09-24) flags every `if __name__ == "__main__": doctest.testmod()`
+     # or quiet batch script as crashing on startup, and rolls back each round.
+@@ -198,7 +200,7 @@ def import_check(workspace, files, seconds=20):
+     for folder, paths in by_folder.items():
+         names = {os.path.splitext(os.path.basename(p))[0]: p for p in paths}
+         try:
+-            proc = subprocess.run([python, "-c", IMPORT_PROBE] + list(names),
++            proc = contain.run([python, "-c", IMPORT_PROBE] + list(names),
+                                   cwd=folder, env=_import_env(), capture_output=True,
+                                   text=True, timeout=seconds + 5 * len(names),
+                                   encoding="utf-8", errors="replace")
+@@ -224,7 +226,7 @@ def _import_each(python, folder, paths, seconds):
+     for path in paths:
+         name = os.path.splitext(os.path.basename(path))[0]
+         try:
+-            proc = subprocess.run([python, "-c", "import %s" % name],
++            proc = contain.run([python, "-c", "import %s" % name],
+                                   cwd=folder, env=_import_env(),
+                                   capture_output=True, text=True, timeout=seconds,
+                                   encoding="utf-8", errors="replace")
+@@ -278,7 +280,7 @@ def test_check(workspace, seconds=240):
+     if not names:
+         return []
+     try:
+-        proc = subprocess.run([find_project_python(workspace), "-m", "unittest", "discover",
++        proc = contain.run([find_project_python(workspace), "-m", "unittest", "discover",
+                                "-s", ".", "-p", "test_*.py", "-q"],
+                               cwd=workspace, capture_output=True, text=True, timeout=seconds,
+                               encoding="utf-8", errors="replace", env=_import_env())
+@@ -363,7 +365,7 @@ def explain_failure(workspace, line, seconds=60):
+     if not test_id or not os.path.isfile(EXPLAIN):
+         return ""
+     try:
+-        proc = subprocess.run([find_project_python(workspace), EXPLAIN, test_id],
++        proc = contain.run([find_project_python(workspace), EXPLAIN, test_id],
+                               cwd=workspace, capture_output=True, text=True,
+                               timeout=min(seconds, 60), encoding="utf-8", errors="replace",
+                               env=_import_env())
+diff --git a/ralph_contain.py b/ralph_contain.py
+new file mode 100644
+index 0000000..6b0557a
+--- /dev/null
++++ b/ralph_contain.py
+@@ -0,0 +1,145 @@
++"""Run the code the model wrote -- tests, imports, a start -- inside limits.
++
++The loop never runs a command the model suggests, but every check runs the
++code it writes, with the operator's account and all the machine's memory. On
++this machine memory is what runs out, and when it does Windows kills whatever
++asks next: the engine, an agent, Orthros. A test that allocates without end
++should fail, not take the machine with it (ORTHROSCODE-IMPROVEMENTS.md, 15).
++
++On Windows each check gets a Job Object of its own: a cap on the memory all
++its processes may commit together, a cap on how many there may be, and
++everything in it killed when the check is over -- a test that leaves a server
++running leaves nothing. The job is made before the process starts, so the
++gap before it is in the job is as short as it can be without starting it
++suspended (a venv's python.exe is a launcher that starts the real one).
++Elsewhere each check gets a process group of its own, killed whole on a
++timeout. If a job cannot be made, the check runs as before.
++"""
++
++import ctypes
++import os
++import signal
++import subprocess
++
++from ralph_common import _env_int
++
++CHECK_MEMORY_MB = _env_int("LC_CHECK_MEMORY_MB", 4096, floor=0)
++CHECK_PROCESSES = 32
++DRAIN_SECONDS = 10          # after a kill, how long to wait for the pipes to close
++
++JOB_OBJECT_LIMIT_ACTIVE_PROCESS = 0x00000008
++JOB_OBJECT_LIMIT_JOB_MEMORY = 0x00000200
++
++
++def _limited_job(memory_mb, processes):
++    """A Windows job with the limits, or None. Never raises."""
++    if os.name != "nt" or memory_mb <= 0:
++        return None
++    try:
++        from supervisor_win import (JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
++                                    JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
++                                    JobObjectExtendedLimitInformation, kernel32)
++        job = kernel32.CreateJobObjectW(None, None)
++        if not job:
++            return None
++        info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
++        info.BasicLimitInformation.LimitFlags = (JOB_OBJECT_LIMIT_JOB_MEMORY
++                                                 | JOB_OBJECT_LIMIT_ACTIVE_PROCESS
++                                                 | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)
++        info.BasicLimitInformation.ActiveProcessLimit = processes
++        info.JobMemoryLimit = memory_mb * 1024 * 1024
++        if not kernel32.SetInformationJobObject(job, JobObjectExtendedLimitInformation,
++                                                ctypes.byref(info), ctypes.sizeof(info)):
++            kernel32.CloseHandle(job)
++            return None
++        return job
++    except Exception:
++        return None
++
++
++def _assign(job, proc):
++    try:
++        from supervisor_win import kernel32
++        handle = getattr(proc, "_handle", None)
++        return bool(handle) and bool(kernel32.AssignProcessToJobObject(job, int(handle)))
++    except Exception:
++        return False
++
++
++def _close(job):
++    try:
++        from supervisor_win import kernel32
++        kernel32.CloseHandle(job)          # KILL_ON_JOB_CLOSE: whatever is left goes
++    except Exception:
++        pass
++
++
++def _terminate(job):
++    try:
++        from supervisor_win import kernel32
++        kernel32.TerminateJobObject(job, 1)
++    except Exception:
++        pass
++
++
++def start(cmd, memory_mb=None, **kwargs):
++    """subprocess.Popen, inside a limited job where there is one. Returns (proc, job)."""
++    job = _limited_job(CHECK_MEMORY_MB if memory_mb is None else memory_mb, CHECK_PROCESSES)
++    if os.name != "nt":
++        kwargs.setdefault("start_new_session", True)    # its own group, to kill whole
++    try:
++        proc = subprocess.Popen(cmd, **kwargs)
++    except Exception:
++        if job is not None:
++            _close(job)
++        raise
++    if job is not None and not _assign(job, proc):
++        _close(job)
++        job = None
++    return proc, job
++
++
++def stop(proc, job):
++    """Kill the check and everything it started, then let the pipes drain."""
++    if job is not None:
++        _terminate(job)
++    elif os.name != "nt":
++        try:
++            os.killpg(proc.pid, signal.SIGKILL)
++        except OSError:
++            pass
++    try:
++        proc.kill()
++    except OSError:
++        pass
++    try:
++        proc.communicate(timeout=DRAIN_SECONDS)
++    except (subprocess.TimeoutExpired, ValueError, OSError):
++        pass             # something outside our reach still holds a pipe: go on
++
++
++def finish(job):
++    if job is not None:
++        _close(job)
++
++
++def run(cmd, timeout=None, memory_mb=None, **kwargs):
++    """subprocess.run(cmd, capture_output=True, ...) inside the limits.
++
++    Same result, same TimeoutExpired; on a timeout everything the check
++    started is killed first, so a leftover child holding the output pipe
++    cannot keep the loop waiting.
++    """
++    kwargs.setdefault("stdout", subprocess.PIPE)
++    kwargs.setdefault("stderr", subprocess.PIPE)
++    kwargs.pop("capture_output", None)
++    proc, job = start(cmd, memory_mb=memory_mb, **kwargs)
++    try:
++        try:
++            out, err = proc.communicate(timeout=timeout)
++        except subprocess.TimeoutExpired:
++            stop(proc, job)
++            raise
++        return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
++    finally:
++        finish(job)
+diff --git a/ralph_testfirst.py b/ralph_testfirst.py
+index 882bf8b..61a282d 100644
+--- a/ralph_testfirst.py
++++ b/ralph_testfirst.py
+@@ -26,6 +26,7 @@ import os
+ import re
+ import subprocess
+ 
++import ralph_contain as contain
+ from ralph_checks import _import_env, code_fingerprint, find_project_python
+ from ralph_common import _env_flag, _env_int, read_text, write_text
+ 
+@@ -141,7 +142,7 @@ def test_ids(tests):
+ def run_one_test(workspace, test_id, seconds=120):
+     """('passed' | 'failed' | 'error', output) for one unittest id."""
+     try:
+-        proc = subprocess.run([find_project_python(workspace), "-m", "unittest", "-q", test_id],
++        proc = contain.run([find_project_python(workspace), "-m", "unittest", "-q", test_id],
+                               cwd=workspace, capture_output=True, text=True, timeout=seconds,
+                               encoding="utf-8", errors="replace", env=_import_env())
+     except subprocess.TimeoutExpired:
+@@ -212,6 +213,12 @@ SETTLED_BY_TEST = ("\nSettled by execution: the item's own test ({tests}) was wr
+                    "it works.\n")
+ 
+ 
++TEST_STILL_FAILS = ("\nNot settled: the item's own test ({tests}) still fails after this change "
++                    "-- {failure}. The test is not part of the diff. Keep the change only if "
++                    "it is a sound step towards passing it; reject one that is wrong, or that "
++                    "only looks finished.\n")
++
++
+ class TestFirstMixin:
+     """Part of Session: the test round, and the code rounds after it.
+ 
+@@ -279,8 +286,11 @@ class TestFirstMixin:
+             put_files(self.workspace, {n: after for n, (_, after) in pending["files"].items()})
+             return broken
+         self.test_state = "fails"
+-        self.review_note = ""           # it does not pass: nothing is settled
+         self.test_failure = " ".join(" ".join(m.split()) for w, m in broken if w == "tests")
++        # Nothing is settled: the reviewer is told so, and that such a change
++        # stays only as a sound step towards passing it.
++        self.review_note = TEST_STILL_FAILS.format(
++            tests=", ".join("`%s`" % t for t in pending["ids"]), failure=self.test_failure[:300])
+         return []
+ 
+     def test_target(self, task):
+diff --git a/ralph_tools.py b/ralph_tools.py
+index 48721d3..a6b8756 100644
+--- a/ralph_tools.py
++++ b/ralph_tools.py
+@@ -22,6 +22,8 @@ import re
+ import subprocess
+ import time
+ 
++import ralph_contain as contain
++
+ from ralph_common import DIGEST_PARTS, RESEARCH_ASK, RESEARCH_FILE, read_text, say, write_text
+ from ralph_digest import DIGEST_ASK, digest, inside, parse_request
+ 
+@@ -158,7 +160,7 @@ def outline_file(workspace, filename):
+ def library_docs(workspace, name, python, lines=DOCS_LINES):
+     """`pydoc` for an installed module or name, trimmed. Offline, no model."""
+     try:
+-        proc = subprocess.run([python, "-m", "pydoc", name], cwd=workspace,
++        proc = contain.run([python, "-m", "pydoc", name], cwd=workspace,
+                               capture_output=True, text=True, timeout=60,
+                               encoding="utf-8", errors="replace")
+     except (OSError, subprocess.TimeoutExpired) as exc:
+@@ -180,7 +182,7 @@ def run_tests(workspace, module, python):
+     if not module.split(".")[-1].startswith("test_") or not os.path.isfile(path):
+         return "(no test file %s.py in this folder)" % module.replace(".", "/")
+     try:
+-        proc = subprocess.run(
++        proc = contain.run(
+             [python, "-m", "unittest", module, "-v"],
+             cwd=workspace,
+             capture_output=True, text=True, timeout=60,
+diff --git a/test_ralph_checks.py b/test_ralph_checks.py
+index ac84e53..7029ac3 100644
+--- a/test_ralph_checks.py
++++ b/test_ralph_checks.py
+@@ -71,7 +71,7 @@ class TestImportCheckSingleCall(unittest.TestCase):
+                 args=[], returncode=0,
+                 stdout='@@IMPORTS@@{}\n', stderr="")
+ 
+-            with mock.patch("ralph_checks.subprocess.run", return_value=fake_result) as mock_run:
++            with mock.patch("ralph_checks.contain.run", return_value=fake_result) as mock_run:
+                 ralph_checks.import_check(tmp, files)
+ 
+             self.assertEqual(mock_run.call_count, 1,
+diff --git a/test_ralph_contain.py b/test_ralph_contain.py
+new file mode 100644
+index 0000000..331607f
+--- /dev/null
++++ b/test_ralph_contain.py
+@@ -0,0 +1,57 @@
++"""Checks run the model's code inside limits; the same results without them."""
++
++import os
++import subprocess
++import sys
++import unittest
++from unittest import mock
++
++import ralph_contain as contain
++
++
++class TestRun(unittest.TestCase):
++    def test_same_result_as_subprocess_run(self):
++        proc = contain.run([sys.executable, "-c", "import sys; print('out'); "
++                            "print('err', file=sys.stderr); sys.exit(3)"],
++                           text=True, capture_output=True, timeout=30)
++        self.assertEqual((proc.returncode, proc.stdout.strip(), proc.stderr.strip()),
++                         (3, "out", "err"))
++
++    def test_a_timeout_raises_as_before(self):
++        with self.assertRaises(subprocess.TimeoutExpired):
++            contain.run([sys.executable, "-c", "import time; time.sleep(30)"], timeout=0.5)
++
++    def test_a_timeout_does_not_wait_for_a_child_left_holding_the_pipe(self):
++        import time
++        started = time.time()
++        with self.assertRaises(subprocess.TimeoutExpired):
++            contain.run([sys.executable, "-c",
++                         "import subprocess, sys, time; "
++                         "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(20)']); "
++                         "time.sleep(20)"], timeout=1)
++        self.assertLess(time.time() - started, 8)
++
++    def test_a_bad_memory_setting_falls_back(self):
++        import importlib
++        with mock.patch.dict(os.environ, {"LC_CHECK_MEMORY_MB": "4G"}):
++            self.assertEqual(importlib.reload(contain).CHECK_MEMORY_MB, 4096)
++        importlib.reload(contain)
++
++    def test_no_limits_off_windows_or_when_they_cannot_be_set(self):
++        if os.name != "nt":
++            self.assertIsNone(contain._limited_job(4096, 8))
++        with mock.patch.object(contain, "_limited_job", return_value=None):
++            proc, job = contain.start([sys.executable, "-c", "pass"])
++            proc.wait()
++            self.assertIsNone(job)
++
++    @unittest.skipUnless(os.name == "nt", "Windows job objects")
++    def test_a_test_that_eats_memory_is_stopped(self):
++        proc = contain.run([sys.executable, "-c", "x = bytearray(600 * 1024 * 1024)"],
++                           memory_mb=256, text=True, capture_output=True, timeout=60)
++        self.assertNotEqual(proc.returncode, 0)
++        self.assertIn("MemoryError", proc.stderr)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/test_whole_session.py b/test_whole_session.py
+new file mode 100644
+index 0000000..8da27cc
+--- /dev/null
++++ b/test_whole_session.py
+@@ -0,0 +1,165 @@
++"""A whole session through every part at once, against a scripted aider.
++
++Each part has its own tests; this is the one that says they work together:
++test rounds and code rounds, a code round that is wrong first, a reviewer
++citing a fault that is not there, the ladder, the ledger and the examples.
++Strict: a bug in the loop fails it instead of being survived.
++"""
++
++import contextlib
++import io
++import json
++import os
++import shutil
++import subprocess
++import sys
++import tempfile
++import unittest
++from unittest import mock
++
++import ralph_ledger
++import status
++from ralph_common import read_text, write_text
++from ralph_session import Session
++
++os.environ.setdefault("LC_RALPH_RAISE", "1")
++
++ITEMS = """# Tasks
++
++- [ ] In `double` (calc.py), return twice the number. Done when: `double(2)` returns 4.
++- [ ] In `triple` (calc.py), return three times the number. Done when: `triple(2)` returns 6.
++- [ ] In `halve` (calc.py), return half the number. Done when: `halve(8)` returns 4.
++"""
++
++# Test rounds write a test for the function the item names. Code rounds write
++# it -- wrongly the first time for `triple`, right after.
++FAKE = r'''import json, os, re, sys
++args = sys.argv[1:]
++message = open(args[args.index("--message-file") + 1], encoding="utf-8").read()
++notes = [args[i + 1] for i, a in enumerate(args) if a == "--file"][0]
++here = os.path.dirname(notes)
++body = open(notes, encoding="utf-8").read()
++item = re.search(r"^- \[ \] In `(\w+)`", body, re.M)
++log = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rounds.jsonl")
++name = item.group(1) if item else ""
++factor = {"double": 2, "triple": 3, "halve": 0.5}.get(name)
++calc = os.path.join(here, "calc.py")
++kind = ("test" if "THIS ROUND: THE TEST ONLY" in message else
++        "refill" if not item else "code")
++tries = sum(1 for l in open(log) if json.loads(l)["name"] == name and json.loads(l)["kind"] == "code") \
++    if os.path.exists(log) else 0
++open(log, "a").write(json.dumps({"kind": kind, "name": name,
++                                 "examples": "How similar items were done here" in message,
++                                 "architect": "--architect" in args}) + "\n")
++if kind == "test":
++    path = os.path.join(here, "test_calc.py")
++    head = "" if os.path.exists(path) else "import unittest\nimport calc\n\n\nclass TestCalc(unittest.TestCase):\n"
++    arg = 8 if name == "halve" else 2
++    open(path, "a").write(head + "    def test_%s(self):\n        self.assertEqual(calc.%s(%d), %s)\n"
++                          % (name, name, arg, int(arg * factor)))
++elif kind == "code":
++    wrong = name == "triple" and tries == 0
++    code = "\n\ndef %s(x):\n    return %s\n" % (name, "x" if wrong else "x * %s" % factor
++                                             if factor >= 1 else "x // 2")
++    source = open(calc).read()
++    old = re.search(r"\n\ndef %s\(x\):\n    return .*\n" % name, source)
++    # As a model does: the function again, not a second copy of it.
++    open(calc, "w").write(source.replace(old.group(0), code) if old else source + code)
++    open(notes, "w").write(body.replace("- [ ] In `%s`" % name, "- [x] In `%s`" % name, 1))
++print("Applied edit to calc.py")
++print("Tokens: 1k sent, 100 received.")
++'''
++
++
++def git(ws, *args):
++    return subprocess.run(["git", "-C", ws, "-c", "user.name=t", "-c", "user.email=t@t"]
++                          + list(args), capture_output=True, text=True)
++
++
++class TestWholeSession(unittest.TestCase):
++    def setUp(self):
++        self.dir = tempfile.mkdtemp()
++        self.ws = os.path.join(self.dir, "ws")
++        os.makedirs(self.ws)
++        self.fake = os.path.join(self.dir, "fake.py")
++        write_text(self.fake, FAKE)
++        self.notes = os.path.join(self.ws, "tasks.md")
++        write_text(self.notes, ITEMS)
++        write_text(os.path.join(self.ws, "calc.py"), '"""Arithmetic."""\n')
++        git(self.ws, "init", "-q")
++        git(self.ws, "add", "-A")
++        git(self.ws, "commit", "-qm", "base")
++        status._path = None
++        self.patches = [mock.patch(m + ".find_project_python", return_value=sys.executable)
++                        for m in ("ralph_checks", "ralph_testfirst")]
++        for p in self.patches:
++            p.start()
++
++    def tearDown(self):
++        for p in self.patches:
++            p.stop()
++        status._path = None
++        shutil.rmtree(self.dir, ignore_errors=True)
++
++    def test_three_items_through_every_part(self):
++        reviewed = []
++
++        def review(task, diff, context="", notes=(), faults=None):
++            reviewed.append((task, context))
++            if len(reviewed) == 1:
++                # The first change is sound; the reviewer claims a name is
++                # undefined that the file defines. The claim must be dropped.
++                faults.append({"kind": "undefined-name", "line": "def double(x):",
++                               "why": "`double` is not defined"})
++                return "reject", "double is undefined"
++            return "accept", "fine"
++
++        files = lambda: sorted(os.path.join(self.ws, n) for n in os.listdir(self.ws)  # noqa
++                               if n.endswith(".py"))
++        s = Session([sys.executable, self.fake, "--edit-format", "diff"], self.ws,
++                    os.environ.copy(), minutes=4, single_shot=False, edit_files=files(),
++                    entry_hint="none", iteration_timeout=30, review=review, list_files=files,
++                    rollback=lambda: git(self.ws, "checkout", "--", ".").returncode == 0,
++                    commit=lambda m: (git(self.ws, "add", "-A"), git(self.ws, "commit", "-qm", m))
++                    and True)
++        with contextlib.redirect_stdout(io.StringIO()):
++            s.run()
++        log = read_text(os.path.join(self.ws, ".localcoder-ralph.log"))
++        rounds = [json.loads(l) for l in read_text(os.path.join(self.dir, "rounds.jsonl"))
++                  .splitlines()]
++        notes = read_text(self.notes)
++
++        self.assertNotIn("unexpected error", log)
++        # Every item done, each by a test round and then code that passes it.
++        for name in ("double", "triple", "halve"):
++            self.assertIn("- [x] In `%s`" % name, notes)
++            kinds = [r["kind"] for r in rounds if r["name"] == name]
++            self.assertEqual(kinds[0], "test", name)
++            self.assertIn("code", kinds, name)
++        # The false claim was dropped, and the change kept.
++        self.assertIn("reviewer's claim dropped", log)
++        # triple's first code was wrong: the test caught it, and the ladder
++        # tried the next one differently.
++        triple = [r for r in rounds if r["name"] == "triple" and r["kind"] == "code"]
++        self.assertGreaterEqual(len(triple), 2)
++        self.assertTrue(triple[1]["architect"])
++        told = [c for t, c in reviewed if "`triple`" in t]
++        self.assertIn("Not settled: the item's own test", told[0])
++        self.assertIn("Settled by execution", told[-1])
++        # The history holds each test with the code that passes it.
++        committed_tests = git(self.ws, "show", "HEAD:test_calc.py").stdout
++        for name in ("double", "triple", "halve"):
++            self.assertIn("def test_%s" % name, committed_tests)
++        self.assertEqual(subprocess.run([sys.executable, "-m", "unittest", "-q", "test_calc"],
++                                        cwd=self.ws, capture_output=True).returncode, 0)
++        # Every kept round is remembered for later examples (retrieval itself,
++        # which needs more history than three items to clear its bar, is
++        # tested in test_ralph_memory).
++        self.assertGreaterEqual(len(s.memory.items), 3)
++        # And the ledger has every round.
++        went = dict(ralph_ledger.outcomes(os.path.join(self.ws, ralph_ledger.LEDGER_FILE), 0))
++        self.assertGreaterEqual(went.get("kept", 0), 3)
++
++
++if __name__ == "__main__":
++    unittest.main()

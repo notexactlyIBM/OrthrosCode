@@ -104,6 +104,24 @@ def resident(lms):
     return [str(e.get("identifier") or "") for e in entries if isinstance(e, dict)]
 
 
+class DualStack(http.server.ThreadingHTTPServer):
+    """IPv6 and IPv4 on one socket. A machine that finds this one by name can be
+    handed its IPv6 address first, and gets nowhere on IPv4 alone (2026-09-27)."""
+    address_family = socket.AF_INET6
+
+    def server_bind(self):
+        self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        super().server_bind()
+
+
+def every_address(port, handler):
+    """A server on all of this machine's addresses; IPv4's alone where it has no IPv6."""
+    try:
+        return DualStack(("::", port), handler)
+    except OSError:
+        return http.server.ThreadingHTTPServer(("0.0.0.0", port), handler)
+
+
 def ask(upstream, model, messages, max_tokens=700, timeout=180):
     """One chat completion from a model LM Studio has up: its answer, or ''. The model
     thinks first, out of the same budget, so it is asked to think little and given room."""
@@ -286,11 +304,12 @@ class Service:
         """Open or close the port to the network. Cheap to call every time round."""
         if on and not self.server:
             port = self.port()
-            # Every interface, which is what makes it the network's. The tests
+            # Every address, which is what makes it the network's. The tests
             # set serve_host to 127.0.0.1: no firewall prompt for a test run.
-            host = self.o.settings.get("serve_host") or "0.0.0.0"
+            host = self.o.settings.get("serve_host")
             try:
-                server = http.server.ThreadingHTTPServer((host, port), self.handler())
+                server = http.server.ThreadingHTTPServer((host, port), self.handler()) \
+                    if host else every_address(port, self.handler())
             except OSError as exc:
                 if not self.listen_error:
                     self.o.event("could not open port %d to the network: %s" % (port, exc), "bad")

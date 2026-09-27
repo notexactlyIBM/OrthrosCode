@@ -32,6 +32,7 @@ import math
 import os
 import random
 import re
+import secrets
 import shutil
 import sqlite3
 import subprocess
@@ -43,6 +44,7 @@ import traceback
 import urllib.parse
 import webbrowser
 
+import orthros_service as service
 import orthros_tune as tune
 import orthros_work as work
 
@@ -101,6 +103,15 @@ DEFAULTS = {
     # Fit context and timeouts to the machine, from what each turn measures
     # (see orthros_tune.py). The agents' config.cmd holds the starting point.
     "auto_tune": True,
+    # Serve mode (orthros_service.py): the port other machines use, the key
+    # they must send (made on first run), how many requests may be in hand at
+    # once before more are turned away to their next provider, how many turns
+    # a tool gets before it is given up, and how long one run of it may take.
+    "serve_port": 8777,
+    "serve_key": "",
+    "serve_queue": 2,
+    "tool_turns": 4,
+    "tool_seconds": 120,
 }
 # Files an agent may edit in a task or a practice: any project, not just Python.
 PROJECT_FILES = "*.py;*.js;*.mjs;*.cjs;*.ts;*.tsx;*.jsx;*.html;*.css"
@@ -201,7 +212,7 @@ def notes_file(folder):
 OPEN_ITEM = re.compile(r"^[ \t]*[-*][ \t]*\[ \][ \t]*(.+?)[ \t]*$", re.MULTILINE)
 DONE_ITEM = re.compile(r"^[ \t]*[-*][ \t]*\[[xX]\][ \t]*(.+?)[ \t]*$", re.MULTILINE)
 PARKED_ITEM = re.compile(r"^[ \t]*[-*][ \t]*\[!\]", re.MULTILINE)
-TASKS_HEADING = re.compile(r"^##[ \t]+Tasks[ \t]*\n", re.MULTILINE)
+add_first = work.add_first             # one open item at the top of a task list
 
 
 def park_item(path, item, reason):
@@ -213,30 +224,6 @@ def park_item(path, item, reason):
         return False
     body = (body[:match.start()] + match.group(1) + "[!]" + match.group(2)
             + "\n  - *Parked by Orthros*: " + reason + body[match.end():])
-    with open(path, "w", encoding="utf-8") as handle:
-        handle.write(body)
-    return True
-
-
-def add_first(path, text):
-    """Put one open item at the top of the `## Tasks` section -- the next round takes it.
-
-    The end of the list when there is no such heading. Nothing when there is
-    no task list at all: an agent that keeps none is not one to steer.
-    """
-    body = read_text(path)
-    if not body:
-        return False
-    line = "- [ ] %s\n" % " ".join(text.split())
-    match = TASKS_HEADING.search(body)
-    if match:
-        spot = match.end()
-        while body[spot:spot + 1] == "\n":
-            spot += 1
-        body = body[:spot] + line + ("\n" if body[spot:spot + 1] not in ("-", "*") else "") \
-            + body[spot:]
-    else:
-        body = body.rstrip() + "\n\n" + line
     with open(path, "w", encoding="utf-8") as handle:
         handle.write(body)
     return True
@@ -532,27 +519,9 @@ def score_totals(scores):
 # --------------------------------------------------------------------------
 
 # The harness's own settings: Orthros's and LocalCoder's.
-HARNESS = ("ORTHROS_", "LC_")
 FAILING = re.compile(r"^(?:FAIL|ERROR): (\w+) \(([\w.]+)\)", re.M)
 NOT_A_TEST = ("setUpClass", "tearDownClass", "setUpModule", "tearDownModule")
-
-
-def check_env(quick=False):
-    """The environment an agent's code is checked in: this machine's, with none
-    of the harness's settings.
-
-    Built the same way for every check, so what --doctor passes the pre-launch
-    check passes too. On 2026-09-26 the pre-launch check ran in a turn's own
-    environment, which names Orthros's ledger: the ledger's tests wrote into
-    it, failed, and stopped Orthros on A's baseline -- while --doctor, without
-    that environment, had said all clear. Dropped by prefix, not by name, so
-    the next setting a turn needs cannot leak in either.
-    """
-    env = {k: v for k, v in os.environ.items() if not k.upper().startswith(HARNESS)}
-    env.update(PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
-    if quick:
-        env["LC_QUICK_TESTS"] = "1"      # the suite the check after each round runs
-    return env
+check_env = work.check_env             # the one environment the model's code runs in
 
 
 def rerun_ids(output):
@@ -636,6 +605,10 @@ class Orthros:
         self.wake = threading.Event()
         self.settings = dict(DEFAULTS)
         self.settings.update(read_json(self.settings_path, {}) or {})
+        if not self.settings.get("serve_key"):
+            # What other machines must send in serve mode: its tools run code here.
+            self.settings["serve_key"] = secrets.token_urlsafe(24)
+            write_json(self.settings_path, self.settings)
         if not os.path.isfile(self.settings_path):
             write_json(self.settings_path, self.settings)
         self.state = read_json(self.state_path) or {}
@@ -679,6 +652,8 @@ class Orthros:
         self.gpu = None                      # the latest nvidia-smi reading, for the page
         self.tuner = tune.Tuner(root)
         self.gpu_history = []
+        self.service = service.Service(self)
+        self.serve_failures = 0              # loads of the model to serve, failed in a row
 
     # ---------------------------------------------------------------- state
 
@@ -776,6 +751,22 @@ class Orthros:
     def python_for(self, name):
         path = os.path.join(self.folders[name], "venv", "Scripts", "python.exe")
         return path if os.path.isfile(path) else sys.executable
+
+    def engine(self):
+        """How the agents load the model -- their config.cmd, tuned -- for serve mode
+        to load it the same way."""
+        env = self.agent_env("A")
+
+        def number(key, default):
+            try:
+                return int(env.get(key) or default)
+            except ValueError:
+                return default
+        return {"lms": self.find_lms("A"), "model": env.get("LC_MODEL_KEY", ""),
+                "context": number("LC_CONTEXT", 32768), "gpu": env.get("LC_GPU") or "max",
+                "parallel": number("LC_PARALLEL", 1), "port": number("LC_PORT", 1234),
+                "speculative": (env.get("LC_SPECULATIVE") or "1").lower() not in
+                ("0", "no", "false", "off")}
 
     # ---------------------------------------------------------------- one turn
 
@@ -1278,7 +1269,7 @@ class Orthros:
                 if not self.same_code(name, result["own"], me["scored_good"]):
                     me["since_eval"] += 1
             else:
-                if self.state.get("mode") != "task" and self.settings.get("prove_by_score") \
+                if self.state.get("mode") == "self" and self.settings.get("prove_by_score") \
                         and work.eval_exercises() and result.get("kind", "self") == "self":
                     me["since_eval"] += 1          # towards the first, baseline score
                 self.carry_over(name)
@@ -1332,7 +1323,11 @@ class Orthros:
         for folder in self.folders.values():
             git(folder, "gc", "--auto", "--quiet", timeout=600)   # weeks of commits add up
         limit = int(self.settings.get("pause_after_idle") or 0)
-        if limit and self.state["idle_streak"] >= limit:
+        if self.state.get("mode") == "serve":
+            # A tool that will not come right runs out of turns and is given up;
+            # the network goes on being served.
+            self.state["idle_streak"] = 0
+        elif limit and self.state["idle_streak"] >= limit:
             self.pause(loud=True, message="%d sessions in a row kept nothing. Paused -- look at the logs "
                        "before starting again." % self.state["idle_streak"])
 
@@ -1615,7 +1610,7 @@ class Orthros:
 
     def score_gated(self, name):
         """Do this agent's changes wait for a held-out score before carrying over?"""
-        return bool(self.settings.get("prove_by_score") and self.state.get("mode") != "task"
+        return bool(self.settings.get("prove_by_score") and self.state.get("mode") == "self"
                     and work.eval_exercises() and self.agent(name).get("scored_good"))
 
     def same_code(self, name, a, b):
@@ -1635,7 +1630,7 @@ class Orthros:
             return self.state["evaluating"]
         me = self.agent(name)
         exercises = work.eval_exercises()[:max(1, int(self.settings.get("eval_count") or 8))]
-        if (not self.settings.get("prove_by_score") or self.state.get("mode") == "task"
+        if (not self.settings.get("prove_by_score") or self.state.get("mode") != "self"
                 or not work.eval_exercises()
                 or me["since_eval"] < max(1, int(self.settings.get("eval_every") or 4))):
             return None
@@ -1806,6 +1801,10 @@ class Orthros:
 
     def loop(self):
         while True:
+            serving = self.state.get("mode") == "serve" and not self.state["paused"]
+            self.service.listen(serving)     # the port is open only while serving
+            if not serving and self.service.ready:
+                self.service.engine_down()   # out of serve mode: the card is free
             if self.state["paused"]:
                 if self.phase not in ("error",):
                     self.set_phase("paused" if self.state["events"] else "idle", self.message
@@ -1826,7 +1825,18 @@ class Orthros:
                 # Read after adopting: judging an adopted turn decides who is next,
                 # and reading it before meant the same agent ran twice in a row.
                 name = self.state["next"]
-                ev = self.maybe_start_eval(name)
+                build = None
+                if self.state.get("mode") == "serve":
+                    # A tool someone asked for is built first; the rest of the
+                    # time the card serves. One card, so not both at once.
+                    tool = self.service.next_build()
+                    if not tool:
+                        self.keep_serving()
+                        continue
+                    self.service.refuse("%s is building the tool %s" % (name, tool["key"]), 900)
+                    self.service.engine_down()
+                    build = {"kind": "task", "folder": tool["folder"], "label": tool["key"]}
+                ev = None if build else self.maybe_start_eval(name)
                 if ev:
                     name = ev["agent"]
                 if not self.memory_is_free_enough(name) or not self.cleared_for_launch(name):
@@ -1840,7 +1850,7 @@ class Orthros:
                     self.save()
                     continue
                 self.maybe_look()            # cheap unless there is a reason to look
-                result = self.run_turn(name, self.eval_work(ev) if ev else None)
+                result = self.run_turn(name, build or (self.eval_work(ev) if ev else None))
                 if self.stop_mode and not result["launched"]:
                     # Stopped by hand before it got going: not the code's fault.
                     self.event("%s was stopped before it started working" % name)
@@ -1855,6 +1865,8 @@ class Orthros:
                     self.field_report(result)
                     self.judge(result)
                     self.tune_after(result)
+                    if build:
+                        self.service.after_build(build["label"], result)
             except Exception as exc:
                 self.event("Orthros error: %s" % exc, "bad")
                 traceback.print_exc()
@@ -1866,9 +1878,43 @@ class Orthros:
                           "force": "Stopped by force."}.get(self.stop_mode, "Paused.")
                 self.stop_mode = ""
                 self.pause(reason)
-            elif not self.state["paused"]:
+            elif not self.state["paused"] and self.state.get("mode") != "serve":
                 self.set_phase("handover", "starting %s" % self.state["next"])
                 self.event("handing over to %s" % self.state["next"], "handover")
+
+    def keep_serving(self):
+        """Serve mode with no tool to build: the model loaded, the network answered."""
+        svc = self.service
+        if not svc.watch():
+            if not self.memory_is_free_enough("the model to serve"):
+                return
+            svc.refuse("loading the model", 120)
+            self.set_phase("handover", "loading the model to serve the network")
+            why = svc.engine_up()
+            if why:
+                return self.serve_failed(why)
+            self.serve_failures = 0
+            self.event("serving %s to the network at %s" % (svc.model, svc.address()), "good")
+        svc.serving()
+        self.set_phase("serving", "serving the network at %s" % svc.address())
+        self.wake.wait(5)
+        self.wake.clear()
+
+    def serve_failed(self, why):
+        """The model would not load to serve. The machine's fault, as when an agent
+        cannot start: wait and try again, longer each time, then stop and say so."""
+        waits = list(self.settings.get("env_retry_minutes") or [])
+        self.serve_failures += 1
+        self.service.refuse("the model would not load: %s" % why, 300)
+        if self.serve_failures <= len(waits):
+            wait = int(waits[self.serve_failures - 1])
+            self.backoff_until = now() + wait * 60
+            self.event("could not load the model to serve: %s; trying again in %d minute(s)"
+                       % (why, wait), "bad")
+        else:
+            self.serve_failures = 0
+            self.pause("Could not load the model to serve the network, %d times: %s"
+                       % (len(waits) + 1, why), error=True)
 
     def finish_orphan(self, running):
         """Judge a turn that finished while Orthros was not running.
@@ -2011,10 +2057,15 @@ class Orthros:
             except OSError:
                 pass
             self.stop_mode = ""
+            self.serve_failures = 0
             self.state["wanted"] = True
             self.save()
-        self.set_phase("handover", "starting %s" % self.state["next"])
-        self.event("Orthros started; %s goes first" % self.state["next"], "start")
+        if self.state.get("mode") == "serve":
+            self.set_phase("handover", "starting to serve the network")
+            self.event("Orthros started; serving the network", "start")
+        else:
+            self.set_phase("handover", "starting %s" % self.state["next"])
+            self.event("Orthros started; %s goes first" % self.state["next"], "start")
         self.wake.set()
         return "ok"
 
@@ -2082,9 +2133,9 @@ class Orthros:
     # ---------------------------------------------------------------- modes
 
     def set_mode(self, mode, task=None):
-        """Switch between improving itself and working a task. Takes effect
-        at the next handover; the turn in flight finishes as it began."""
-        if mode not in ("self", "task"):
+        """Switch between improving itself, working a task and serving the network.
+        Takes effect at the next handover; the turn in flight finishes as it began."""
+        if mode not in ("self", "task", "serve"):
             return "unknown mode"
         if task is not None:
             if task and not work.task_folder(self.root, task):
@@ -2097,8 +2148,8 @@ class Orthros:
             self.state["mode"] = mode
             self.save()
         if changed or task:
-            self.event("mode: %s" % ("working on the task %s" % self.state["task"]
-                                     if mode == "task" else "improving itself"), "start")
+            self.event("mode: %s" % {"self": "improving itself", "serve": "serving the network"}
+                       .get(mode, "working on the task %s" % self.state["task"]), "start")
         self.wake.set()
         return "ok"
 
@@ -2234,6 +2285,11 @@ class Orthros:
             why = (v["message"].splitlines() or [""])[0]
             return "Orthros is paused%s. Press Start to carry on; %s goes next." % (
                 (": " + why) if why else "", v["next"])
+        if v["phase"] == "serving":
+            s = v["service"]
+            return ("Orthros is serving the network at %s: %d requests answered, %d turned "
+                    "away, %s tokens." % (s["urls"][0] if s["urls"] else "?", s["served"],
+                                          s["refused"], "{:,}".format(s["tokens"])))
         return "Orthros is between turns (%s); %s goes next." % (v["message"] or v["phase"],
                                                                 v["next"])
 
@@ -2385,7 +2441,8 @@ class Orthros:
                              "why": self.tuner.data.get("why", []),
                              "auto": bool(self.settings.get("auto_tune", True)),
                              "configured": self.configured()},
-                "planned": {n: self.plan_minutes(n) for n in NAMES}}
+                "planned": {n: self.plan_minutes(n) for n in NAMES},
+                "service": self.service.view()}
 
 
 # --------------------------------------------------------------------------
@@ -2502,7 +2559,7 @@ def make_sandbox():
         git(folder, "init", "-q")
         commit_all(folder, "sim: start")
     with open(os.path.join(root, "orthros.json"), "w") as handle:
-        json.dump(dict(DEFAULTS, session_minutes=2, port=8771), handle)
+        json.dump(dict(DEFAULTS, session_minutes=2, port=8771, serve_port=8778), handle)
     return root
 
 

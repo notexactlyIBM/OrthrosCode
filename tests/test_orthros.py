@@ -413,8 +413,12 @@ class TestFresh(Sandbox):
         self.lines = []
         self.in_step = mock.patch.object(orthros, "repo_in_step", return_value="")
         self.in_step.start()
+        # The real Orthros may be open on this machine while the tests run.
+        self.closed = mock.patch.object(orthros, "port_in_use", return_value=False)
+        self.closed.start()
 
     def tearDown(self):
+        self.closed.stop()
         self.in_step.stop()
         super().tearDown()
 

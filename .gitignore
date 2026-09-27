@@ -30,9 +30,10 @@ __pycache__/
 # Written when Orthros gives up and needs a person; removed on Start.
 ORTHROS-NEEDS-YOU.txt
 
-# Projects the agents work on in task mode, and practice copies of exercises.
-# Each is its own git repository.
+# Projects the agents work on in task mode, tools they build in serve mode,
+# and practice copies of exercises. Each is its own git repository.
 tasks/
+tools/
 practice/
 # Fresh copies of held-out exercises, worked on to score a version.
 evals-runs/

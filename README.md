@@ -84,8 +84,9 @@ The dashboard (http://127.0.0.1:8770) shows who is working and on what, the
 model's raw output, GPU use, held-out scores, and where each agent's rounds
 went in the last day. From it you can:
 
-- switch between **Improve itself** and **Work on a task** (describe what to
-  build; the agents break it into small checkable jobs);
+- switch between **Improve itself**, **Work on a task** (describe what to
+  build; the agents break it into small checkable jobs) and **Serve the
+  network** (below);
 - **Suggest direction** -- your words go to the top of an agent's list;
 - **Ask** how it is going, in plain sentences from Orthros's own records;
 - pause after this turn, stop after this round, or force stop.
@@ -120,6 +121,35 @@ commit and push, then pull and `--fresh`.
 turn, with its scores. `LESSONS.md`: mistakes it keeps making. `git log` in any
 folder: every change. `orthros.log`: what the referee did.
 
+## Serve the network
+
+In this mode the card works for other machines on your network instead: a
+free model for anything that would otherwise pay per token, and tools built
+on request. Pick **Serve the network** and press **Start**. The page shows
+the address and a key; every request must send the key as
+`Authorization: Bearer <key>`, because tools run code on this machine.
+
+- **Inference** -- the OpenAI-compatible API LM Studio speaks, at
+  `http://<this machine>:8777/v1`. Any OpenAI client works: give it that base
+  URL and the key as its API key. Whatever model a request names, it gets the
+  one loaded here.
+- **Tools** -- MCP at `http://<this machine>:8777/mcp`. `build_tool` asks A
+  and B to build a command-line tool in `tools\<name>`, test-first and
+  reviewed, as in task mode; each tool whose tests pass then appears in the
+  tool list, takes one text input and runs here, inside the same limits as
+  the model's other code. For Claude Code:
+  `claude mcp add --transport http orthros http://<this machine>:8777/mcp --header "Authorization: Bearer <key>"`
+
+One card, one job at a time: while a tool is being built, inference answers
+**503** with a `Retry-After`, and so does a full queue. A caller should treat
+that -- or no answer within a few seconds, as when this machine is off -- as
+"use the next provider", and come back after the `Retry-After`.
+
+The first time, Windows asks whether Python may accept connections: allow it
+on private networks. Settings: `serve_port`, `serve_queue` (requests in hand
+before more are turned away), `tool_turns` (turns before a tool is given up)
+and `tool_seconds` (the longest one run of a tool may take).
+
 ## Settings
 
 `orthros.json`, written on first run. The ones worth knowing:
@@ -141,7 +171,9 @@ described in [agent/README.md](agent/README.md).
 ## Safety
 
 - **Local only.** Every model call goes to LM Studio on your machine. The
-  only outbound traffic is the agents' optional web search.
+  only outbound traffic is the agents' optional web search. Serve mode opens
+  one port to your network, for requests that carry its key; LM Studio
+  itself stays on 127.0.0.1.
 - **No shell.** aider may edit files but never runs a command the model
   suggests.
 - **Contained code.** The model's code does run -- that is what tests are.

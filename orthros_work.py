@@ -1,11 +1,13 @@
-"""What a turn works on: the twin's code, a task, or a practice exercise.
+"""What a turn works on: the twin's code, a task, a tool or a practice exercise.
 
-Orthros has two modes. In self-improvement mode each agent works on the
+Orthros has three modes. In self-improvement mode each agent works on the
 other's code, as it always has -- and every few turns one turn is instead a
 practice exercise, scored by tests the agent never sees, so that "better" is
 measured on coding in general and not only on editing itself. In task mode
 both agents take turns on one project in tasks\\<name>, with the same turn
-lengths, handovers and safety nets.
+lengths, handovers and safety nets. In serve mode (orthros_service.py) the
+card serves the network, and the agents take turns only on the tools other
+machines ask for, in tools\\<name>.
 
 Standard library only, like orthros.py.
 """
@@ -64,6 +66,24 @@ Compare the code with the task in RALPH_PROMPT.md. Add items for what is
 missing, what is broken, and what has no test. Then make it better to use.
 """
 
+# A tool is a task with a fixed shape, so that a program on another machine
+# can run it knowing nothing about it but its name and what it is for.
+TOOL_CONTRACT = """
+
+# The tool contract
+
+This is a tool other programs run, so its shape is fixed. `tool.py` is the
+entry point. It is started as `python tool.py` in this folder, with no
+arguments, and is sent its whole input on stdin. It prints its answer to
+stdout, and nothing else goes there, then exits 0. If it cannot answer, it
+prints one line saying why to stderr and exits 1. It never waits for anything
+more and it answers within two minutes.
+
+Its tests run it exactly that way, as a subprocess, and include what an
+adversary would send: nothing, garbage, far too much. It must refuse those
+cleanly -- never hang, never crash.
+"""
+
 IGNORE = ".localcoder*\n.aider*\nvenv/\n__pycache__/\n*.pyc\n*.tmp\n"
 MARKER = ("Looked after by Orthros: the agents commit and roll back here.\n")
 
@@ -96,6 +116,32 @@ def read(path):
         return ""
 
 
+TASKS_HEADING = re.compile(r"^##[ \t]+Tasks[ \t]*\n", re.MULTILINE)
+
+
+def add_first(path, text):
+    """Put one open item at the top of the `## Tasks` section -- the next round takes it.
+
+    The end of the list when there is no such heading. Nothing when there is
+    no task list at all: an agent that keeps none is not one to steer.
+    """
+    body = read(path)
+    if not body:
+        return False
+    line = "- [ ] %s\n" % " ".join(text.split())
+    match = TASKS_HEADING.search(body)
+    if match:
+        spot = match.end()
+        while body[spot:spot + 1] == "\n":
+            spot += 1
+        body = body[:spot] + line + ("\n" if body[spot:spot + 1] not in ("-", "*") else "") \
+            + body[spot:]
+    else:
+        body = body.rstrip() + "\n\n" + line
+    write(path, body)
+    return True
+
+
 def seed(folder, prompt, task_list):
     """Make `folder` a workspace the agents can use: prompt, list, git, marker."""
     os.makedirs(folder, exist_ok=True)
@@ -112,33 +158,35 @@ def seed(folder, prompt, task_list):
 
 # ---------------------------------------------------------------- tasks
 
-def tasks_root(root):
-    return os.path.join(root, "tasks")
+def tasks_root(root, tool=False):
+    """tasks\\, or tools\\ for the tools serve mode builds."""
+    return os.path.join(root, "tools" if tool else "tasks")
 
 
-def create_task(root, name, brief):
-    """A new project in tasks\\<slug>. Returns (slug, error)."""
+def create_task(root, name, brief, tool=False):
+    """A new project in tasks\\<slug>, or a tool in tools\\<slug>. Returns (slug, error)."""
     brief = (brief or "").strip()
     if len(brief) < 10:
         return "", "Say what to build -- a sentence at least."
     key = slug(name or brief[:40])
-    folder = os.path.join(tasks_root(root), key)
+    folder = os.path.join(tasks_root(root, tool), key)
     if os.path.exists(folder):
-        return "", "There is already a task called %s. Pick another name." % key
-    seed(folder, TASK_PROMPT % brief, TASK_LIST % (name or key))
+        return "", "There is already a %s called %s. Pick another name." % (
+            "tool" if tool else "task", key)
+    seed(folder, TASK_PROMPT % (brief + (TOOL_CONTRACT if tool else "")), TASK_LIST % (name or key))
     write(os.path.join(folder, "TASK.md"), "# %s\n\n%s\n" % (name or key, brief))
     return key, ""
 
 
-def task_folder(root, key):
-    folder = os.path.join(tasks_root(root), slug(key))
+def task_folder(root, key, tool=False):
+    folder = os.path.join(tasks_root(root, tool), slug(key))
     return folder if os.path.isdir(folder) else ""
 
 
-def list_tasks(root):
-    """[{key, name, open, done, parked}] for every task folder, newest first."""
+def list_tasks(root, tool=False):
+    """[{key, name, open, done, parked}] for every task (or tool) folder, newest first."""
     out = []
-    base = tasks_root(root)
+    base = tasks_root(root, tool)
     try:
         names = os.listdir(base)
     except OSError:
@@ -222,6 +270,27 @@ def prune_practice(base, agent, keep=KEEP_PRACTICE):
 # agent\, and the referee must not depend on anything they can break.
 SCORE_MEMORY_MB = 4096
 
+HARNESS = ("ORTHROS_", "LC_")
+
+
+def check_env(quick=False):
+    """The environment the model's code runs in: this machine's, with none of
+    the harness's settings. The one definition for every run of it -- the
+    pre-launch check, --doctor, a task's tests, a tool.
+
+    Built the same way for every check, so what --doctor passes the pre-launch
+    check passes too. On 2026-09-26 the pre-launch check ran in a turn's own
+    environment, which names Orthros's ledger: the ledger's tests wrote into
+    it, failed, and stopped Orthros on A's baseline -- while --doctor, without
+    that environment, had said all clear. Dropped by prefix, not by name, so
+    the next setting a turn needs cannot leak in either.
+    """
+    env = {k: v for k, v in os.environ.items() if not k.upper().startswith(HARNESS)}
+    env.update(PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
+    if quick:
+        env["LC_QUICK_TESTS"] = "1"      # the suite the check after each round runs
+    return env
+
 
 def _job():
     if os.name != "nt":
@@ -265,18 +334,20 @@ def _job():
         return None
 
 
-def contained_run(cmd, timeout, **kwargs):
-    """subprocess.run with captured text output, inside the limits above."""
+def contained_run(cmd, timeout, input=None, **kwargs):
+    """subprocess.run with captured text output, inside the limits above.
+    `input`, if given, is sent on stdin."""
     job = _job()
     if os.name != "nt":
         kwargs["start_new_session"] = True
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    proc = subprocess.Popen(cmd, stdin=None if input is None else subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                             encoding="utf-8", errors="replace", **kwargs)
     try:
         if job:
             job[0].AssignProcessToJobObject(job[1], int(proc._handle))
         try:
-            out, err = proc.communicate(timeout=timeout)
+            out, err = proc.communicate(input=input, timeout=timeout)
         except subprocess.TimeoutExpired:
             if job:
                 job[0].TerminateJobObject(job[1], 1)
@@ -317,7 +388,7 @@ def run_tests_output(folder, python, tests_dir=None, timeout=300):
         return None, ""
     if not expected:
         return (0, 0), ""
-    env = dict(os.environ, PYTHONPATH=folder, PYTHONDONTWRITEBYTECODE="1")
+    env = dict(check_env(), PYTHONPATH=folder, PYTHONDONTWRITEBYTECODE="1")
     try:
         proc = contained_run([python, "-m", "unittest", "discover", "-s", tests_dir, "-t",
                               tests_dir, "-p", "test_*.py"], timeout, cwd=folder, env=env)

@@ -33,7 +33,7 @@ h1 { font-size: 20px; margin: 0; letter-spacing: .02em; }
 .pill { margin-left: auto; padding: 4px 10px; border-radius: 999px; font-size: 12px;
   border: 1px solid var(--line); background: var(--card); display: flex; gap: 6px; align-items: center; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); flex: none; }
-.pill.running .dot, .agent.on .dot { background: var(--good); animation: pulse 1.6s infinite; }
+.pill.running .dot, .pill.serving .dot, .agent.on .dot { background: var(--good); animation: pulse 1.6s infinite; }
 .pill.handover .dot { background: var(--warn); }
 .pill.error .dot { background: var(--bad); }
 @keyframes pulse { 50% { opacity: .35; } }
@@ -72,6 +72,10 @@ label { color: var(--dim); font-size: 13px; display: flex; gap: 6px; align-items
   border-radius: 8px; padding: 7px 10px; }
 .newtask textarea { min-height: 90px; resize: vertical; }
 .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.svc { display: grid; gap: 6px; margin-top: 12px; }
+.svc .line span { color: var(--dim); font-size: 13px; min-width: 84px; }
+.svc code { font-size: 13px; user-select: all; overflow-wrap: anywhere; }
+.svc button { padding: 2px 10px; font-size: 12px; }
 .chip { font-size: 12px; padding: 3px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--dim); }
 .chip b { color: var(--ink); font-weight: 600; }
 .msgline { font-size: 12px; color: var(--dim); }
@@ -176,6 +180,7 @@ label { color: var(--dim); font-size: 13px; display: flex; gap: 6px; align-items
       <div class="seg" role="group" aria-label="What the agents work on">
         <button id="modeSelf" type="button">Improve itself</button>
         <button id="modeTask" type="button">Work on a task</button>
+        <button id="modeServe" type="button">Serve the network</button>
       </div>
       <span class="msgline" id="modeNote"></span>
     </div>
@@ -205,6 +210,23 @@ label { color: var(--dim); font-size: 13px; display: flex; gap: 6px; align-items
       </div>
       <p>A and B take turns on the task, with the same turn lengths as self-improvement.
         Its files are in <code id="taskPath">tasks\</code>. Steer it with <b>Suggest direction</b> for "the task".</p>
+    </div>
+    <div class="pane" id="servePane">
+      <p>The card answers other machines on this network instead of improving the agents.
+        Anything that speaks the OpenAI API can use the model, and any MCP client can ask
+        A and B to build a tool, then run it here. While a tool is being built the model
+        answers nothing else: callers get 503 and should go to their next provider.</p>
+      <div class="svc">
+        <div class="line"><span>OpenAI API</span><code id="svcApi">-</code></div>
+        <div class="line"><span>MCP</span><code id="svcMcp">-</code></div>
+        <div class="line"><span>Key</span><code id="svcKey">-</code>
+          <button type="button" id="svcCopy">Copy</button></div>
+      </div>
+      <div class="chips" id="svcChips"></div>
+      <div class="chips" id="toolChips"></div>
+      <p>Send the key as <code>Authorization: Bearer &lt;key&gt;</code>. The first time,
+        Windows asks whether Python may accept connections: allow it on private networks.
+        This machine's other addresses: <span id="svcOther"></span></p>
     </div>
   </section>
 
@@ -266,7 +288,7 @@ const fmtLeft = (s) => { s = Math.max(0, Math.round(s));
 const fmtT = (s) => { s = Math.max(0, Math.round(s || 0)); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60);
   return h ? `${h}h ${m}m` : `${m}m`; };
 const hhmm = (t) => new Date(t * 1000).toTimeString().slice(0, 5);
-const PHASES = { idle: "Idle", paused: "Paused", running: "Running", handover: "Handing over", error: "Needs attention" };
+const PHASES = { idle: "Idle", paused: "Paused", running: "Running", handover: "Handing over", serving: "Serving", error: "Needs attention" };
 let minutesTouched = false, swapTurn = 0, lastRunning = null, lastAlert = null, lastState = null, gpuState = null;
 
 async function post(path, body) {
@@ -310,8 +332,10 @@ function agentCard(name, d) {
       <div class="bar" style="margin-top:8px"><i class="${left < 120 ? "low" : ""}" style="width:${pct}%"></i></div>
       <div class="ver countdown" style="margin-top:4px"><b>${fmtLeft(left)} left</b>
         <span>${fmtT(gone)} of ${run.minutes}m</span></div>`;
-  } else if (!d.paused && d.next === name) {
-    role = "Up next"; now = `<div class="item">next turn: ${d.planned[name]} min on ${peer}</div>`;
+  } else if (!d.paused && d.next === name && (d.mode !== "serve" ||
+             ((d.service || {}).tools || []).some((t) => t.state === "queued"))) {
+    const on = d.mode === "serve" ? "a tool" : d.mode === "task" ? "the task" : peer;
+    role = "Up next"; now = `<div class="item">next turn: ${d.planned[name]} min on ${on}</div>`;
   } else if (a.last && a.last.started) {
     const l = a.last;
     now = `<div class="item">last turn ${hhmm(l.started)}: ${l.launched ? `${l.rounds} rounds, ${l.kept} kept` : "failed to start"}</div>
@@ -350,7 +374,8 @@ function split(el, val, a, b, fmt) {
 function render(d) {
   const pill = $("#pill"); pill.className = "pill " + d.phase;
   $("#phase").textContent = (PHASES[d.phase] || d.phase) + (d.simulate ? " (simulation)" : "");
-  $("#sub").textContent = d.mode === "task" ? `Working on the task ${d.task}` : "Improving itself";
+  $("#sub").textContent = d.mode === "task" ? `Working on the task ${d.task}`
+    : d.mode === "serve" ? "Serving the network" : "Improving itself";
   renderMode(d);
   const b = $("#banner"); const alert = d.alert && d.paused ? d.alert : null;
   const msg = alert ? `Orthros needs you (${hhmm(alert[0])}): ${alert[1]}\nIt has written ORTHROS-NEEDS-YOU.txt too. Press Start once it is dealt with.`
@@ -508,14 +533,16 @@ setInterval(pollTerm, 1000);
 // ------------------------------------------------------------------ mode
 let wantTask = false;
 function renderMode(d) {
-  const task = d.mode === "task";
-  $("#modeSelf").classList.toggle("on", !task && !wantTask);
-  $("#modeTask").classList.toggle("on", task || wantTask);
-  $("#selfPane").classList.toggle("on", !task && !wantTask);
-  $("#taskPane").classList.toggle("on", task || wantTask);
-  const busyOnTask = d.running ? d.running.kind === "task" : null;
-  $("#modeNote").textContent = busyOnTask !== null && busyOnTask !== task
-    ? "Switches when the running turn ends." : "";
+  const mode = wantTask ? "task" : d.mode, task = mode === "task";
+  for (const [m, button, pane] of [["self", "#modeSelf", "#selfPane"], ["task", "#modeTask", "#taskPane"],
+                                   ["serve", "#modeServe", "#servePane"]]) {
+    $(button).classList.toggle("on", mode === m); $(pane).classList.toggle("on", mode === m);
+  }
+  // A tool being built is a task turn in tools\; a practice or a score is self-improvement.
+  const runMode = !d.running ? null : d.running.kind !== "task" ? "self"
+    : /[\\/]tools[\\/]/.test(d.running.workspace || "") ? "serve" : "task";
+  $("#modeNote").textContent = runMode && runMode !== mode ? "Switches when the running turn ends." : "";
+  renderService(d);
   if (document.activeElement !== $("#practiceEvery")) $("#practiceEvery").value = d.settings.practice_every ?? 4;
   const chips = [];
   for (const n of ["A", "B"]) for (const p of (d.agents[n].practice || []).slice(-3))
@@ -550,12 +577,36 @@ function renderMode(d) {
     target.insertAdjacentHTML("beforeend", '<option value="task">the task</option>');
   if (!d.tasks.length && (task || wantTask)) $("#newTask").classList.add("on");
 }
+function renderService(d) {
+  const s = d.service || {}, urls = s.urls || [], base = urls[0] || "";
+  $("#svcApi").textContent = base ? base + "/v1" : "-";
+  $("#svcMcp").textContent = base ? base + "/mcp" : "-";
+  $("#svcKey").textContent = s.key || "-";
+  $("#svcOther").textContent = urls.slice(1).join("  ·  ") || "none found";
+  const status = s.open ? (s.ready ? "serving" : s.why || "starting")
+    : s.error ? `the port would not open: ${s.error}` : d.mode === "serve" ? "closed -- press Start" : "closed";
+  $("#svcChips").innerHTML = `<span class="chip"><b>${esc(status)}</b></span>` +
+    (s.model ? `<span class="chip">${esc(s.model)}</span>` : "") +
+    `<span class="chip">answered <b>${s.served || 0}</b></span>` +
+    `<span class="chip">turned away <b>${s.refused || 0}</b></span>` +
+    `<span class="chip">tokens <b>${fmtN(s.tokens)}</b></span>`;
+  $("#toolChips").innerHTML = (s.tools || []).map((t) =>
+    `<span class="chip">${esc(t.key)} · <b>${esc(t.state)}</b> · tests ${t.tests[0]}/${t.tests[1]} · ` +
+    `${t.done} done, ${t.open} open · ${t.turns} turn${t.turns === 1 ? "" : "s"}</span>`).join("") ||
+    `<span class="chip">no tools yet -- an MCP client asks for one with build_tool</span>`;
+}
+$("#svcCopy").onclick = async () => {
+  try { await navigator.clipboard.writeText($("#svcKey").textContent); $("#svcCopy").textContent = "Copied"; }
+  catch (e) { $("#svcCopy").textContent = "Select it"; }
+  setTimeout(() => { $("#svcCopy").textContent = "Copy"; }, 1500);
+};
 async function chooseMode(mode, task) {
   const r = await post("/api/mode", task === undefined ? { mode } : { mode, task });
   if (r.result !== "ok") { $("#taskMsg").textContent = r.result || r.error || ""; return false; }
   wantTask = false; tick(); return true;
 }
 $("#modeSelf").onclick = () => { wantTask = false; $("#newTask").classList.remove("on"); chooseMode("self"); };
+$("#modeServe").onclick = () => { wantTask = false; $("#newTask").classList.remove("on"); chooseMode("serve"); };
 $("#modeTask").onclick = () => {
   const task = $("#taskPick").value;
   if (task) chooseMode("task", task);

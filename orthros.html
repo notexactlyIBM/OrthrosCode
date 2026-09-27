@@ -277,7 +277,7 @@ details.help .body { margin-top: 12px; display: grid; gap: 10px; font-size: 13px
 .spark polyline { fill: none; stroke: var(--serve); stroke-width: 1.6; vector-effect: non-scaling-stroke; }
 .spark polygon { fill: rgba(34, 225, 255, .12); stroke: none; }
 .gpustat { color: var(--dim); font-size: 12px; margin-top: 8px; }
-.chat { display: flex; flex-direction: column; }
+.chat { display: flex; flex-direction: column; width: 100%; max-width: 700px; }
 .chatlog { flex: 1; min-height: 200px; max-height: 380px; overflow-y: auto; display: flex; flex-direction: column;
   gap: 9px; margin-bottom: 12px; padding-right: 4px; }
 .msg { max-width: 86%; padding: 9px 13px; border-radius: 14px; font-size: 13.5px; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -371,7 +371,7 @@ details.card[open] > summary { margin-bottom: 14px; }
             <b>Work on a task</b><small>Both build one project</small></button>
           <button class="mtile" id="modeServe" type="button" style="--mc: var(--serve)">
             <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="2.5"/><path d="M7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4M4.9 4.9a10 10 0 0 0 0 14.2M19.1 4.9a10 10 0 0 1 0 14.2"/></svg>
-            <b>Serve the network</b><small>The card answers other machines</small></button>
+            <b>Serve the network</b><small>Agent remote calls</small></button>
         </div>
         <div class="gorow">
           <button class="go" id="start" type="button">Start</button>

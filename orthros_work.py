@@ -150,7 +150,7 @@ def seed(folder, prompt, task_list):
     if not os.path.isfile(os.path.join(folder, ".gitignore")):
         write(os.path.join(folder, ".gitignore"), IGNORE)
     write(os.path.join(folder, ".localcoder-managed"), MARKER)
-    if not os.path.isdir(os.path.join(folder, ".git")):
+    if not os.path.exists(os.path.join(folder, ".git")):       # a file in a worktree
         git(folder, "init", "-q")
     git(folder, "add", "-A")
     git(folder, "commit", "-q", "-m", "Orthros: the starting point")
@@ -163,8 +163,10 @@ def tasks_root(root, tool=False):
     return os.path.join(root, "tools" if tool else "tasks")
 
 
-def create_task(root, name, brief, tool=False):
-    """A new project in tasks\\<slug>, or a tool in tools\\<slug>. Returns (slug, error)."""
+def create_task(root, name, brief, tool=False, source=""):
+    """A new project in tasks\\<slug>, or a tool in tools\\<slug>. With `source`, the
+    project is an existing git repository, worked on through a worktree of it
+    (attach). Returns (slug, error)."""
     brief = (brief or "").strip()
     if len(brief) < 10:
         return "", "Say what to build -- a sentence at least."
@@ -173,9 +175,99 @@ def create_task(root, name, brief, tool=False):
     if os.path.exists(folder):
         return "", "There is already a %s called %s. Pick another name." % (
             "tool" if tool else "task", key)
+    note = ""
+    if (source or "").strip():
+        note, problem = attach(source, folder, key)
+        if problem:
+            return "", problem
     seed(folder, TASK_PROMPT % (brief + (TOOL_CONTRACT if tool else "")), TASK_LIST % (name or key))
-    write(os.path.join(folder, "TASK.md"), "# %s\n\n%s\n" % (name or key, brief))
+    write(os.path.join(folder, "TASK.md"), "# %s\n\n%s\n%s" % (name or key, brief, note))
     return key, ""
+
+
+def git_out(folder, *args, data=None):
+    """(ok, output) of a git command; `data` goes to its stdin."""
+    try:
+        proc = subprocess.run(["git", "-C", folder, "-c", "user.name=Orthros",
+                               "-c", "user.email=orthros@localhost"] + list(args),
+                              input=data, capture_output=True, timeout=600)
+        out = (proc.stdout or b"") + (proc.stderr or b"")
+        return proc.returncode == 0, out.decode("utf-8", "replace").strip()
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, str(exc)
+
+
+SOURCE_LINE = re.compile(r"^Works on a copy of (.+), on the branch (\S+)\.", re.M)
+
+
+def attach(source, folder, key):
+    """Work on an existing git repository without touching it: a worktree of it in
+    `folder`, on a branch of its own, starting from the repository as it stands --
+    uncommitted changes included. Its owner takes the work by merging the branch;
+    a rollback here can never reach their files. Returns (note, error)."""
+    source = os.path.abspath(os.path.expandvars(source.strip().strip('"')))
+    if not os.path.isdir(source):
+        return "", "There is no folder %s." % source
+    ok, top = git_out(source, "rev-parse", "--show-toplevel")
+    if not ok:
+        return "", ("%s is not a git repository. Run  git init  there first: git is how "
+                    "every change the agents make can be undone." % source)
+    top, branch = os.path.normpath(top), "orthros/" + key
+    ok, out = git_out(top, "worktree", "add", "-b", branch, folder, "HEAD")
+    if not ok:
+        return "", "Could not make a working copy of %s: %s" % (top, out[-300:])
+    # The agents start from the folder as it is, not as it was last committed.
+    note = ""
+    try:
+        diff = subprocess.run(["git", "-C", top, "diff", "--binary", "HEAD"],
+                              capture_output=True, timeout=600).stdout
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        diff, note = b"", " Its uncommitted changes could not be read (%s)." % exc
+    if diff.strip():
+        ok, out = git_out(folder, "apply", "--binary", "--whitespace=nowarn", data=diff)
+        if not ok:
+            note = " Its uncommitted changes could not be carried over (%s)." % out[-160:]
+    _, listing = git_out(top, "ls-files", "--others", "--exclude-standard", "-z")
+    for rel in filter(None, listing.split("\0")):
+        target = os.path.join(folder, rel)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        try:
+            shutil.copy2(os.path.join(top, rel), target)
+        except OSError:
+            pass
+    git(folder, "add", "-A")
+    git(folder, "commit", "-q", "-m", "Orthros: %s as it stood, uncommitted changes included" % top)
+    # The agents' own files stay out of the branch: ignored for the repository,
+    # without a change to its .gitignore.
+    ok, common = git_out(top, "rev-parse", "--git-common-dir")
+    if ok:
+        exclude = os.path.join(top, common, "info", "exclude")
+        have = read(exclude)
+        missing = [p for p in IGNORE.split() if p not in have.split()]
+        if missing:
+            os.makedirs(os.path.dirname(exclude), exist_ok=True)
+            write(exclude, have.rstrip("\n") + ("\n" if have.strip() else "") +
+                  "# Orthros's agents\n" + "\n".join(missing) + "\n")
+    return ("\nWorks on a copy of %s, on the branch %s. Nothing in %s itself changes: "
+            "merge the branch to take the work.%s\n" % (top, branch, top, note)), ""
+
+
+def folders(path=""):
+    """For the page's folder picker: `path` and the folders in it. Drives, when
+    there is no path."""
+    path = os.path.abspath(path) if path else ""
+    if not path or not os.path.isdir(path):
+        drives = ["%s:\\" % d for d in "CDEFGHIJKLMNOPQRSTUVWXYZ" if os.path.isdir("%s:\\" % d)]
+        return {"path": "", "parent": "", "dirs": drives or ["/"], "git": False}
+    try:
+        names = sorted((n for n in os.listdir(path) if not n.startswith(("$", "."))
+                        and os.path.isdir(os.path.join(path, n))), key=str.lower)[:300]
+    except OSError:
+        names = []
+    parent = os.path.dirname(path.rstrip("\\/"))
+    return {"path": path, "parent": "" if parent == path.rstrip("\\/") else parent,
+            "dirs": [os.path.join(path, n) for n in names],
+            "git": os.path.exists(os.path.join(path, ".git"))}
 
 
 def task_folder(root, key, tool=False):
@@ -195,10 +287,13 @@ def list_tasks(root, tool=False):
         folder = os.path.join(base, key)
         if not os.path.isdir(folder):
             continue
-        title = (read(os.path.join(folder, "TASK.md")).splitlines() or ["# " + key])[0]
+        brief = read(os.path.join(folder, "TASK.md"))
+        title = (brief.splitlines() or ["# " + key])[0]
         notes = read(os.path.join(folder, "orthros_tasks.md"))
+        source = SOURCE_LINE.search(brief)
         out.append({"key": key, "name": title.lstrip("# ").strip() or key,
-                    "folder": folder,
+                    "folder": folder, "source": source.group(1) if source else "",
+                    "branch": source.group(2) if source else "",
                     "open": len(re.findall(r"^\s*[-*]\s*\[ \]", notes, re.M)),
                     "done": len(re.findall(r"^\s*[-*]\s*\[[xX]\]", notes, re.M))
                     + len(re.findall(r"^\s*[-*]\s*\[[xX]\]",
@@ -234,7 +329,7 @@ def next_exercise(history):
 def start_practice(root, agent, exercise, held_out=False):
     """A fresh copy of an exercise, without its hidden tests. Returns the folder.
 
-    A held-out exercise goes to evals-runs\ rather than practice\, and its
+    A held-out exercise goes to evals-runs\\ rather than practice\\, and its
     folder is named by number, not by exercise: the name is not to turn up in
     anything the agents keep.
     """

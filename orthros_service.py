@@ -31,6 +31,7 @@ that already holds one.
 Standard library only, like orthros.py.
 """
 
+import collections
 import hmac
 import http.client
 import http.server
@@ -122,6 +123,22 @@ def every_address(port, handler):
         return http.server.ThreadingHTTPServer(("0.0.0.0", port), handler)
 
 
+def asked(path, body):
+    """What a request asks, in one line: the last thing its user said -- its start and
+    its end, which is where an instruction usually sits."""
+    if path.endswith("/embeddings"):
+        return "embeddings"
+    text = body.get("prompt") if isinstance(body.get("prompt"), str) else ""
+    for m in reversed(body.get("messages") or []):
+        if isinstance(m, dict) and m.get("role") == "user":
+            c = m.get("content")
+            text = c if isinstance(c, str) else " ".join(
+                p.get("text", "") for p in c if isinstance(p, dict)) if isinstance(c, list) else ""
+            break
+    text = " ".join(str(text).split())
+    return (text[:100] + " … " + text[-70:]) if len(text) > 180 else (text or "(no text)")
+
+
 def ask(upstream, model, messages, max_tokens=700, timeout=180):
     """One chat completion from a model LM Studio has up: its answer, or ''. The model
     thinks first, out of the same budget, so it is asked to think little and given room."""
@@ -195,6 +212,7 @@ class Service:
         self.served = self.refused = self.tokens = 0
         self.denied = 0                  # requests with a wrong or missing key
         self.turned_back_at = {}         # machine -> when its last one was logged
+        self.recent = collections.deque(maxlen=25)   # what was asked, and how it went
         self.checked = 0.0
         self.recheck = False             # a request failed upstream: is the model still there?
         self.fake = None                 # the stand-in for LM Studio in a simulation
@@ -357,6 +375,7 @@ class Service:
                 "urls": self.urls(), "key": self.o.settings.get("serve_key", ""),
                 "model": self.model, "served": self.served, "refused": self.refused,
                 "tokens": self.tokens, "denied": self.denied,
+                "recent": list(self.recent)[::-1][:12],
                 "tools": [{k: t[k] for k in ("key", "state", "tests", "turns", "open", "done",
                                              "parked")} for t in self.tools()]}
 
@@ -436,6 +455,13 @@ class Service:
         if not quiet:
             self.o.event("turned back a request from %s: %s" % (who, why), "bad")
 
+    def note(self, who, user, what, result, tokens=0, seconds=0.0):
+        """One line of the page's list of recent requests."""
+        with self.lock:
+            self.recent.append({"at": now(), "from": who, "user": str(user or "")[:60],
+                                "ask": what, "result": result, "tokens": tokens,
+                                "seconds": round(seconds, 1)})
+
     def unavailable(self, req, why=None, retry=None):
         with self.lock:
             self.refused += 1
@@ -446,29 +472,33 @@ class Service:
 
     def infer(self, req, path, raw):
         """Pass one OpenAI-style request to LM Studio, streamed or whole."""
-        if not self.ready or self.why:
-            return self.unavailable(req)
         try:
             body = json.loads(raw or b"{}")
         except ValueError:
             body = None
         if not isinstance(body, dict):
             return send(req, 400, error("the body must be a JSON object", "invalid_request_error"))
+        # Who asked what, for the page: OpenAI's `user` field names the caller, if sent.
+        who, user, what, begun = req.client_address[0], body.get("user"), asked(path, body), now()
+        if not self.ready or self.why:
+            self.note(who, user, what, "turned away: " + (self.why or "not serving yet"))
+            return self.unavailable(req)
         limit = max(1, int(self.o.settings.get("serve_queue") or 2))
         with self.lock:
             ahead = self.waiting
             if ahead < limit:
                 self.waiting += 1
         if ahead >= limit:
+            self.note(who, user, what, "turned away: busy")
             return self.unavailable(req, "busy: %d request(s) ahead of this one" % ahead, 5)
         body["model"] = IDENTIFIER
-        started = False
+        started, used, status = False, 0, 0
         conn = http.client.HTTPConnection(*self.upstream, timeout=1800)
         try:
             conn.request("POST", path, json.dumps(body).encode("utf-8"),
                          {"Content-Type": "application/json", "Authorization": "Bearer lm-studio"})
             resp = conn.getresponse()
-            kind = resp.getheader("Content-Type") or "application/json"
+            kind, status = resp.getheader("Content-Type") or "application/json", resp.status
             if resp.status >= 400:
                 self.recheck = True
             if "text/event-stream" in kind:
@@ -502,6 +532,9 @@ class Service:
             conn.close()
             with self.lock:
                 self.waiting -= 1
+            self.note(who, user, what, "answered" if 0 < status < 400 else
+                      "failed: HTTP %d" % status if status else "failed: the model did not answer",
+                      used, now() - begun)
 
     # ------------------------------------------------------------ MCP
 
@@ -522,6 +555,12 @@ class Service:
             return send(req, 202, b"")   # a notification, or a reply to nothing we asked
         params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
         result, fault = self.rpc(msg["method"], params)
+        if msg["method"] == "tools/call":
+            args = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
+            said = " ".join(str(args.get("input") or args.get("description") or "").split())
+            self.note(req.client_address[0], "MCP", "tool %s%s" % (
+                params.get("name"), (": " + said[:150]) if said else ""),
+                "failed" if fault or (result or {}).get("isError") else "answered")
         reply = {"jsonrpc": "2.0", "id": msg["id"]}
         reply.update({"error": fault} if fault else {"result": result})
         send(req, 200, reply)

@@ -210,7 +210,7 @@ OVERSIZE = re.compile(r"request \((\d+) tokens\) exceeds the available context s
 AGENT_MODEL = "localcoder"
 CHAT_KEEP = 600
 CHAT_BRIEF = """You are Orthros, the referee on this PC. You run two AI coding agents, A and
-B, on one graphics card. In self-improvement mode each works on the other's code,
+B, on one graphics card. In evolve mode each works on the other's code,
 and a change is kept only if it passes the checks, and spreads only once a held-out
 score shows it is no worse. In task mode both build one project in turns. In serve
 mode the card answers other machines on the network, and A and B build tools on
@@ -2173,16 +2173,16 @@ class Orthros:
             self.state["mode"] = mode
             self.save()
         if changed or task:
-            self.event("mode: %s" % {"self": "improving itself", "serve": "serving the network"}
+            self.event("mode: %s" % {"self": "evolving", "serve": "serving the network"}
                        .get(mode, "working on the task %s" % self.state["task"]), "start")
         self.wake.set()
         return "ok"
 
-    def new_task(self, name, brief):
-        key, error = work.create_task(self.root, name, brief)
+    def new_task(self, name, brief, source=""):
+        key, error = work.create_task(self.root, name, brief, source=source)
         if error:
             return {"error": error}
-        self.event("new task %s" % key, "start")
+        self.event("new task %s%s" % (key, " on a copy of %s" % source if source else ""), "start")
         return {"result": "ok", "key": key}
 
     # ---------------------------------------------------------------- the operator's chat
@@ -2313,7 +2313,7 @@ class Orthros:
         """What Orthros knows right now, as plain text for the model to answer from."""
         v = self.view()
         parts = ["Now: %s. Mode: %s." % (time.strftime("%Y-%m-%d %H:%M"), {
-                     "self": "improving itself", "serve": "serving the network"}.get(
+                     "self": "evolving", "serve": "serving the network"}.get(
                      v["mode"], "working on the task %s" % v["task"])),
                  self.status_line(), self.say_progress(), self.say_next(),
                  self.say_trouble(), self.say_temperature()]
@@ -2325,6 +2325,12 @@ class Orthros:
                              ", ".join(s["urls"]) or "?", s["model"] or "no model yet",
                              s["served"], s["refused"], s["denied"], "{:,}".format(s["tokens"]),
                              self.service.tool_status()))
+            if s["recent"]:
+                parts.append("What was asked lately, newest first:\n" + "\n".join(
+                    "- %s from %s%s: \"%s\" -> %s" % (
+                        time.strftime("%H:%M", time.localtime(r["at"])), r["from"],
+                        " (%s)" % r["user"] if r["user"] else "", r["ask"], r["result"])
+                    for r in s["recent"][:10]))
         for n in NAMES:
             entries = read_text(os.path.join(self.folders[n], FIELD_REPORT)).split("\n## ")
             if len(entries) > 1:
@@ -2526,7 +2532,8 @@ class Orthros:
                 "alert": st.get("alert"), "gpu": self.gpu, "gpu_history": self.gpu_history[-60:],
                 "backoff": max(0, int(self.backoff_until - now())),
                 "mode": st.get("mode", "self"), "task": st.get("task", ""),
-                "tasks": [{k: t[k] for k in ("key", "name", "folder", "open", "done", "parked")}
+                "tasks": [{k: t[k] for k in ("key", "name", "folder", "open", "done", "parked",
+                                              "source", "branch")}
                           for t in work.list_tasks(self.root)],
                 "exercises": work.exercises(),
                 "evaluating": ({k: (st["evaluating"] or {}).get(k) for k in ("agent", "sha")}
@@ -2576,6 +2583,8 @@ def serve(orthros, port):
                 except ValueError:
                     offset = -1
                 self.send(200, orthros.tail_log(q.get("agent", "A"), q.get("file", ""), offset))
+            elif url.path == "/api/folders":
+                self.send(200, work.folders(q.get("path", "")))
             elif url.path == "/api/log":
                 running = orthros.state.get("running") or {}
                 path = running.get("log") if running.get("agent") == q.get("agent") else ""
@@ -2608,7 +2617,8 @@ def serve(orthros, port):
                     self.send(200, {"result": orthros.set_mode(body.get("mode") or "self",
                                                                body.get("task"))})
                 elif url.path == "/api/task":
-                    self.send(200, orthros.new_task(body.get("name") or "", body.get("brief") or ""))
+                    self.send(200, orthros.new_task(body.get("name") or "", body.get("brief") or "",
+                                                    body.get("folder") or ""))
                 elif url.path == "/api/chat":
                     reply = orthros.chat(body.get("text"), body.get("kind") or "ask",
                                          body.get("target") or "both")

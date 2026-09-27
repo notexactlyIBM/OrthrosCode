@@ -84,7 +84,7 @@ The dashboard (http://127.0.0.1:8770) shows who is working and on what, the
 model's raw output, GPU use, held-out scores, and where each agent's rounds
 went in the last day. From it you can:
 
-- switch between **Improve itself**, **Work on a task** (describe what to
+- switch between **Evolve** (A and B improve each other), **Work on a task** (describe what to
   build; the agents break it into small checkable jobs) and **Serve the
   network** (below);
 - **Suggest direction** -- your words go to the top of an agent's list;

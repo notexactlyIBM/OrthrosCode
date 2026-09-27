@@ -334,6 +334,15 @@ details.card[open] > summary { margin-bottom: 14px; }
 .catrow code { color: #cfe6ff; }
 .catrow span { color: var(--dim); }
 
+dialog { border: 1px solid var(--edge); border-radius: 16px; padding: 22px 24px; background: #0c1526;
+  color: var(--ink); width: min(480px, calc(100% - 32px)); box-shadow: 0 24px 64px rgba(0, 0, 0, .6);
+  overflow: hidden; }
+dialog form { margin: 0; }
+dialog::backdrop { background: rgba(2, 5, 10, .72); }
+dialog h3 { font: 700 15px var(--display); letter-spacing: .08em; text-transform: uppercase; margin: 0 0 10px; }
+dialog p { color: #b7c6de; margin: 0 0 20px; line-height: 1.55; }
+dialog .line { justify-content: flex-end; }
+
 @media (max-width: 1040px) {
   .toprow { grid-template-columns: minmax(0, 1fr); min-height: 0; }
   .side, .side > .inner { position: static; }
@@ -561,6 +570,15 @@ details.card[open] > summary { margin-bottom: 14px; }
     </div>
   </div>
 </main>
+
+<dialog id="confirm">
+  <form method="dialog">
+    <h3 id="cfTitle"></h3>
+    <p id="cfBody"></p>
+    <div class="line"><button type="submit" value="no" id="cfNo"></button>
+      <button type="submit" value="yes" class="primary" id="cfYes"></button></div>
+  </form>
+</dialog>
 
 <script>
 const $ = (s) => document.querySelector(s);
@@ -839,7 +857,45 @@ function renderService(d) {
       <span class="meta">tests ${t.tests[0]}/${t.tests[1]} · ${t.done} done, ${t.open} open · ${t.turns} turn${t.turns === 1 ? "" : "s"}</span></div>`).join("") ||
     `<div class="empty">No tools yet. An MCP client asks for one with build_tool.</div>`;
 }
+// A yes/no in the page's own dialog. Escape or a click on "no" is a no.
+function confirmBox(title, body, yes, no) {
+  return new Promise((resolve) => {
+    const dlg = $("#confirm");
+    $("#cfTitle").textContent = title; $("#cfBody").textContent = body;
+    $("#cfYes").textContent = yes; $("#cfNo").textContent = no;
+    dlg.returnValue = "";
+    dlg.onclose = () => resolve(dlg.returnValue === "yes");
+    dlg.showModal(); $("#cfNo").focus();
+  });
+}
+
+// What Orthros is doing, in words, and what switching away from it would mean.
+function doing(d) { return d.mode === "task" ? `working on the task ${d.task}` : (MODES[d.mode] || "").toLowerCase(); }
+async function changeAllowed(mode, task) {
+  const d = lastState;
+  const busy = d && (d.paused === false || !!d.running);
+  const other = d && (mode !== d.mode || (mode === "task" && task !== undefined && task !== d.task));
+  if (!busy || !other) return true;
+  const to = mode === "task" ? `working on the task ${task}` : MODES[mode].toLowerCase();
+  let then;
+  if (d.running) {
+    const left = Math.max(0, d.running.minutes * 60 - ((d.live || {}).elapsed || 0));
+    then = `${d.running.agent}'s turn finishes first -- about ${fmtLeft(left)} -- and then Orthros switches.`;
+  } else if (d.mode === "serve") {
+    then = "Serving stops at once: callers are turned away and go to their next provider, and the model is unloaded.";
+  } else {
+    then = "It switches before the next turn starts.";
+  }
+  return confirmBox("Change what Orthros is doing?", `Orthros is ${doing(d)}. Switch to ${to}? ${then}`,
+                    "Switch", "Keep " + doing(d));
+}
+
 async function chooseMode(mode, task) {
+  if (!(await changeAllowed(mode, task))) {
+    wantTask = false; $("#newTask").classList.remove("on");
+    if (lastState) renderMode(lastState);
+    return false;
+  }
   const r = await post("/api/mode", task === undefined ? { mode } : { mode, task });
   if (r.result !== "ok") { $("#taskMsg").textContent = r.result || r.error || ""; return false; }
   wantTask = false; tick(); return true;

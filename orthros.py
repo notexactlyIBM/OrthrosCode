@@ -104,12 +104,10 @@ DEFAULTS = {
     # (see orthros_tune.py). The agents' config.cmd holds the starting point.
     "auto_tune": True,
     # Serve mode (orthros_service.py): the port other machines use, the key
-    # they must send (made on first run), how many requests may be in hand at
-    # once before more are turned away to their next provider, how many turns
-    # a tool gets before it is given up, and how long one run of it may take.
+    # they must send (made on first run), how many turns a tool gets before it
+    # is given up, and how long one run of it may take.
     "serve_port": 8777,
     "serve_key": "",
-    "serve_queue": 2,
     "tool_turns": 4,
     "tool_seconds": 120,
 }
@@ -676,6 +674,7 @@ class Orthros:
         self.service = service.Service(self)
         self.serve_failures = 0              # loads of the model to serve, failed in a row
         self.chat_at = 0.0                   # when the chat box last used the model
+        self.leftovers = []                  # housekeeping's last findings, for the page
 
     # ---------------------------------------------------------------- state
 
@@ -1941,6 +1940,80 @@ class Orthros:
             self.pause("Could not load the model to serve the network, %d times: %s"
                        % (len(waits) + 1, why), error=True)
 
+    # ---------------------------------------------------------------- housekeeping
+
+    def housekeeping(self, fix=False):
+        """What interrupted work and stray clicks leave behind. Found; and with `fix`,
+        the safe part cleared: a model nothing uses, processes left running, stop
+        requests nobody will read, an old alarm file. The rest needs a person and is
+        only said. Returns [[what, what was done or '', whether it can clear it]], kept
+        for the page."""
+        found = []
+        running = self.state.get("running")
+        idle = not running
+        serving = self.state.get("mode") == "serve" and not self.state["paused"]
+        if idle and not serving and not self.simulate:
+            lms = self.find_lms("A")
+            ours = [n for n in service.resident(lms) if n in (service.IDENTIFIER, AGENT_MODEL)] \
+                if lms else []
+            if ours:                         # ours only: never a model loaded by hand
+                if fix:
+                    self.service.engine_down(force=True)
+                found.append(["a model is loaded that nothing is using (%s)" % ", ".join(ours),
+                              "unloaded" if fix else "", True])
+        for n in NAMES if idle else ():
+            left = processes_under(self.folders[n])
+            if left:
+                for pid in left if fix else ():
+                    kill_tree(pid)
+                found.append(["%d process(es) %s left running" % (len(left), n),
+                              "ended" if fix else "", True])
+        places = list(self.folders.values()) + [t["folder"] for t in work.list_tasks(self.root)] \
+            + [t["folder"] for t in work.list_tasks(self.root, tool=True)]
+        for folder in places if idle else ():
+            if os.path.isfile(os.path.join(folder, STOP_FILE)):
+                if fix:
+                    try:
+                        os.remove(os.path.join(folder, STOP_FILE))
+                    except OSError:
+                        pass
+                found.append(["a stop request left in %s" % os.path.basename(folder),
+                              "removed" if fix else "", True])
+        alarm = os.path.join(self.root, ALERT_FILE)
+        if os.path.isfile(alarm) and not self.state.get("alert"):
+            if fix:
+                try:
+                    os.remove(alarm)
+                except OSError:
+                    pass
+            found.append(["%s from an earlier stop" % ALERT_FILE, "removed" if fix else "", True])
+        if running and not pid_alive(running.get("pid")) or self.state.get("unjudged"):
+            found.append(["a turn ended while Orthros was not running; it is judged at the "
+                          "next Start", "", False])
+        ev = self.state.get("evaluating")
+        if ev:
+            done = len(ev.get("scores") or {})
+            found.append(["%s's version is part scored (%d of %d held-out exercises); Evolve "
+                          "finishes it" % (ev["agent"], done, done + len(ev.get("todo") or [])),
+                          "", False])
+        if self.state.get("directions"):
+            found.append(["%d direction(s) waiting for a turn to end"
+                          % len(self.state["directions"]), "", False])
+        for t in work.list_tasks(self.root):
+            if t["open"] and t["key"] != self.state.get("task"):
+                found.append(["the task %s has %s left" % (t["key"], plural(t["open"], "open item")),
+                              "", False])
+        for t in self.service.tools():
+            if t["state"] == "queued" and self.state.get("mode") != "serve":
+                found.append(["the tool %s waits to be built; tools are built in serve mode"
+                              % t["key"], "", False])
+        old = sorted(f for f in os.listdir(self.root) if ".before-fresh-" in f)
+        if old:
+            found.append(["%d file(s) of old records kept by --fresh (%s): delete them when no "
+                          "longer wanted" % (len(old), ", ".join(old)[:160]), "", False])
+        self.leftovers = found
+        return found
+
     def finish_orphan(self, running):
         """Judge a turn that finished while Orthros was not running.
 
@@ -2329,7 +2402,8 @@ class Orthros:
                 parts.append("What was asked lately, newest first:\n" + "\n".join(
                     "- %s from %s%s: \"%s\" -> %s" % (
                         time.strftime("%H:%M", time.localtime(r["at"])), r["from"],
-                        " (%s)" % r["user"] if r["user"] else "", r["ask"], r["result"])
+                        " (%s)" % r["user"] if r["user"] else "", r["tag"] or r["ask"],
+                        r["result"])
                     for r in s["recent"][:10]))
         for n in NAMES:
             entries = read_text(os.path.join(self.folders[n], FIELD_REPORT)).split("\n## ")
@@ -2545,7 +2619,7 @@ class Orthros:
                              "auto": bool(self.settings.get("auto_tune", True)),
                              "configured": self.configured()},
                 "planned": {n: self.plan_minutes(n) for n in NAMES},
-                "service": self.service.view()}
+                "service": self.service.view(), "leftovers": self.leftovers}
 
 
 # --------------------------------------------------------------------------
@@ -2583,6 +2657,8 @@ def serve(orthros, port):
                 except ValueError:
                     offset = -1
                 self.send(200, orthros.tail_log(q.get("agent", "A"), q.get("file", ""), offset))
+            elif url.path == "/api/housekeeping":
+                self.send(200, {"found": orthros.housekeeping()})
             elif url.path == "/api/folders":
                 self.send(200, work.folders(q.get("path", "")))
             elif url.path == "/api/log":
@@ -2610,6 +2686,11 @@ def serve(orthros, port):
                 elif url.path in ("/api/pause", "/api/stop", "/api/force"):
                     mode = {"/api/pause": "pause", "/api/stop": "now", "/api/force": "force"}
                     self.send(200, {"result": orthros.stop(mode[url.path])})
+                elif url.path == "/api/housekeeping":
+                    found = orthros.housekeeping(fix=True)
+                    orthros.event("housekeeping: %s" % ("; ".join("%s -- %s" % (w, d) for w, d, _
+                                                                  in found if d) or "nothing to clear"))
+                    self.send(200, {"found": orthros.housekeeping()})
                 elif url.path == "/api/hardware":
                     orthros.maybe_look(force="asked from the page")
                     self.send(200, {"result": "ok"})
@@ -3100,6 +3181,15 @@ def main():
                   "Press Start when ready.")
     if orthros.settings.get("gpu_telemetry", True):
         threading.Thread(target=orthros.watch_gpu, daemon=True).start()
+
+    def look_around():
+        # Leftovers from last time -- a model still loaded, processes, stale requests.
+        found = orthros.housekeeping()
+        if found:
+            orthros.event("found %s from earlier work: Diagnostics, Housekeeping"
+                          % plural(len(found), "leftover"),
+                          "bad" if any(f for _, _, f in found) else "info")
+    threading.Thread(target=look_around, daemon=True).start()
     try:
         while True:
             time.sleep(15)

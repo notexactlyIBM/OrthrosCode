@@ -11,6 +11,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -143,12 +144,23 @@ class TestInference(Served):
         self.assertEqual(self.request("GET", "/health")[0], 503)
         self.assertEqual(self.rpc("ping")["result"], {})       # tools go on answering
 
-    def test_a_full_queue_turns_a_request_away_at_once(self):
+    def test_a_request_waits_its_turn_and_a_caller_that_leaves_is_counted(self):
         self.serve()
-        self.svc.waiting = int(self.o.settings["serve_queue"])
-        status, headers, _ = self.request("POST", "/v1/chat/completions", {"messages": []})
-        self.assertEqual((status, headers["retry-after"]), (503, "5"))
-        self.assertEqual(self.svc.refused, 1)
+        self.svc.turn.acquire()                  # the model is busy with someone else
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", self.svc.port(), timeout=2)
+            conn.request("POST", "/v1/chat/completions", json.dumps({"messages": [
+                {"role": "user", "content": "hi"}]}), {"Authorization": "Bearer " + self.key})
+            with self.assertRaises(OSError):     # it waits: the caller times out first
+                conn.getresponse()
+            conn.close()
+            deadline = time.time() + 10
+            while not self.svc.gave_up and time.time() < deadline:
+                time.sleep(0.2)
+        finally:
+            self.svc.turn.release()
+        self.assertEqual((self.svc.gave_up, self.svc.refused), (1, 0))
+        self.assertTrue(self.svc.recent[-1]["result"].startswith("caller gave up after"))
 
     def test_the_port_is_open_only_while_listening(self):
         self.serve()
@@ -167,7 +179,7 @@ class TestMcp(Served):
         self.assertEqual(hello["result"]["protocolVersion"], "2025-06-18")
         self.assertIn("tools", hello["result"]["capabilities"])
         names = [t["name"] for t in self.rpc("tools/list")["result"]["tools"]]
-        self.assertEqual(names, ["build_tool", "tool_status"])
+        self.assertEqual(names, [t["name"] for t in service.BUILT_IN])
         status, _, _ = self.request("POST", "/mcp", {
             "jsonrpc": "2.0", "method": "notifications/initialized"})
         self.assertEqual(status, 202)
@@ -181,7 +193,8 @@ class TestMcp(Served):
         self.assertIn("# The tool contract", work.read(os.path.join(folder, "RALPH_PROMPT.md")))
         self.assertEqual(self.svc.next_build()["key"], "shout")
         self.assertIn("shout: queued", self.call("tool_status")["content"][0]["text"])
-        self.assertEqual(len(self.rpc("tools/list")["result"]["tools"]), 2)   # not callable yet
+        listed = self.rpc("tools/list")["result"]["tools"]
+        self.assertEqual(len(listed), len(service.BUILT_IN))          # not callable yet
 
     def test_asking_again_puts_the_change_first_and_queues_it_again(self):
         folder = self.ready_tool()

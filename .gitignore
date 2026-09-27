@@ -34,6 +34,7 @@ ORTHROS-NEEDS-YOU.txt
 # and practice copies of exercises. Each is its own git repository.
 tasks/
 tools/
+serve-work/
 practice/
 # Fresh copies of held-out exercises, worked on to score a version.
 evals-runs/

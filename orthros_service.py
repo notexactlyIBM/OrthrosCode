@@ -38,6 +38,7 @@ import http.server
 import json
 import os
 import re
+import select
 import socket
 import subprocess
 import threading
@@ -76,6 +77,33 @@ TOOL_STATUS = {
 }
 TOOL_INPUT = {"type": "object", "required": ["input"], "properties": {
     "input": {"type": "string", "description": "sent to the tool on stdin"}}}
+# The agents' own tools that make sense from outside, run with their code.
+RESEARCH = {
+    "name": "research",
+    "description": "Search the web and read the top page: titles, links and snippets, and "
+                   "that page's text, trimmed. Runs on the machine with the GPU and costs no "
+                   "tokens.",
+    "inputSchema": {"type": "object", "required": ["question"], "properties": {
+        "question": {"type": "string"},
+        "site": {"type": "string", "description": "only this domain, e.g. python.org"}}},
+}
+READ_PAGE = {
+    "name": "read_page",
+    "description": "Fetch one web page and return its text, trimmed.",
+    "inputSchema": {"type": "object", "required": ["url"], "properties": {
+        "url": {"type": "string"}}},
+}
+PYTHON_DOCS = {
+    "name": "python_docs",
+    "description": "The documentation of an installed Python module, class or function, "
+                   "as pydoc prints it.",
+    "inputSchema": {"type": "object", "required": ["name"], "properties": {
+        "name": {"type": "string", "description": "e.g. json.dumps or httpx.Client"}}},
+}
+BUILT_IN = (BUILD_TOOL, TOOL_STATUS, RESEARCH, READ_PAGE, PYTHON_DOCS)
+TAG_ASK = ("In at most eight words, say what this request asks for -- a task label such as "
+           "\"summarise news about the Taiwan Strait\" or \"rate a market's odds\". Reply with "
+           "the label only.\n\nThe request:\n%s")
 
 
 def now():
@@ -123,9 +151,8 @@ def every_address(port, handler):
         return http.server.ThreadingHTTPServer(("0.0.0.0", port), handler)
 
 
-def asked(path, body):
-    """What a request asks, in one line: the last thing its user said -- its start and
-    its end, which is where an instruction usually sits."""
+def said(path, body):
+    """The last thing a request's user said, whitespace folded."""
     if path.endswith("/embeddings"):
         return "embeddings"
     text = body.get("prompt") if isinstance(body.get("prompt"), str) else ""
@@ -135,7 +162,11 @@ def asked(path, body):
             text = c if isinstance(c, str) else " ".join(
                 p.get("text", "") for p in c if isinstance(p, dict)) if isinstance(c, list) else ""
             break
-    text = " ".join(str(text).split())
+    return " ".join(str(text).split())
+
+
+def excerpt(text):
+    """A request in one line: its start and its end, where an instruction usually sits."""
     return (text[:100] + " … " + text[-70:]) if len(text) > 180 else (text or "(no text)")
 
 
@@ -171,6 +202,7 @@ def keep_record(folder, rec):
 
 
 def send(req, code, body, headers=None):
+    """Answer one request. False if its caller had already gone."""
     data = body if isinstance(body, bytes) else json.dumps(body).encode("utf-8")
     try:
         req.send_response(code)
@@ -180,8 +212,10 @@ def send(req, code, body, headers=None):
             req.send_header(key, value)
         req.end_headers()
         req.wfile.write(data)
+        req.wfile.flush()
+        return True
     except OSError:
-        pass                             # the client went away
+        return False
 
 
 def error(message, kind="unavailable"):
@@ -211,8 +245,12 @@ class Service:
         self.waiting = 0                 # inference requests in flight
         self.served = self.refused = self.tokens = 0
         self.denied = 0                  # requests with a wrong or missing key
+        self.gave_up = self.failed = 0   # callers that stopped waiting; requests nothing could save
+        self.turn = threading.Semaphore(1)   # the model's turns: as many at once as it has slots
+        self.gave_up_at = 0.0
         self.turned_back_at = {}         # machine -> when its last one was logged
         self.recent = collections.deque(maxlen=25)   # what was asked, and how it went
+        self.tagger = None               # labels them, once there is one to label
         self.checked = 0.0
         self.recheck = False             # a request failed upstream: is the model still there?
         self.fake = None                 # the stand-in for LM Studio in a simulation
@@ -374,8 +412,11 @@ class Service:
                 "why": self.why if self.server else "", "error": self.listen_error,
                 "urls": self.urls(), "key": self.o.settings.get("serve_key", ""),
                 "model": self.model, "served": self.served, "refused": self.refused,
-                "tokens": self.tokens, "denied": self.denied,
-                "recent": list(self.recent)[::-1][:12],
+                "tokens": self.tokens, "denied": self.denied, "gave_up": self.gave_up,
+                "failed": self.failed, "in_hand": self.waiting,
+                "recent": [{k: v for k, v in r.items() if k != "text"}
+                           for r in list(self.recent)[::-1][:12]],
+                "catalog": self.catalog(),
                 "tools": [{k: t[k] for k in ("key", "state", "tests", "turns", "open", "done",
                                              "parked")} for t in self.tools()]}
 
@@ -456,11 +497,33 @@ class Service:
             self.o.event("turned back a request from %s: %s" % (who, why), "bad")
 
     def note(self, who, user, what, result, tokens=0, seconds=0.0):
-        """One line of the page's list of recent requests."""
+        """One line of the page's list of recent requests. `what` is the line shown, or
+        (that line, the request's text for the tagger to label)."""
+        line, text = what if isinstance(what, tuple) else (what, "")
         with self.lock:
             self.recent.append({"at": now(), "from": who, "user": str(user or "")[:60],
-                                "ask": what, "result": result, "tokens": tokens,
-                                "seconds": round(seconds, 1)})
+                                "ask": line, "text": text, "tag": "" if text else line,
+                                "result": result, "tokens": tokens, "seconds": round(seconds, 1)})
+        if text and not self.tagger:
+            self.tagger = threading.Thread(target=self.tag_loop, daemon=True)
+            self.tagger.start()
+
+    def tag_loop(self):
+        """Label each request in a few words -- what it asked Orthros to do -- by asking the
+        served model, only while no request is waiting for it."""
+        while True:
+            time.sleep(3)
+            if not self.server or not self.ready or self.why or self.waiting:
+                continue
+            with self.lock:
+                todo = next((r for r in reversed(self.recent) if not r["tag"]), None)
+            if not todo:
+                continue
+            label = ask(self.upstream, IDENTIFIER, [
+                {"role": "user", "content": TAG_ASK % todo["text"]}], max_tokens=24, timeout=90)
+            label = (label.strip().splitlines() or [""])[0].strip(" \"'.*")[:80]
+            with self.lock:
+                todo["tag"], todo["text"] = label or "-", ""
 
     def unavailable(self, req, why=None, retry=None):
         with self.lock:
@@ -471,7 +534,10 @@ class Service:
     # ------------------------------------------------------------ inference
 
     def infer(self, req, path, raw):
-        """Pass one OpenAI-style request to LM Studio, streamed or whole."""
+        """See one OpenAI-style request through to LM Studio. It ends in one of three
+        ways: answered; failed, once nothing is left to try; or its caller stopped
+        waiting. Never because Orthros gave up first: requests wait their turn in
+        order, and a model that broke is reloaded and asked again, once."""
         try:
             body = json.loads(raw or b"{}")
         except ValueError:
@@ -479,62 +545,159 @@ class Service:
         if not isinstance(body, dict):
             return send(req, 400, error("the body must be a JSON object", "invalid_request_error"))
         # Who asked what, for the page: OpenAI's `user` field names the caller, if sent.
-        who, user, what, begun = req.client_address[0], body.get("user"), asked(path, body), now()
-        if not self.ready or self.why:
-            self.note(who, user, what, "turned away: " + (self.why or "not serving yet"))
+        who, user, text, begun = req.client_address[0], body.get("user"), said(path, body), now()
+        what = (excerpt(text), text[:1500])
+        if self.why and not self.why.startswith("loading") or not self.server:
+            self.note(who, user, what, "turned away: " + (self.why or "not serving"))
             return self.unavailable(req)
-        limit = max(1, int(self.o.settings.get("serve_queue") or 2))
-        with self.lock:
-            ahead = self.waiting
-            if ahead < limit:
-                self.waiting += 1
-        if ahead >= limit:
-            self.note(who, user, what, "turned away: busy")
-            return self.unavailable(req, "busy: %d request(s) ahead of this one" % ahead, 5)
         body["model"] = IDENTIFIER
-        started, used, status = False, 0, 0
-        conn = http.client.HTTPConnection(*self.upstream, timeout=1800)
+        gone, done, upstream = threading.Event(), threading.Event(), {}
+        threading.Thread(target=self.watch_caller, args=(req, gone, done, upstream),
+                         daemon=True).start()
+        with self.lock:
+            self.waiting += 1
+        outcome, why, used = "failed", "", 0
+        try:
+            for attempt in (1, 2):
+                turn = self.take_turn(gone)
+                if turn != "go":
+                    outcome, why = turn, self.why
+                    break
+                try:
+                    outcome, why, used = self.forward(req, path, body, gone, upstream)
+                finally:
+                    self.turn.release()
+                if outcome != "broken" or attempt == 2:
+                    break
+                # The model broke before answering: have Orthros look at it -- the
+                # loop reloads a model that is gone -- then ask once more.
+                checked, self.recheck = self.checked, True
+                deadline = now() + 15
+                while self.checked == checked and now() < deadline and not gone.is_set():
+                    time.sleep(0.5)
+        finally:
+            done.set()
+            with self.lock:
+                self.waiting -= 1
+        seconds = now() - begun
+        if outcome == "answered":
+            with self.lock:
+                self.served += 1
+                self.tokens += used
+            return self.note(who, user, what, "answered", used, seconds)
+        if outcome == "gone":
+            with self.lock:
+                self.gave_up += 1
+                loud, self.gave_up_at = now() - self.gave_up_at > 60, now()
+            if loud:
+                self.o.event("a caller from %s stopped waiting after %d s -- it needs a longer "
+                             "timeout, or Orthros is too slow for it" % (who, seconds), "bad")
+            return self.note(who, user, what, "caller gave up after %d s" % seconds, 0, seconds)
+        if outcome == "refused":
+            self.note(who, user, what, "turned away: " + (why or "not serving"))
+            return self.unavailable(req)
+        with self.lock:
+            self.failed += 1           # "rejected": LM Studio refused it, and the caller heard why
+        self.o.event("a request from %s failed for good: %s" % (who, why), "bad")
+        self.note(who, user, what, "failed: " + why, 0, seconds)
+        if outcome == "broken":           # nothing reached the caller yet: say why
+            send(req, 502, error("the model failed twice: %s" % why, "server_error"))
+
+    def watch_caller(self, req, gone, done, upstream):
+        """Notice the caller hanging up -- its socket readable with nothing to read -- and
+        cut the model off mid-answer, so it stops working for nobody."""
+        sock = req.connection
+        while not done.is_set():
+            try:
+                readable, _, _ = select.select([sock], [], [], 1.0)
+                if readable and not sock.recv(1, socket.MSG_PEEK):
+                    break
+            except (OSError, ValueError):
+                break
+        else:
+            return
+        if done.is_set():
+            return
+        gone.set()
+        conn = upstream.get("conn")
+        try:
+            if conn is not None and conn.sock is not None:
+                conn.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+    def take_turn(self, gone):
+        """Wait for the model and for the requests ahead: 'go', 'gone' if the caller
+        left first, or 'refused' if the card is taken for longer than a caller waits."""
+        while True:
+            if gone.is_set():
+                return "gone"
+            if self.why and not self.why.startswith("loading") or not self.server:
+                return "refused"
+            if self.ready and not self.why and self.turn.acquire(timeout=1):
+                if gone.is_set():
+                    self.turn.release()
+                    return "gone"
+                return "go"
+            if not self.ready or self.why:
+                time.sleep(1)
+
+    def forward(self, req, path, body, gone, upstream):
+        """One try at LM Studio: (outcome, why, tokens). 'broken' means it failed before
+        anything reached the caller, so it may be tried again."""
+        conn = http.client.HTTPConnection(*self.upstream, timeout=3600)
+        upstream["conn"] = conn
+        started = False
         try:
             conn.request("POST", path, json.dumps(body).encode("utf-8"),
                          {"Content-Type": "application/json", "Authorization": "Bearer lm-studio"})
             resp = conn.getresponse()
             kind, status = resp.getheader("Content-Type") or "application/json", resp.status
-            if resp.status >= 400:
-                self.recheck = True
-            if "text/event-stream" in kind:
-                req.send_response(resp.status)
-                req.send_header("Content-Type", kind)
-                req.send_header("Cache-Control", "no-cache")
-                req.end_headers()
-                started = True
-                for line in resp:
-                    req.wfile.write(line)
-                    if not line.strip():
-                        req.wfile.flush()
-                used = 0
-            else:
+            if status >= 500 or (status in (400, 404) and "text/event-stream" not in kind):
                 data = resp.read()
-                started = True
-                send(req, resp.status, data)
+                reason = " ".join(data.decode("utf-8", "replace").split())[:200]
+                gone_model = re.search(r"model.*(not (loaded|found)|unload)|no models",
+                                       reason, re.I)
+                if status >= 500 or gone_model:
+                    self.recheck = True
+                    return "broken", "HTTP %d: %s" % (status, reason), 0
+                # About this request alone -- too long for the window, say: the caller hears it.
+                sent = send(req, status, data)
+                return ("rejected" if sent else "gone"), "HTTP %d: %s" % (status, reason), 0
+            if "text/event-stream" in kind:
                 try:
-                    used = int((json.loads(data).get("usage") or {}).get("total_tokens") or 0)
-                except (ValueError, AttributeError, TypeError):
-                    used = 0
-            if resp.status < 400:
-                with self.lock:
-                    self.served += 1
-                    self.tokens += used
-        except (OSError, http.client.HTTPException) as exc:
-            if not started:              # after that, it is the client that went away
-                self.recheck = True
-                self.unavailable(req, "the model did not answer: %s" % exc, 30)
+                    req.send_response(status)
+                    req.send_header("Content-Type", kind)
+                    req.send_header("Cache-Control", "no-cache")
+                    req.end_headers()
+                    started = True
+                except OSError:
+                    return "gone", "", 0
+                for line in resp:
+                    try:
+                        req.wfile.write(line)
+                        if not line.strip():
+                            req.wfile.flush()
+                    except OSError:
+                        return "gone", "", 0
+                return "answered", "", 0
+            data = resp.read()
+            if gone.is_set() or not send(req, status, data):
+                return "gone", "", 0
+            try:
+                used = int((json.loads(data).get("usage") or {}).get("total_tokens") or 0)
+            except (ValueError, AttributeError, TypeError):
+                used = 0
+            return "answered", "", used
+        except (OSError, http.client.HTTPException, ValueError, AttributeError) as exc:
+            if gone.is_set():
+                return "gone", "", 0
+            self.recheck = True
+            if started:                   # the model stopped mid-answer: nothing to retry
+                return "failed", "the model stopped mid-answer (%s)" % exc, 0
+            return "broken", "the model did not answer (%s)" % exc, 0
         finally:
             conn.close()
-            with self.lock:
-                self.waiting -= 1
-            self.note(who, user, what, "answered" if 0 < status < 400 else
-                      "failed: HTTP %d" % status if status else "failed: the model did not answer",
-                      used, now() - begun)
 
     # ------------------------------------------------------------ MCP
 
@@ -576,7 +739,7 @@ class Service:
         if method == "ping":
             return {}, None
         if method == "tools/list":
-            tools = [BUILD_TOOL, TOOL_STATUS] + [
+            tools = list(BUILT_IN) + [
                 {"name": t["key"], "inputSchema": TOOL_INPUT,
                  "description": "%s (tests: %d of %d pass)" % (t["brief"][:1000], t["tests"][0],
                                                                t["tests"][1])}
@@ -591,6 +754,10 @@ class Service:
                 return text_result(said, failed), None
             if name == "tool_status":
                 return text_result(self.tool_status(args.get("name"))), None
+            if name in ("research", "read_page"):
+                return self.research(args, name == "read_page"), None
+            if name == "python_docs":
+                return self.python_docs(args.get("name")), None
             tool = next((t for t in self.tools() if t["key"] == name), None)
             if tool and tool["callable"]:
                 return self.run_tool(tool, args.get("input")), None
@@ -700,6 +867,63 @@ class Service:
         else:
             self.o.event("the tool %s was given up after %d turns: %d of %d tests pass, %d "
                          "item(s) open" % (key, rec["turns"], passed, total, tool["open"]), "bad")
+
+    def research(self, args, page=False):
+        """The agents' own web research (their research.py): a search and the top page,
+        or one page -- run in a folder of its own, so it touches no agent's files."""
+        question, url = str(args.get("question") or "").strip(), str(args.get("url") or "").strip()
+        if page and not url.startswith(("http://", "https://")):
+            return text_result("Give read_page an http(s) URL.", True)
+        if not page and not question:
+            return text_result("Give research a question.", True)
+        script = os.path.join(self.o.folders["A"], "research.py")
+        if not os.path.isfile(script):
+            return text_result("The agents have no research.py to run.", True)
+        where = os.path.join(self.o.root, "serve-work")
+        os.makedirs(where, exist_ok=True)
+        out = os.path.join(where, "research-%d.md" % threading.get_ident())
+        cmd = [self.o.python_for("A"), script, "--out", out]
+        cmd += ["--url", url] if page else ["--query", question] + (
+            ["--site", str(args["site"])] if args.get("site") else [])
+        try:
+            proc = work.contained_run(cmd, 120, cwd=where, env=work.check_env(),
+                                      creationflags=CREATE_NO_WINDOW if os.name == "nt" else 0)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return text_result("research did not finish: %s" % exc, True)
+        found = work.read(out)
+        try:
+            os.remove(out)
+        except OSError:
+            pass
+        if not found.strip():
+            reason = ((proc.stderr or "").strip().splitlines() or ["nothing found"])[-1]
+            return text_result("No answer: %s" % reason, True)
+        return text_result(found[:TOOL_OUTPUT])
+
+    def python_docs(self, name):
+        name = str(name or "").strip()
+        if not re.fullmatch(r"[A-Za-z_][\w.]*", name):
+            return text_result("Give python_docs a module or name, e.g. json.dumps.", True)
+        try:
+            proc = work.contained_run([self.o.python_for("A"), "-m", "pydoc", name], 60,
+                                      env=work.check_env(),
+                                      creationflags=CREATE_NO_WINDOW if os.name == "nt" else 0)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return text_result("pydoc did not finish: %s" % exc, True)
+        text = "\n".join((proc.stdout or "").splitlines()[:400])
+        return text_result(text or (proc.stderr or "no documentation found"), not text)
+
+    def catalog(self):
+        """Every tool there is, for the page: what the network can call -- built in, and
+        built on request -- and what the agents use inside their own turns (read from
+        their code, which they grow)."""
+        body = work.read(os.path.join(self.o.folders["A"], "ralph_tools.py"))
+        return {"network": [{"name": t["name"], "what": t["description"].split(". ")[0]}
+                            for t in BUILT_IN],
+                "built": [{"name": t["key"], "what": t["brief"][:160], "state": t["state"]}
+                          for t in self.tools()],
+                "agents": [{"name": word.rstrip(":"), "what": " ".join(line.split(None, 1)[1:])}
+                           for word, line in re.findall(r'\(\s*"([A-Z]+:)",\s*"(.+?)"\)', body)]}
 
     def run_tool(self, tool, text):
         """Run a tool once on `text`, inside the limits the model's code always runs in."""

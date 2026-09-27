@@ -140,18 +140,20 @@ the address and a key; every request must send the key as
   the model's other code. For Claude Code:
   `claude mcp add --transport http orthros http://<this machine>:8777/mcp --header "Authorization: Bearer <key>"`
 
-One card, one job at a time: while a tool is being built, inference answers
-**503** with a `Retry-After`, and so does a full queue. A caller should treat
-that -- or no answer within a few seconds, as when this machine is off -- as
-"use the next provider", and come back after the `Retry-After`.
+One card, one job at a time. Requests wait their turn, in order, and each is
+seen through: answered; failed, once a reload and a second try have not saved
+it; or its caller stopped waiting -- the page counts those, since the model is
+slower than a paid one. While a tool is being built, inference answers **503**
+with a `Retry-After`: a caller should treat that -- or no connection within a
+few seconds, as when this machine is off -- as "use the next provider".
 
 Windows' firewall lets other machines in only with a rule -- it may not even
 ask. Once, in an administrator terminal:
 
     netsh advfirewall firewall add rule name="Orthros serve" dir=in action=allow protocol=TCP localport=8777 profile=private
 
-The page counts requests turned back for a wrong key. Settings: `serve_port`, `serve_queue` (requests in hand
-before more are turned away), `tool_turns` (turns before a tool is given up)
+The page counts requests turned back for a wrong key, and callers that stopped
+waiting. Settings: `serve_port`, `tool_turns` (turns before a tool is given up)
 and `tool_seconds` (the longest one run of a tool may take).
 
 ## Settings

@@ -167,7 +167,7 @@ def said(path, body):
 
 def excerpt(text):
     """A request in one line: its start and its end, where an instruction usually sits."""
-    return (text[:100] + " … " + text[-70:]) if len(text) > 180 else (text or "(no text)")
+    return (text[:320] + " … " + text[-160:]) if len(text) > 500 else (text or "(no text)")
 
 
 def ask(upstream, model, messages, max_tokens=700, timeout=180):

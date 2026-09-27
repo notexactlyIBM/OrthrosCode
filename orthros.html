@@ -27,7 +27,7 @@ body::before { content: ""; position: fixed; inset: 0; pointer-events: none; z-i
   background-image: linear-gradient(rgba(140, 180, 255, .035) 1px, transparent 1px),
                     linear-gradient(90deg, rgba(140, 180, 255, .035) 1px, transparent 1px);
   background-size: 36px 36px; }
-.wrap { position: relative; z-index: 1; max-width: 1180px; margin: 0 auto; padding: 0 18px; }
+.wrap { position: relative; z-index: 1; max-width: 1320px; margin: 0 auto; padding: 0 18px; }
 code, .mono { font-family: "Cascadia Mono", Consolas, ui-monospace, monospace; font-size: 12.5px; }
 [hidden] { display: none !important; }
 
@@ -109,7 +109,13 @@ main { padding: 18px 18px 60px; }
 .cardhead .sp, .line .sp { flex: 1; }
 .row2 { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 14px; }
 .row2e { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; }
-.toprow { grid-template-columns: minmax(0, 8fr) minmax(0, 4fr); align-items: start; }
+.toprow { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: stretch; min-height: 660px; }
+/* the right half is as tall as the left, no taller: the chat takes what the card leaves */
+.side { position: relative; min-width: 0; }
+.side > .inner { position: absolute; inset: 0; display: flex; flex-direction: column; gap: 14px; }
+.side .gpucard { flex: none; }
+.side .chat { flex: 1; min-height: 0; max-width: none; }
+.side .chatlog { flex: 1; min-height: 0; max-height: none; }
 .empty { color: var(--faint); font-size: 13px; }
 .msgline { font-size: 12px; color: var(--dim); }
 .msgline.bad { color: var(--bad); }
@@ -193,11 +199,11 @@ details.help .body { margin-top: 12px; display: grid; gap: 10px; font-size: 13px
 .newtask textarea { min-height: 90px; resize: vertical; }
 
 /* serve: readouts, then what was asked, then the tools */
-.stats { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); row-gap: 12px; }
+.stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); row-gap: 14px; }
 .stats > span { display: flex; flex-direction: column; gap: 3px; padding: 0 14px; border-left: 1px solid var(--line);
   font: 700 10.5px var(--display); letter-spacing: .08em; text-transform: uppercase; color: var(--dim);
   white-space: nowrap; }
-.stats > span:first-child { border-left: none; padding-left: 0; }
+.stats > span:nth-child(3n+1) { border-left: none; padding-left: 0; }
 .stats b { order: -1; font: 700 26px/1 var(--display); letter-spacing: .02em; color: var(--ink); }
 .stats .bad, .stats .bad b { color: var(--bad); }
 .stats .warn, .stats .warn b { color: var(--warn); }
@@ -207,8 +213,11 @@ details.help .body { margin-top: 12px; display: grid; gap: 10px; font-size: 13px
   padding: 8px 2px; border-bottom: 1px solid var(--line); font-size: 13px; }
 .req:last-child { border-bottom: none; }
 .req time { color: var(--faint); font: 600 12px var(--display); letter-spacing: .04em; }
-.req .what { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.req .what b { font-weight: 600; color: var(--ink); margin-right: 8px; }
+.req { cursor: pointer; }
+.req .what { min-width: 0; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4; overflow-wrap: anywhere; }
+.req.open .what { display: block; }
+.req .what b { display: block; font-weight: 600; color: var(--ink); }
 .req .what span { color: var(--faint); font-size: 12px; }
 .req .res { font: 700 10.5px var(--display); letter-spacing: .1em; text-transform: uppercase; white-space: nowrap; color: var(--dim); }
 .req .res.ok { color: var(--good); } .req .res.no { color: var(--warn); } .req .res.bad { color: var(--bad); }
@@ -264,7 +273,7 @@ details.help .body { margin-top: 12px; display: grid; gap: 10px; font-size: 13px
 .swap span { display: inline-block; transition: transform .6s; }
 
 /* ---- the card and the conversation ---- */
-#gpu { width: 100%; height: 200px; display: block; }
+#gpu { width: 100%; height: 150px; display: block; }
 .gpubig { font: 700 30px/1 var(--display); color: var(--serve); }
 .gpubig small { font: 700 10.5px var(--display); letter-spacing: .16em; text-transform: uppercase; color: var(--dim);
   margin-left: 6px; }
@@ -325,7 +334,11 @@ details.card[open] > summary { margin-bottom: 14px; }
 .catrow code { color: #cfe6ff; }
 .catrow span { color: var(--dim); }
 
-@media (max-width: 1040px) { .toprow { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 1040px) {
+  .toprow { grid-template-columns: minmax(0, 1fr); min-height: 0; }
+  .side, .side > .inner { position: static; }
+  .side .chatlog { min-height: 200px; max-height: 380px; }
+}
 @media (max-width: 860px) {
   .row2, .row2e { grid-template-columns: minmax(0, 1fr); }
   .gorow { flex-direction: column; align-items: stretch; }
@@ -452,15 +465,32 @@ details.card[open] > summary { margin-bottom: 14px; }
         </div>
       </section>
 
-      <section class="card gpucard">
-        <div class="cardhead"><h2>GPU</h2>
-          <span class="tip left" tabindex="0" data-tip="The lattice turns slowly: the share of points lit is how busy the card is (nvidia-smi, every 2 s); the tinted plane rises with memory in use. The line below is the last two minutes.">?</span>
-          <span class="sp"></span><span class="gpubig" id="gpuBig">-</span></div>
-        <canvas id="gpu" aria-label="The GPU as a slowly turning lattice: the share of points lit is how busy the card is"></canvas>
-        <svg class="spark" id="spark" viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true"><polygon id="sparkFill"/><polyline id="sparkLine"/></svg>
-        <div class="meter"><span>memory</span><div class="mbar"><i id="memBar"></i></div><span id="memVal"></span></div>
-        <div class="gpustat" id="gpustat">waiting for readings…</div>
-      </section>
+      <div class="side"><div class="inner">
+        <section class="card gpucard">
+          <div class="cardhead"><h2>GPU</h2>
+            <span class="tip left" tabindex="0" data-tip="The lattice turns slowly: the share of points lit is how busy the card is (nvidia-smi, every 2 s); the tinted plane rises with memory in use. The line below is the last two minutes.">?</span>
+            <span class="sp"></span><span class="gpubig" id="gpuBig">-</span></div>
+          <canvas id="gpu" aria-label="The GPU as a slowly turning lattice: the share of points lit is how busy the card is"></canvas>
+          <svg class="spark" id="spark" viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true"><polygon id="sparkFill"/><polyline id="sparkLine"/></svg>
+          <div class="meter"><span>memory</span><div class="mbar"><i id="memBar"></i></div><span id="memVal"></span></div>
+          <div class="gpustat" id="gpustat">waiting for readings…</div>
+        </section>
+        <section class="card chat">
+          <div class="cardhead"><h2>Talk to Orthros</h2>
+            <span class="tip" tabindex="0" data-tip="Ask: an answer from Orthros's own records, put into words by the model -- the served one, the running agent's, or loaded for the purpose while paused.&#10;&#10;Suggest direction: goes first on the chosen agent's task list, which its twin works through. If a turn is using that list, it waits for the turn to end.">?</span>
+            <span class="sp"></span><button class="small" type="button" id="chatClear" title="Clear the conversation: the log here, and what the model is reminded of">Clear</button></div>
+          <div class="chatlog" id="chatlog"><div class="empty">Ask how it is going, or suggest where the work should go next.</div></div>
+          <div class="ask">
+            <textarea id="chatText" rows="2" placeholder="e.g. how is it going?  /  what has the network been asking?  /  make research cache its results"></textarea>
+            <div class="btns">
+              <button class="primary" id="askBtn" title="An answer from Orthros's own records, put into words by the model">Ask</button>
+              <button id="directBtn" title="Put this at the top of the chosen agent's task list">Suggest direction</button>
+              <label>for <select id="chatTarget"><option value="both">both</option><option>A</option><option>B</option></select></label>
+            </div>
+          </div>
+          <div class="hint" id="chatHint"></div>
+        </section>
+      </div></div>
     </div>
 
     <div class="group">
@@ -472,23 +502,6 @@ details.card[open] > summary { margin-bottom: 14px; }
       </div>
     </div>
 
-    <div class="group">
-      <section class="card chat">
-        <div class="cardhead"><h2>Talk to Orthros</h2>
-          <span class="tip" tabindex="0" data-tip="Ask: an answer from Orthros's own records, put into words by the model -- the served one, the running agent's, or loaded for the purpose while paused.&#10;&#10;Suggest direction: goes first on the chosen agent's task list, which its twin works through. If a turn is using that list, it waits for the turn to end.">?</span>
-          <span class="sp"></span><button class="small" type="button" id="chatClear" title="Clear the conversation: the log here, and what the model is reminded of">Clear</button></div>
-        <div class="chatlog" id="chatlog"><div class="empty">Ask how it is going, or suggest where the work should go next.</div></div>
-        <div class="ask">
-          <textarea id="chatText" rows="2" placeholder="e.g. how is it going?  /  what has the network been asking?  /  make research cache its results"></textarea>
-          <div class="btns">
-            <button class="primary" id="askBtn" title="An answer from Orthros's own records, put into words by the model">Ask</button>
-            <button id="directBtn" title="Put this at the top of the chosen agent's task list">Suggest direction</button>
-            <label>for <select id="chatTarget"><option value="both">both</option><option>A</option><option>B</option></select></label>
-          </div>
-        </div>
-        <div class="hint" id="chatHint"></div>
-      </section>
-    </div>
   </div>
 
   <!-- ============================================================ Diagnostics -->
@@ -1061,6 +1074,7 @@ $("#start").onclick = async () => {
   await post("/api/start", { first: $("#first").value, minutes: +$("#minutes").value }); minutesTouched = false; tick(); };
 $("#stop").onclick = async () => { await post("/api/stop"); tick(); };
 $("#force").onclick = async () => { if (confirm("Kill the running agent now? Its current round is lost.")) { await post("/api/force"); tick(); } };
+$("#svcRecent").onclick = (e) => { const r = e.target.closest(".req"); if (r) r.classList.toggle("open"); };
 $("#chatClear").onclick = async () => {
   const r = await post("/api/chat/clear");
   if (r.result !== "ok") { $("#chatHint").textContent = "Restart Orthros once to use Clear."; return; }

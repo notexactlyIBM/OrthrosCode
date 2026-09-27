@@ -475,7 +475,8 @@ details.card[open] > summary { margin-bottom: 14px; }
     <div class="group">
       <section class="card chat">
         <div class="cardhead"><h2>Talk to Orthros</h2>
-          <span class="tip" tabindex="0" data-tip="Ask: an answer from Orthros's own records, put into words by the model -- the served one, the running agent's, or loaded for the purpose while paused.&#10;&#10;Suggest direction: goes first on the chosen agent's task list, which its twin works through. If a turn is using that list, it waits for the turn to end.">?</span></div>
+          <span class="tip" tabindex="0" data-tip="Ask: an answer from Orthros's own records, put into words by the model -- the served one, the running agent's, or loaded for the purpose while paused.&#10;&#10;Suggest direction: goes first on the chosen agent's task list, which its twin works through. If a turn is using that list, it waits for the turn to end.">?</span>
+          <span class="sp"></span><button class="small" type="button" id="chatClear" title="Clear the conversation: the log here, and what the model is reminded of">Clear</button></div>
         <div class="chatlog" id="chatlog"><div class="empty">Ask how it is going, or suggest where the work should go next.</div></div>
         <div class="ask">
           <textarea id="chatText" rows="2" placeholder="e.g. how is it going?  /  what has the network been asking?  /  make research cache its results"></textarea>
@@ -1060,6 +1061,11 @@ $("#start").onclick = async () => {
   await post("/api/start", { first: $("#first").value, minutes: +$("#minutes").value }); minutesTouched = false; tick(); };
 $("#stop").onclick = async () => { await post("/api/stop"); tick(); };
 $("#force").onclick = async () => { if (confirm("Kill the running agent now? Its current round is lost.")) { await post("/api/force"); tick(); } };
+$("#chatClear").onclick = async () => {
+  const r = await post("/api/chat/clear");
+  if (r.result !== "ok") { $("#chatHint").textContent = "Restart Orthros once to use Clear."; return; }
+  chatShown = ""; renderChat([], 0); tick();
+};
 $("#askBtn").onclick = () => sendChat("ask");
 $("#directBtn").onclick = () => sendChat("direct");
 $("#chatText").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat("ask"); } });

@@ -2299,6 +2299,12 @@ class Orthros:
             self.save()
         return reply
 
+    def clear_chat(self):
+        """Forget the conversation: the page's log, and what the model is reminded of."""
+        with self.lock:
+            self.state["chat"] = []
+            self.save()
+
     def workspace_of(self, running):
         return running.get("workspace") or self.folders[PEER[running["agent"]]]
 
@@ -2700,6 +2706,9 @@ def serve(orthros, port):
                 elif url.path == "/api/task":
                     self.send(200, orthros.new_task(body.get("name") or "", body.get("brief") or "",
                                                     body.get("folder") or ""))
+                elif url.path == "/api/chat/clear":
+                    orthros.clear_chat()
+                    self.send(200, {"result": "ok", "chat": []})
                 elif url.path == "/api/chat":
                     reply = orthros.chat(body.get("text"), body.get("kind") or "ask",
                                          body.get("target") or "both")

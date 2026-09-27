@@ -194,6 +194,7 @@ class Service:
         self.waiting = 0                 # inference requests in flight
         self.served = self.refused = self.tokens = 0
         self.denied = 0                  # requests with a wrong or missing key
+        self.turned_back_at = {}         # machine -> when its last one was logged
         self.checked = 0.0
         self.recheck = False             # a request failed upstream: is the model still there?
         self.fake = None                 # the stand-in for LM Studio in a simulation
@@ -384,9 +385,9 @@ class Service:
 
     def handle(self, req, method):
         path = urllib.parse.urlparse(req.path).path.rstrip("/") or "/"
-        if not self.authorized(req.headers.get("Authorization")):
-            with self.lock:
-                self.denied += 1         # shown on the page: a caller with the wrong key
+        header = req.headers.get("Authorization")
+        if not self.authorized(header):
+            self.turned_back(req.client_address[0], header)
             return send(req, 401, error("send the key Orthros's page shows: Authorization: "
                                         "Bearer <key>", "unauthorized"))
         try:
@@ -416,6 +417,24 @@ class Service:
             send(req, 404, error("no such endpoint: %s %s" % (method, path), "not_found"))
         except Exception as exc:         # a bug here must not take the listener down
             send(req, 500, error("Orthros: %s" % exc, "server_error"))
+
+    def turned_back(self, who, header):
+        """Count a request without the right key, and say in the log where it came
+        from and what was wrong with it -- once a minute per machine."""
+        scheme, _, token = (header or "").partition(" ")
+        token, key = token.strip(), self.o.settings.get("serve_key") or ""
+        why = ("it sent no key" if not header else
+               "it did not send 'Bearer <key>'" if scheme.lower() != "bearer" else
+               "its key has <> or quotes around it" if token[:1] in "<'\"" else
+               "its key is a different one (%d characters, the right one has %d)"
+               % (len(token), len(key)))
+        with self.lock:
+            self.denied += 1
+            quiet = now() - self.turned_back_at.get(who, 0) < 60
+            if not quiet:
+                self.turned_back_at[who] = now()
+        if not quiet:
+            self.o.event("turned back a request from %s: %s" % (who, why), "bad")
 
     def unavailable(self, req, why=None, retry=None):
         with self.lock:

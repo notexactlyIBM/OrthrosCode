@@ -98,12 +98,13 @@ class TestKey(Served):
         self.assertGreaterEqual(len(self.key), 24)
         self.assertEqual(orthros.Orthros(self.root, simulate=True).settings["serve_key"], self.key)
 
-    def test_every_request_needs_it(self):
+    def test_every_request_needs_it_and_the_page_counts_those_without(self):
         self.serve()
         for key in ("", "wrong"):
             status, _, _ = self.request("GET", "/health", key=key)
             self.assertEqual(status, 401)
         self.assertEqual(self.request("GET", "/health")[0], 200)
+        self.assertEqual(self.svc.view()["denied"], 2)
 
 
 class TestInference(Served):
@@ -189,6 +190,16 @@ class TestMcp(Served):
         self.assertTrue(items[0].startswith("From the requester: Also keep the newlines"))
         self.assertEqual(self.svc.next_build()["key"], "shout")
 
+    def test_asking_while_it_is_being_built_changes_nothing(self):
+        folder = self.ready_tool()
+        before = work.read(os.path.join(folder, "orthros_tasks.md"))
+        self.o.state["running"] = {"agent": "A", "workspace": folder}
+        said, failed = self.svc.build_tool("shout", "Also keep the newlines exactly.")
+        self.assertTrue(failed)
+        self.assertIn("being built right now", said)
+        self.assertEqual(work.read(os.path.join(folder, "orthros_tasks.md")), before)
+        self.assertTrue(service.record(folder)["done"])
+
     def test_a_ready_tool_is_listed_and_runs_without_the_harness(self):
         self.ready_tool(code="import os, sys\nprint(sys.stdin.read().upper(), "
                              "sorted(k for k in os.environ if k.startswith('ORTHROS_')))\n")
@@ -261,14 +272,24 @@ class TestServeMode(Served):
         self.o.set_mode("serve")
         self.o.state["idle_streak"] = 50
         folder = self.o.folders["B"]
-        self.o.judge({"agent": "A", "started": 0, "seconds": 60, "exit": 0, "launched": True,
-                      "rounds": 1, "ticked": 0, "kept": 0, "sent_back": 1, "tokens": 0,
-                      "reason": "Time is up.", "log": "", "own": orthros.head(self.o.folders["A"]),
-                      "pre": orthros.head(folder), "post": orthros.head(folder), "item": "",
-                      "minutes": 30, "lowest_free_mb": None, "kind": "task", "label": "shout",
-                      "folder": folder, "score": None})
-        self.assertFalse(self.o.state["paused"] and self.o.phase == "paused")
+        with mock.patch.object(self.o, "pause") as pause:
+            self.o.judge({"agent": "A", "started": 0, "seconds": 60, "exit": 0,
+                          "launched": True, "rounds": 1, "ticked": 0, "kept": 0,
+                          "sent_back": 1, "tokens": 0, "reason": "Time is up.", "log": "",
+                          "own": orthros.head(self.o.folders["A"]), "pre": orthros.head(folder),
+                          "post": orthros.head(folder), "item": "", "minutes": 30,
+                          "lowest_free_mb": None, "kind": "task", "label": "shout",
+                          "folder": folder, "score": None})
+        pause.assert_not_called()
         self.assertEqual(self.o.state["idle_streak"], 0)
+
+
+class TestChatBox(Served):
+    def test_paused_it_loads_the_model_to_answer(self):
+        self.assertEqual(self.o.answer("how is it going?"),
+                         "(simulated %s) how is it going?" % service.IDENTIFIER)
+        self.assertTrue(self.svc.ready)
+        self.assertTrue(any("loading the model to answer" in e for e in self.events))
 
 
 class TestHarness(unittest.TestCase):

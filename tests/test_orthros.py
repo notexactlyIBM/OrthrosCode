@@ -365,14 +365,22 @@ class TestModes(Sandbox):
 
 
 class TestChat(Sandbox):
-    def test_status_question_gets_a_plain_answer(self):
+    def test_the_model_answers_from_the_records(self):
+        self.o.service.ready = True                      # a model is up, as in serve mode
+        with mock.patch.object(orthros.service, "ask", return_value="All quiet.") as ask:
+            self.assertEqual(self.o.chat("how is it going?"), "All quiet.")
+        messages = ask.call_args[0][2]
+        self.assertIn("A has had 0 turns", messages[0]["content"])
+        self.assertEqual(messages[-1], {"role": "user", "content": "how is it going?"})
+
+    def test_with_no_model_to_be_had_the_records_answer_and_say_why(self):
+        self.o.state["paused"] = False                   # between turns: nothing loaded
         reply = self.o.chat("how is it going?")
-        self.assertIn("paused", reply)
+        self.assertTrue(reply.startswith("(The model is between turns"), reply)
         self.assertIn("A has had 0 turns", reply)
-        self.assertLess(len(reply.splitlines()), 8)
 
     def test_temperature_question(self):
-        self.assertIn("LC_TEMP_CODE", self.o.chat("what temperature is used?"))
+        self.assertIn("LC_TEMP_CODE", self.o.records_reply("what temperature is used?"))
 
     def test_direction_goes_first_when_the_list_is_free(self):
         self.o.chat("cache research answers", kind="direct", target="B")

@@ -36,6 +36,7 @@ import http.client
 import http.server
 import json
 import os
+import re
 import socket
 import subprocess
 import threading
@@ -103,6 +104,25 @@ def resident(lms):
     return [str(e.get("identifier") or "") for e in entries if isinstance(e, dict)]
 
 
+def ask(upstream, model, messages, max_tokens=700, timeout=180):
+    """One chat completion from a model LM Studio has up: its answer, or ''. The model
+    thinks first, out of the same budget, so it is asked to think little and given room."""
+    try:
+        conn = http.client.HTTPConnection(*upstream, timeout=timeout)
+        conn.request("POST", "/v1/chat/completions", json.dumps({
+            "model": model, "messages": messages, "max_tokens": max_tokens + 1024,
+            "temperature": 0.3, "reasoning_effort": "low"}),
+            {"Content-Type": "application/json", "Authorization": "Bearer lm-studio"})
+        resp = conn.getresponse()
+        data = json.loads(resp.read() or b"{}")
+        if resp.status != 200:
+            return ""
+        text = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+        return re.sub(r"<think>.*?</think>", "", text, flags=re.S | re.I).strip()
+    except (OSError, ValueError, http.client.HTTPException):
+        return ""
+
+
 def record(folder):
     try:
         with open(os.path.join(folder, RECORD), encoding="utf-8") as handle:
@@ -144,6 +164,9 @@ class Service:
     def __init__(self, orthros):
         self.o = orthros
         self.lock = threading.Lock()
+        # Loading and unloading, one at a time: the loop serves and starts turns,
+        # the chat box loads the model to answer while Orthros is paused.
+        self.engine_lock = threading.RLock()
         self.server = None               # the listener, while open
         self.listen_error = ""
         self.ready = False               # the model is loaded and answered
@@ -152,6 +175,7 @@ class Service:
         self.model = ""
         self.waiting = 0                 # inference requests in flight
         self.served = self.refused = self.tokens = 0
+        self.denied = 0                  # requests with a wrong or missing key
         self.checked = 0.0
         self.recheck = False             # a request failed upstream: is the model still there?
         self.fake = None                 # the stand-in for LM Studio in a simulation
@@ -162,6 +186,10 @@ class Service:
     def engine_up(self):
         """Load the model to serve, the way the agents load it. '' once it answers,
         else why not."""
+        with self.engine_lock:
+            return self._engine_up()
+
+    def _engine_up(self):
         if self.o.simulate:
             if not self.fake:
                 self.fake = fake_engine()
@@ -195,17 +223,19 @@ class Service:
         self.ready, self.checked, self.recheck = True, now(), False
         return ""
 
-    def engine_down(self):
-        """Unload the served model and stop LM Studio's server: the card is free."""
-        was, self.ready = self.ready, False
-        if self.o.simulate:
-            return
-        lms = self.o.engine()["lms"]
-        if lms:
-            lms_run(lms, "unload", "--all", timeout=120)
-            lms_run(lms, "server", "stop", timeout=120)
-        if was:
-            time.sleep(8)                # let the driver hand the memory back
+    def engine_down(self, force=False):
+        """Unload the served model and stop LM Studio's server: the card is free. Only
+        when this loaded it, unless `force`: before a turn, whatever is there goes."""
+        with self.engine_lock:           # waits for a load the chat box has under way
+            was, self.ready = self.ready, False
+            if self.o.simulate or not (was or force):
+                return
+            lms = self.o.engine()["lms"]
+            if lms:
+                lms_run(lms, "unload", "--all", timeout=120)
+                lms_run(lms, "server", "stop", timeout=120)
+            if was:
+                time.sleep(8)            # let the driver hand the memory back
 
     def watch(self):
         """Is the served model still there? Asked of LM Studio once a minute, and at
@@ -306,7 +336,7 @@ class Service:
                 "why": self.why if self.server else "", "error": self.listen_error,
                 "urls": self.urls(), "key": self.o.settings.get("serve_key", ""),
                 "model": self.model, "served": self.served, "refused": self.refused,
-                "tokens": self.tokens,
+                "tokens": self.tokens, "denied": self.denied,
                 "tools": [{k: t[k] for k in ("key", "state", "tests", "turns", "open", "done",
                                              "parked")} for t in self.tools()]}
 
@@ -336,6 +366,8 @@ class Service:
     def handle(self, req, method):
         path = urllib.parse.urlparse(req.path).path.rstrip("/") or "/"
         if not self.authorized(req.headers.get("Authorization")):
+            with self.lock:
+                self.denied += 1         # shown on the page: a caller with the wrong key
             return send(req, 401, error("send the key Orthros's page shows: Authorization: "
                                         "Bearer <key>", "unauthorized"))
         try:
@@ -386,11 +418,11 @@ class Service:
             return send(req, 400, error("the body must be a JSON object", "invalid_request_error"))
         limit = max(1, int(self.o.settings.get("serve_queue") or 2))
         with self.lock:
-            if self.waiting >= limit:
-                self.refused += 1
-                return send(req, 503, error("busy: %d request(s) ahead of this one" % self.waiting),
-                            {"Retry-After": "5"})
-            self.waiting += 1
+            ahead = self.waiting
+            if ahead < limit:
+                self.waiting += 1
+        if ahead >= limit:
+            return self.unavailable(req, "busy: %d request(s) ahead of this one" % ahead, 5)
         body["model"] = IDENTIFIER
         started = False
         conn = http.client.HTTPConnection(*self.upstream, timeout=1800)
@@ -496,17 +528,21 @@ class Service:
     def turn_limit(self):
         return max(1, int(self.o.settings.get("tool_turns") or 4))
 
+    def building(self, folder):
+        """Is a turn working in this tool's folder right now?"""
+        running = (self.o.state.get("running") or {}).get("workspace") or ""
+        return bool(running) and os.path.normcase(running) == os.path.normcase(folder)
+
     def tools(self):
         """Every tool asked for, with its list, its tests and its state."""
         limit = self.turn_limit()
-        running = (self.o.state.get("running") or {}).get("workspace") or ""
         out = []
         for t in work.list_tasks(self.o.root, tool=True):
             rec = record(t["folder"])
             tests = list(rec.get("tests") or [0, 0])
             passing = bool(tests[1]) and tests[0] == tests[1] and \
                 os.path.isfile(os.path.join(t["folder"], "tool.py"))
-            busy = bool(running) and os.path.normcase(running) == os.path.normcase(t["folder"])
+            busy = self.building(t["folder"])
             wanted = bool(rec) and not rec.get("done") and rec.get("turns", 0) < limit
             brief = work.read(os.path.join(t["folder"], "TASK.md")).split("\n", 1)[-1].strip()
             t.update(tests=tests, turns=rec.get("turns", 0), asked=rec.get("asked", 0),
@@ -529,6 +565,11 @@ class Service:
         if folder:
             if len(description) < 10:
                 return "Say what to change about %s -- a sentence at least." % key, True
+            if self.building(folder):
+                # Its list and record are the running turn's: a rollback there
+                # would quietly undo this request.
+                return ("%s is being built right now. Ask again once tool_status no longer "
+                        "says building." % key), True
             work.add_first(os.path.join(folder, "orthros_tasks.md"),
                            "From the requester: %s" % description)
         else:

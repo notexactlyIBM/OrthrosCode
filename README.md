@@ -145,8 +145,12 @@ One card, one job at a time: while a tool is being built, inference answers
 that -- or no answer within a few seconds, as when this machine is off -- as
 "use the next provider", and come back after the `Retry-After`.
 
-The first time, Windows asks whether Python may accept connections: allow it
-on private networks. Settings: `serve_port`, `serve_queue` (requests in hand
+Windows' firewall lets other machines in only with a rule -- it may not even
+ask. Once, in an administrator terminal:
+
+    netsh advfirewall firewall add rule name="Orthros serve" dir=in action=allow protocol=TCP localport=8777 profile=private
+
+The page counts requests turned back for a wrong key. Settings: `serve_port`, `serve_queue` (requests in hand
 before more are turned away), `tool_turns` (turns before a tool is given up)
 and `tool_seconds` (the longest one run of a tool may take).
 

@@ -203,6 +203,27 @@ FIELD_SIGNS = (
 OVERSIZE = re.compile(r"request \((\d+) tokens\) exceeds the available context size "
                       r"\((\d+) tokens\)")
 
+# The chat box. Its answers come from Orthros's records, put into words by the
+# model that is up: the served one, or the running agent's (the name its
+# supervisor loads it under). While Orthros is paused the model is loaded for
+# the chat box, and unloaded once it has gone this long unasked, or a turn starts.
+AGENT_MODEL = "localcoder"
+CHAT_KEEP = 600
+CHAT_BRIEF = """You are Orthros, the referee on this PC. You run two AI coding agents, A and
+B, on one graphics card. In self-improvement mode each works on the other's code,
+and a change is kept only if it passes the checks, and spreads only once a held-out
+score shows it is no worse. In task mode both build one project in turns. In serve
+mode the card answers other machines on the network, and A and B build tools on
+request. You are talking to the operator in your page's chat box.
+
+Answer from the records below: they are exact and current. Plain sentences, in the
+first person ("I rolled B back because ..."), a few of them unless asked for more.
+Explain what the records show and what it means, not only numbers. Give a cause only
+where the records state it -- quote their reason rather than supply a likelier one.
+When the records do not say, say so and where to look (the page, orthros.log, logs\\,
+an agent's FIELD_REPORT.md). You cannot act from here: the page's buttons do that,
+and "Suggest direction" puts an item at the top of an agent's task list."""
+
 
 def notes_file(folder):
     """The task list an agent keeps about this folder."""
@@ -654,6 +675,7 @@ class Orthros:
         self.gpu_history = []
         self.service = service.Service(self)
         self.serve_failures = 0              # loads of the model to serve, failed in a row
+        self.chat_at = 0.0                   # when the chat box last used the model
 
     # ---------------------------------------------------------------- state
 
@@ -1803,8 +1825,9 @@ class Orthros:
         while True:
             serving = self.state.get("mode") == "serve" and not self.state["paused"]
             self.service.listen(serving)     # the port is open only while serving
-            if not serving and self.service.ready:
-                self.service.engine_down()   # out of serve mode: the card is free
+            if not serving and self.service.ready and (
+                    not self.state["paused"] or now() - self.chat_at > CHAT_KEEP):
+                self.service.engine_down()   # the card goes back to the agents, or rests
             if self.state["paused"]:
                 if self.phase not in ("error",):
                     self.set_phase("paused" if self.state["events"] else "idle", self.message
@@ -1834,8 +1857,10 @@ class Orthros:
                         self.keep_serving()
                         continue
                     self.service.refuse("%s is building the tool %s" % (name, tool["key"]), 900)
-                    self.service.engine_down()
+                    self.service.engine_down(force=True)
                     build = {"kind": "task", "folder": tool["folder"], "label": tool["key"]}
+                else:
+                    self.service.engine_down()   # a model the chat box loaded, if any
                 ev = None if build else self.maybe_start_eval(name)
                 if ev:
                     name = ev["agent"]
@@ -2249,6 +2274,76 @@ class Orthros:
         return self.folders[PEER[self.state["next"]]]
 
     def answer(self, question):
+        """The chat box's reply: Orthros's records, put into words by the model. When
+        no model can be had, the records alone, and why."""
+        reply, why = self.model_reply(question, self.briefing())
+        return reply or "(%s, so this is straight from the records.)\n%s" % (
+            why, self.records_reply(question))
+
+    def model_reply(self, question, facts):
+        """(the model's answer, '') or ('', why there is none)."""
+        running = self.state.get("running")
+        if self.service.ready:
+            where = (self.service.upstream, service.IDENTIFIER)
+        elif running and self.agent_is_up(running):
+            where = (("127.0.0.1", self.engine()["port"]), AGENT_MODEL)
+        elif running or not self.state["paused"]:
+            return "", "The model is between turns"
+        else:
+            self.event("loading the model to answer the chat box")
+            problem = self.service.engine_up()
+            if problem:
+                return "", "The model would not load (%s)" % problem
+            where = (self.service.upstream, service.IDENTIFIER)
+        self.chat_at = now()
+        said = [{"role": "user" if who == "you" else "assistant", "content": text[:800]}
+                for _, who, text in (self.state.get("chat") or [])[-6:]]
+        reply = service.ask(where[0], where[1], [
+            {"role": "system", "content": CHAT_BRIEF + "\n\n# The records\n\n" + facts}]
+            + said + [{"role": "user", "content": question}],
+            timeout=420 if where[1] == AGENT_MODEL else 180)   # an agent's round goes first
+        return reply, "" if reply else "The model did not answer"
+
+    def agent_is_up(self, running):
+        """Has the running agent's model loaded -- is the turn past its start?"""
+        st = read_json(os.path.join(self.workspace_of(running), STATUS_FILE), {}) or {}
+        return self.is_mine(st, running) and st.get("phase") in LAUNCHED
+
+    def briefing(self):
+        """What Orthros knows right now, as plain text for the model to answer from."""
+        v = self.view()
+        parts = ["Now: %s. Mode: %s." % (time.strftime("%Y-%m-%d %H:%M"), {
+                     "self": "improving itself", "serve": "serving the network"}.get(
+                     v["mode"], "working on the task %s" % v["task"])),
+                 self.status_line(), self.say_progress(), self.say_next(),
+                 self.say_trouble(), self.say_temperature()]
+        s = v["service"]
+        if v["mode"] == "serve" or s["open"]:
+            parts.append("Serving the network at %s with %s: %s requests answered, %s turned "
+                         "away (busy, or the card was building a tool), %s with a wrong key, "
+                         "%s tokens.\nTools: %s" % (
+                             ", ".join(s["urls"]) or "?", s["model"] or "no model yet",
+                             s["served"], s["refused"], s["denied"], "{:,}".format(s["tokens"]),
+                             self.service.tool_status()))
+        for n in NAMES:
+            entries = read_text(os.path.join(self.folders[n], FIELD_REPORT)).split("\n## ")
+            if len(entries) > 1:
+                parts.append("%s's latest field report entry:\n## %s" % (n, entries[1][:1500]))
+            why = re.search(r"It was undone because [^\n]+",
+                            read_text(os.path.join(self.folders[n], ROLLBACK_NOTE)))
+            if why:
+                parts.append("Why %s was last rolled back: %s" % (n, why.group(0)))
+        parts.append("Recent events, newest first:\n" + "\n".join(
+            "- %s  %s" % (time.strftime("%m-%d %H:%M", time.localtime(e[0])), e[1])
+            for e in v["events"][:15]))
+        if v["gpu"]:
+            g = v["gpu"]
+            parts.append("The card now: %s, %s%% busy, %.1f of %.1f GB in use." % (
+                g.get("name"), g.get("util"), (g.get("mem_used") or 0) / 1024.0,
+                (g.get("mem_total") or 0) / 1024.0))
+        return "\n\n".join(p for p in parts if p)
+
+    def records_reply(self, question):
         """A few plain sentences on how things stand, picked by what was asked."""
         q = question.lower()
         head_line = self.status_line()
@@ -2283,8 +2378,9 @@ class Orthros:
             return "Orthros has stopped and needs you: %s" % (v["message"].splitlines() or ["?"])[0]
         if v["paused"]:
             why = (v["message"].splitlines() or [""])[0]
-            return "Orthros is paused%s. Press Start to carry on; %s goes next." % (
-                (": " + why) if why else "", v["next"])
+            return "Orthros is paused%s. Press Start to %s." % (
+                (": " + why) if why else "", "serve the network again" if v["mode"] == "serve"
+                else "carry on; %s goes next" % v["next"])
         if v["phase"] == "serving":
             s = v["service"]
             return ("Orthros is serving the network at %s: %d requests answered, %d turned "

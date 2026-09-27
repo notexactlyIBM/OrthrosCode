@@ -9,9 +9,15 @@ referee called Orthros.
 ![Image](https://i.imgur.com/OtYb2lp.jpeg)
 
 Orthros is the two-headed dog of Greek myth. Here the two heads are agents
-**A** and **B**, sharing one graphics card, one at a time. Leave them alone and
-A rewrites B's source code, then B wakes up running A's changes and rewrites A.
-Give them a project instead and they take turns building it.
+**A** and **B**, sharing one graphics card, one at a time. It has three modes:
+
+- **Evolve** -- A rewrites B's source code, then B wakes up running A's
+  changes and rewrites A.
+- **Work on a task** -- they take turns building a project you describe, in a
+  new folder or on a copy of one of yours.
+- **Serve the network** -- the card works for the other machines on your
+  network: a free model behind the standard OpenAI API, and tools A and B
+  build on request, over MCP.
 
 Every step is a git commit you can read.
 
@@ -80,16 +86,35 @@ No GPU? `ORTHROS.bat --simulate` runs the whole thing with stand-in agents.
 
 ## Using it
 
-The dashboard (http://127.0.0.1:8770) shows who is working and on what, the
-model's raw output, GPU use, held-out scores, and where each agent's rounds
-went in the last day. From it you can:
+The dashboard (http://127.0.0.1:8770) has two tabs.
 
-- switch between **Evolve** (A and B improve each other), **Work on a task** (describe what to
-  build; the agents break it into small checkable jobs) and **Serve the
-  network** (below);
-- **Suggest direction** -- your words go to the top of an agent's list;
-- **Ask** how it is going, in plain sentences from Orthros's own records;
-- pause after this turn, stop after this round, or force stop.
+**Operate** is for running it. Pick a mode and press **Start**; the same
+button then reads **Stop after this turn** (or **Stop serving**), with *stop
+after this round* and *force stop* beside it while a turn runs. Picking
+another mode mid-turn takes effect when that turn ends. Below: what is
+happening now, A and B -- each turn's time as a ring, where its rounds went in
+the last day, whether its version is proven -- the card's load and memory, and
+the chat box:
+
+- **Ask** anything -- how it is going, why B was rolled back, what the network
+  has been asking. The model answers from Orthros's own records (status, field
+  reports, rollback reasons, recent events and requests) and says when they
+  do not tell.
+- **Suggest direction** -- your words go to the top of an agent's list.
+
+For **Work on a task**, describe what to build; the agents break it into small
+checkable jobs. It gets a new folder under `tasks\`, or pick an existing one
+with **Browse...**: that must be a git repository, and the agents work on a
+copy of it on a branch of their own (`orthros/<name>`), starting from the
+folder as it is, uncommitted changes included. Nothing in your folder changes
+until you merge that branch.
+
+**Diagnostics** is for looking inside: the model's raw output (collapsed until
+opened), recent events, the time and tokens each agent has had, the machine
+and its settings, the scores, every tool Orthros has, and **Housekeeping** --
+what interrupted work and stray clicks leave behind (a model still loaded,
+processes left running, stale stop requests, a turn not yet judged, work left
+open). It is checked when Orthros starts; **Clean up** clears the safe part.
 
 When Orthros cannot go on, it stops, writes `ORTHROS-NEEDS-YOU.txt` saying why,
 turns the page red and beeps.
@@ -133,28 +158,39 @@ the address and a key; every request must send the key as
   `http://<this machine>:8777/v1`. Any OpenAI client works: give it that base
   URL and the key as its API key. Whatever model a request names, it gets the
   one loaded here.
-- **Tools** -- MCP at `http://<this machine>:8777/mcp`. `build_tool` asks A
-  and B to build a command-line tool in `tools\<name>`, test-first and
-  reviewed, as in task mode; each tool whose tests pass then appears in the
-  tool list, takes one text input and runs here, inside the same limits as
-  the model's other code. For Claude Code:
-  `claude mcp add --transport http orthros http://<this machine>:8777/mcp --header "Authorization: Bearer <key>"`
+- **Tools** -- MCP at `http://<this machine>:8777/mcp`:
+  - `research` (a web search and the top page, read), `read_page` and
+    `python_docs` -- the agents' own tools, lent out;
+  - `build_tool` asks A and B to build a new command-line tool in
+    `tools\<name>`, test-first and reviewed, as in task mode, and
+    `tool_status` says how it is going;
+  - every tool built that way whose tests pass is then listed too, takes one
+    text input and runs here, inside the same limits as the model's other code.
+
+  For Claude Code:
+  `claude mcp add --transport http --scope user orthros http://<this machine>:8777/mcp --header "Authorization: Bearer <key>"`
 
 One card, one job at a time. Requests wait their turn, in order, and each is
 seen through: answered; failed, once a reload and a second try have not saved
-it; or its caller stopped waiting -- the page counts those, since the model is
-slower than a paid one. While a tool is being built, inference answers **503**
-with a `Retry-After`: a caller should treat that -- or no connection within a
-few seconds, as when this machine is off -- as "use the next provider".
+it; or its caller stopped waiting -- noticed the moment it hangs up, and the
+model cut off so it stops working for nobody. While a tool is being built,
+inference answers **503** with a `Retry-After`: a caller should treat that --
+or no connection within a few seconds, as when this machine is off -- as "use
+the next provider", and try again later.
+
+The page lists the latest requests -- when, from where, a few words the model
+writes on what each one asked, and how it went -- and counts the answered, the
+callers that gave up (the model is slower than a paid one: worth watching),
+the failed, the turned away and those with a wrong key. The connection details
+are under **Connect another machine**.
 
 Windows' firewall lets other machines in only with a rule -- it may not even
-ask. Once, in an administrator terminal:
+ask. Once, on this machine, in an administrator terminal:
 
     netsh advfirewall firewall add rule name="Orthros serve" dir=in action=allow protocol=TCP localport=8777 profile=private
 
-The page counts requests turned back for a wrong key, and callers that stopped
-waiting. Settings: `serve_port`, `tool_turns` (turns before a tool is given up)
-and `tool_seconds` (the longest one run of a tool may take).
+Settings: `serve_port`, `tool_turns` (turns before a tool is given up) and
+`tool_seconds` (the longest one run of a tool may take).
 
 ## Settings
 
@@ -177,9 +213,9 @@ described in [agent/README.md](agent/README.md).
 ## Safety
 
 - **Local only.** Every model call goes to LM Studio on your machine. The
-  only outbound traffic is the agents' optional web search. Serve mode opens
-  one port to your network, for requests that carry its key; LM Studio
-  itself stays on 127.0.0.1.
+  only outbound traffic is web research: the agents' own, and in serve mode
+  the research a caller asks for. Serve mode opens one port to your network,
+  for requests that carry its key; LM Studio itself stays on 127.0.0.1.
 - **No shell.** aider may edit files but never runs a command the model
   suggests.
 - **Contained code.** The model's code does run -- that is what tests are.
@@ -188,6 +224,9 @@ described in [agent/README.md](agent/README.md).
 - **Undo everything.** Every turn is committed first; every proven version is
   tagged; a bad change, even one copied into both agents, is stepped back
   past, as far as the original if need be.
+- **Your folders stay yours.** A task on an existing folder works on a git
+  worktree of it, on a branch of its own; nothing reaches your folder unless
+  you merge.
 
 ## Memory
 
@@ -210,6 +249,11 @@ without room, and stops one early rather than be killed.
 - **"the card is shared".** Close other LM Studio windows, ollama, games.
 - **It stopped with a message.** It says why; the turn's full output is in
   `logs\`.
+- **Something left over** after a crash or a stop at the wrong moment -- a
+  model still loaded, a turn that never ended. Diagnostics, Housekeeping,
+  **Clean up**.
+- **Serving, but nothing arrives.** The firewall rule above; then the page's
+  counts -- a wrong key shows there, and Recent says which machine sent it.
 
 ## What it could do with unlimited resources
 
@@ -259,6 +303,9 @@ to all of them.
   ast, difflib) -- Orthros itself uses nothing else -- and [Git](https://git-scm.com),
   which holds every version and every undo.
 - [SQLite](https://sqlite.org), through Python's sqlite3 -- the round ledger.
+- The [OpenAI API](https://platform.openai.com/docs/api-reference) format and the
+  [Model Context Protocol](https://modelcontextprotocol.io) -- the two ways other
+  machines talk to it in serve mode, so that it invents no protocol of its own.
 
 **Ideas it is built from**
 

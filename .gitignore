@@ -13,6 +13,8 @@ shared-venv/
 venv/
 
 # Orthros's runtime state, settings and logs.
+# --fresh keeps the old state and ledger beside them as *.before-fresh-<stamp>.
+*.before-fresh-*
 logs/
 .orthros-state.json
 orthros.json

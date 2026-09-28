@@ -2007,6 +2007,11 @@ class Orthros:
             if t["state"] == "queued" and self.state.get("mode") != "serve":
                 found.append(["the tool %s waits to be built; tools are built in serve mode"
                               % t["key"], "", False])
+        behind = agents_behind(self.root)
+        if behind:
+            found.append(["A and B were built from an older agent\\: %s since, the newest \"%s\". "
+                          "Close Orthros and run ORTHROS.bat --fresh to give them it"
+                          % (plural(behind[0], "change"), behind[1]), "", False])
         old = sorted(f for f in os.listdir(self.root) if ".before-fresh-" in f)
         if old:
             found.append(["%d file(s) of old records kept by --fresh (%s): delete them when no "
@@ -2908,6 +2913,21 @@ def repo_in_step(root):
             % (behind, newest, newest.split("/", 1)[-1]))
 
 
+def agents_behind(root):
+    """Changes to agent\\ that the running agents were not built with: (how many,
+    the newest's subject), or None. A fix made in agent\\ reaches them only through
+    --fresh -- on 2026-09-27 they ran a day without the one that kept their tests
+    out of Orthros's ledger, and every round failed its check."""
+    ok, log = git(agent_folder(root, "A"), "log", "--format=%s", "--grep=started fresh from agent",
+                  "-1")
+    built = re.search(r"at ([0-9a-f]{7,40})", log) if ok else None
+    if not built:
+        return None
+    ok, newer = git(root, "log", "--format=%s", "%s..HEAD" % built.group(1), "--", "agent")
+    lines = [line for line in newer.splitlines() if line.strip()] if ok else []
+    return (len(lines), lines[0]) if lines else None
+
+
 def fresh(root, ask=input, out=print):
     """Rebuild both agents from agent\\, and start Orthros's records again.
 
@@ -3071,6 +3091,10 @@ def doctor(root, out=print):
     lms = shutil.which("lms") or next((p for p in (
         os.path.expandvars(r"%USERPROFILE%\.lmstudio\bin\lms.exe"),) if os.path.isfile(p)), "")
     say("OK" if lms else "WARN", "LM Studio's lms: %s" % (lms or "not found on PATH"))
+    behind = agents_behind(root)
+    if behind:
+        say("WARN", "A and B were built from an older agent\\: %s since, the newest \"%s\" -- "
+            "run ORTHROS.bat --fresh" % (plural(behind[0], "change"), behind[1]))
     for name in NAMES:
         folder = agent_folder(root, name)
         if not os.path.isdir(os.path.join(folder, ".git")):
@@ -3197,7 +3221,7 @@ def main():
         if found:
             orthros.event("found %s from earlier work: Diagnostics, Housekeeping"
                           % plural(len(found), "leftover"),
-                          "bad" if any(f for _, _, f in found) else "info")
+                          "bad" if any(f or "--fresh" in w for w, _, f in found) else "info")
     threading.Thread(target=look_around, daemon=True).start()
     try:
         while True:

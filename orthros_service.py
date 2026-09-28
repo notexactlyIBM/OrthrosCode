@@ -498,11 +498,13 @@ class Service:
 
     def note(self, who, user, what, result, tokens=0, seconds=0.0):
         """One line of the page's list of recent requests. `what` is the line shown, or
-        (that line, the request's text for the tagger to label)."""
+        (that line, the request's text: shown whole when the line is opened, and the
+        tagger labels its start)."""
         line, text = what if isinstance(what, tuple) else (what, "")
         with self.lock:
             self.recent.append({"at": now(), "from": who, "user": str(user or "")[:60],
-                                "ask": line, "text": text, "tag": "" if text else line,
+                                "ask": line, "full": text, "text": text[:1500],
+                                "tag": "" if text else line,
                                 "result": result, "tokens": tokens, "seconds": round(seconds, 1)})
         if text and not self.tagger:
             self.tagger = threading.Thread(target=self.tag_loop, daemon=True)
@@ -546,7 +548,7 @@ class Service:
             return send(req, 400, error("the body must be a JSON object", "invalid_request_error"))
         # Who asked what, for the page: OpenAI's `user` field names the caller, if sent.
         who, user, text, begun = req.client_address[0], body.get("user"), said(path, body), now()
-        what = (excerpt(text), text[:1500])
+        what = (excerpt(text), text[:8000])
         if self.why and not self.why.startswith("loading") or not self.server:
             self.note(who, user, what, "turned away: " + (self.why or "not serving"))
             return self.unavailable(req)

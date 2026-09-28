@@ -217,6 +217,7 @@ details.help .body { margin-top: 12px; display: grid; gap: 10px; font-size: 13px
 .req .what { min-width: 0; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical;
   -webkit-line-clamp: 4; overflow-wrap: anywhere; }
 .req.open .what { display: block; }
+.req.open .what span { display: block; margin-top: 4px; color: #b7c6de; font-size: 12.5px; white-space: pre-wrap; user-select: text; }
 .req .what b { display: block; font-weight: 600; color: var(--ink); }
 .req .what span { color: var(--faint); font-size: 12px; }
 .req .res { font: 700 10.5px var(--display); letter-spacing: .1em; text-transform: uppercase; white-space: nowrap; color: var(--dim); }
@@ -826,6 +827,8 @@ function renderMode(d) {
 }
 
 const TOOL_BADGE = { ready: "good", building: "live", queued: "warn", "given up": "bad" };
+const openReqs = new Set();        // requests opened to read in full, by their time
+let recentShown = "";
 function renderService(d) {
   const s = d.service || {}, urls = s.urls || [], base = urls[0] || "", port = d.settings.serve_port || 8777;
   $("#svcApi").textContent = base ? base + "/v1" : "-";
@@ -845,13 +848,18 @@ function renderService(d) {
   $("#svcGaveUpTile").classList.toggle("warn", !!s.gave_up);
   $("#svcFailed").textContent = s.failed || 0;
   $("#svcFailedTile").classList.toggle("bad", !!s.failed);
-  $("#svcRecent").innerHTML = (s.recent || []).slice(0, 8).map((r) => {
+  // Rebuilt only when something changed, so an opened line stays open and text
+  // being selected stays selected; an opened line shows the whole request.
+  const html = (s.recent || []).slice(0, 8).map((r) => {
     const cls = r.result === "answered" ? "ok" : r.result.startsWith("turned") ? "no" : "bad";
     const res = r.result === "answered" ? `answered \u00b7 ${fmtN(r.tokens)} tok \u00b7 ${r.seconds}s` : esc(r.result);
-    return `<div class="req"><time>${hhmm(r.at)}</time><div class="what" title="${esc(r.ask)}">` +
-      `<b>${esc(r.tag || "\u2026")}</b><span>${esc(r.user || r.from)} \u00b7 ${esc(r.ask)}</span></div>` +
+    const open = openReqs.has(String(r.at));
+    return `<div class="req${open ? " open" : ""}" data-at="${r.at}"><time>${hhmm(r.at)}</time>` +
+      `<div class="what" title="${open ? "Click to fold" : "Click to read it all"}">` +
+      `<b>${esc(r.tag || "\u2026")}</b><span>${esc(r.user || r.from)} \u00b7 ${esc(open ? (r.full || r.ask) : r.ask)}</span></div>` +
       `<span class="res ${cls}">${res}</span></div>`;
   }).join("") || `<div class="empty" style="margin-top:8px">No requests yet: what callers ask shows up here.</div>`;
+  if (html !== recentShown) { $("#svcRecent").innerHTML = html; recentShown = html; }
   $("#svcTools").innerHTML = (s.tools || []).map((t) =>
     `<div class="toolrow"><b>${esc(t.key)}</b><span class="badge ${TOOL_BADGE[t.state] || ""}">${esc(t.state)}</span>
       <span class="meta">tests ${t.tests[0]}/${t.tests[1]} · ${t.done} done, ${t.open} open · ${t.turns} turn${t.turns === 1 ? "" : "s"}</span></div>`).join("") ||
@@ -1130,7 +1138,13 @@ $("#start").onclick = async () => {
   await post("/api/start", { first: $("#first").value, minutes: +$("#minutes").value }); minutesTouched = false; tick(); };
 $("#stop").onclick = async () => { await post("/api/stop"); tick(); };
 $("#force").onclick = async () => { if (confirm("Kill the running agent now? Its current round is lost.")) { await post("/api/force"); tick(); } };
-$("#svcRecent").onclick = (e) => { const r = e.target.closest(".req"); if (r) r.classList.toggle("open"); };
+$("#svcRecent").onclick = (e) => {
+  const r = e.target.closest(".req");
+  if (!r || String(window.getSelection() || "")) return;      // selecting text is not a click
+  const at = r.dataset.at;
+  if (openReqs.has(at)) openReqs.delete(at); else openReqs.add(at);
+  recentShown = ""; if (lastState) renderService(lastState);
+};
 $("#chatClear").onclick = async () => {
   const r = await post("/api/chat/clear");
   if (r.result !== "ok") { $("#chatHint").textContent = "Restart Orthros once to use Clear."; return; }

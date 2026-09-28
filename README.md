@@ -86,7 +86,9 @@ No GPU? `ORTHROS.bat --simulate` runs the whole thing with stand-in agents.
 
 ## Using it
 
-The dashboard (http://127.0.0.1:8770) has two tabs.
+The dashboard opens in a window of its own (`orthros_gui.py`, tkinter, no
+browser). Closing it leaves Orthros running; `ORTHROS.bat` brings it back. The
+same dashboard is a web page at http://127.0.0.1:8770. It has two tabs.
 
 **Operate** is for running it. Pick a mode and press **Start**; the same
 button then reads **Stop after this turn** (or **Stop serving**), with *stop

@@ -42,6 +42,7 @@ import threading
 import time
 import traceback
 import urllib.parse
+import urllib.request
 import webbrowser
 
 import orthros_service as service
@@ -3018,28 +3019,25 @@ def write_evolution(root, state):
         handle.write("\n".join(lines) + "\n")
 
 
-def open_window(url):
-    """The page in a window of its own: no tabs, no address bar.
+def open_window(port):
+    """The dashboard in a window of its own: orthros_gui.py, tkinter, no browser.
 
-    Edge ships with Windows 10 and 11 and, like Chrome, opens a bare app
-    window with --app. Nothing to install. Falls back to an ordinary tab.
+    2026-09-28: an Edge --app window was not a window of its own -- it left
+    Edge running. tkinter comes with Python on Windows; pythonw keeps a
+    console from opening. Only without tkinter does the page open in the
+    browser.
     """
-    env = os.environ.get
-    candidates = [os.path.join(base, *tail) for base in
-                  (env("ProgramFiles(x86)", ""), env("ProgramFiles", ""), env("LOCALAPPDATA", ""))
-                  if base for tail in (("Microsoft", "Edge", "Application", "msedge.exe"),
-                                       ("Google", "Chrome", "Application", "chrome.exe"))]
-    candidates += [shutil.which(n) or "" for n in ("msedge", "chrome", "chromium")]
-    for path in candidates:
-        if path and os.path.isfile(path):
-            try:
-                subprocess.Popen([path, "--app=" + url, "--window-size=1240,1000"],
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                 creationflags=CREATE_NO_WINDOW if os.name == "nt" else 0)
-                return
-            except OSError:
-                continue
-    webbrowser.open(url)
+    exe = sys.executable
+    quiet = os.path.join(os.path.dirname(exe), "pythonw.exe")
+    if os.path.isfile(quiet):
+        exe = quiet
+    try:
+        import tkinter  # noqa: F401 -- only to know the window can open
+        subprocess.Popen([exe, os.path.join(HERE, "orthros_gui.py"), "--port", str(port)],
+                         cwd=HERE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         creationflags=CREATE_NO_WINDOW if os.name == "nt" else 0)
+    except (ImportError, OSError):
+        webbrowser.open("http://127.0.0.1:%d/" % port)
 
 
 # The memory hog --doctor runs inside an agent's own check limits: it must end
@@ -3195,14 +3193,25 @@ def main():
     try:
         serve(orthros, port)
     except OSError:
-        print("Port %d is taken -- is Orthros already running? Open http://127.0.0.1:%d/"
-              % (port, port))
-        return 1
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:%d/api/state" % port, timeout=5) as r:
+                running = "phase" in json.loads(r.read())
+        except (OSError, ValueError):
+            running = False
+        if not running or args.no_browser:
+            print("Port %d is taken%s." % (port, " by Orthros, already running" if running
+                                           else " by something that is not Orthros"))
+            return 1
+        print("Orthros is already running: opening its window.")
+        open_window(port)
+        return 0
     url = "http://127.0.0.1:%d/" % port
-    print("Orthros%s -- %s" % (" (simulation)" if args.simulate else "", url))
+    print("Orthros%s -- the same dashboard in a browser: %s"
+          % (" (simulation)" if args.simulate else "", url))
     print("Close this window to stop Orthros. A session in progress finishes on its own.")
+    print("Closed the dashboard window? Run ORTHROS.bat again to bring it back.")
     if not args.no_browser:
-        open_window(url)
+        open_window(port)
     loop = threading.Thread(target=orthros.loop, daemon=True)
     loop.start()
     if args.resume:

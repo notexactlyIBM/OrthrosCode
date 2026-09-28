@@ -13,7 +13,8 @@ rule below. Most bugs here so far came from breaking one without noticing.
 | `orthros_service.py` | Serve mode: the LAN listener (8777, key required), the OpenAI `/v1` pass-through to LM Studio, MCP `/mcp`, tool builds, the request log and its labels. |
 | `orthros_tune.py` | Fits context and timeouts to the machine (`hardware.json`). |
 | `orthros_setup.py` | Used by `SETUP.bat`: the venv, and the agents built from `agent\`. |
-| `orthros.html` | The dashboard: one file, no build, re-read on every page load. |
+| `orthros_gui.py` | The dashboard window (tkinter), opened by `orthros.py`. A client of the same local API as the page, run as its own process; change the two together. |
+| `orthros.html` | The dashboard as a web page: one file, no build, re-read on every page load. |
 | `agent\` | The **template** for an agent (`supervisor.py`, `ralph_*.py`). This is not the code that runs. |
 | `OrthrosCode A\`, `B\` | The **running** agents. Each is its own git repo, rewritten by the other, and gitignored here. |
 | `tests\` | Orthros's tests (unittest, no GPU). `agent\test_*.py` are the agents' own tests. |
@@ -23,7 +24,7 @@ State: `orthros.json` holds settings and the serve key. `.orthros-state.json` ho
 ## Rules that fail silently when broken
 
 1. **`agent\` reaches A and B only through `ORTHROS.bat --fresh`.** The user runs it and types FRESH. Orthros must be closed, and the repo clean and pushed. After changing `agent\`, say so. `agents_behind()` flags stale agents in Housekeeping and `--doctor`.
-2. **A running Orthros keeps its Python code in memory.** After changing `orthros*.py`, the user must restart it. `orthros.html` needs only F5.
+2. **A running Orthros keeps its Python code in memory.** After changing `orthros*.py`, the user must restart it. `orthros.html` needs only F5; `orthros_gui.py` needs its window closed and `ORTHROS.bat` run again.
 3. **The model's code never sees the harness.** Every run of it drops `ORTHROS_*` and `LC_*` by prefix: `check_env` here, `ralph_contain.without_harness` in the agents. A leaked `ORTHROS_LEDGER` makes the agents' ledger tests write into the real ledger and fail every round.
 4. **Orthros never imports the agents' code**, because they rewrite it. It reads their files, or runs them as subprocesses inside limits.
 5. **One card holds one model at a time.** Serving and turns never overlap. Anything loaded is unloaded before a turn. LM Studio stays on 127.0.0.1. The agents load as `localcoder`, serving as `orthros-serve`.

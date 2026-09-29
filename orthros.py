@@ -3187,6 +3187,63 @@ def doctor(root, out=print):
     return fails[0]
 
 
+FOLDER_LOCKS = []                    # held for as long as this Orthros runs
+
+
+def hold_the_folder(root):
+    """True if no other Orthros is running on this folder; it stays locked until exit.
+
+    2026-09-29: a second Orthros was kept out only by the page's port being
+    taken. Whatever started before binding it -- --probe, --export, --fresh --
+    or a start while the first one's page had stopped answering, ran beside it
+    on the same state, ledger, hardware.json and agents: two writers, and
+    possibly a second turn on one card. A named lock, taken before anything
+    else, keeps the second out; the first is never touched. Windows frees it
+    when the process ends, however it ends.
+    """
+    if os.name != "nt":
+        return True
+    import ctypes
+    import hashlib
+    key = hashlib.sha1(os.path.normcase(os.path.abspath(root)).encode("utf-8")).hexdigest()[:16]
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    handle = kernel32.CreateMutexW(None, False, "OrthrosCode-" + key)
+    if not handle:
+        return True                                  # cannot tell: do not stand in the way
+    if ctypes.get_last_error() == 183:               # ERROR_ALREADY_EXISTS: one is running
+        kernel32.CloseHandle(ctypes.c_void_p(handle))
+        return False
+    FOLDER_LOCKS.append(handle)
+    return True
+
+
+def page_answers(port):
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:%d/api/state" % port, timeout=5) as r:
+            return "phase" in json.loads(r.read())
+    except (OSError, ValueError):
+        return False
+
+
+def already_running(args):
+    """What a second start does while Orthros runs on this folder: nothing to the first."""
+    port = int((read_json(os.path.join(HERE, "orthros.json"), {}) or {}).get("port") or 8770)
+    if args.export or args.fresh or args.probe:
+        print("Orthros is running. Close its window -- the console titled \"Orthros - keep "
+              "this window open\" -- then run this again.")
+        return 1
+    if not page_answers(port):
+        print("Orthros is already running on this folder, but its page does not answer at "
+              "http://127.0.0.1:%d/. Not starting a second one. If it is stuck, close its "
+              "console window and start again." % port)
+        return 1
+    print("Orthros is already running%s." % ("" if args.no_browser else ": opening its window"))
+    if not args.no_browser:
+        open_window(port)
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--simulate", action="store_true")
@@ -3209,12 +3266,14 @@ def main():
     args = parser.parse_args()
     if args.fake_agent:
         return fake_agent(args.minutes)
+    if args.doctor:
+        return 1 if doctor(HERE) else 0          # changes nothing, so it may run beside one
+    if not args.simulate and not hold_the_folder(HERE):
+        return already_running(args)
     if args.export:
         return export(HERE, args.export)
     if args.fresh:
         return fresh(HERE)
-    if args.doctor:
-        return 1 if doctor(HERE) else 0
     if args.probe:
         orthros = Orthros(HERE)
         orthros.event = lambda text, kind="info": print(text)
@@ -3233,18 +3292,12 @@ def main():
     try:
         serve(orthros, port)
     except OSError:
-        try:
-            with urllib.request.urlopen("http://127.0.0.1:%d/api/state" % port, timeout=5) as r:
-                running = "phase" in json.loads(r.read())
-        except (OSError, ValueError):
-            running = False
-        if not running or args.no_browser:
-            print("Port %d is taken%s." % (port, " by Orthros, already running" if running
-                                           else " by something that is not Orthros"))
-            return 1
-        print("Orthros is already running: opening its window.")
-        open_window(port)
-        return 0
+        if page_answers(port):
+            # An Orthros started before the folder lock existed, or another folder's.
+            return already_running(args)
+        print("Port %d is taken by another program. Set another \"port\" in orthros.json."
+              % port)
+        return 1
     url = "http://127.0.0.1:%d/" % port
     print("Orthros%s -- the same dashboard in a browser: %s"
           % (" (simulation)" if args.simulate else "", url))

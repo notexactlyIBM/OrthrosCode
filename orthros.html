@@ -478,7 +478,7 @@ dialog .line { justify-content: flex-end; }
       <div class="side"><div class="inner">
         <section class="card gpucard">
           <div class="cardhead"><h2>GPU</h2>
-            <span class="tip left" tabindex="0" data-tip="The lattice turns slowly: the share of points lit is how busy the card is (nvidia-smi, every 2 s); the tinted plane rises with memory in use. The line below is the last two minutes.">?</span>
+            <span class="tip left" tabindex="0" data-tip="The share of points lit is how busy the card is (nvidia-smi, every 2 s); the purple plane rises with memory in use. The line below is the last two minutes.">?</span>
             <span class="sp"></span><span class="gpubig" id="gpuBig">-</span></div>
           <canvas id="gpu" aria-label="The GPU as a slowly turning lattice: the share of points lit is how busy the card is"></canvas>
           <svg class="spark" id="spark" viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true"><polygon id="sparkFill"/><polyline id="sparkLine"/></svg>
@@ -992,7 +992,7 @@ function drawGpu(t) {
   memShown += (memTarget - memShown) * Math.min(1, dt / 600);
   if (memShown) { const yy = memShown * 2 - 1, quad = [[-1, yy, -1], [1, yy, -1], [1, yy, 1], [-1, yy, 1]].map(project);
     ctx.beginPath(); quad.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)); ctx.closePath();
-    ctx.fillStyle = color("--b", 0.13); ctx.fill(); }
+    ctx.fillStyle = color("--b", 0.3); ctx.fill(); ctx.strokeStyle = color("--b", 0.8); ctx.stroke(); }
   const corners = CORNERS.map(project);
   ctx.strokeStyle = color("--line"); ctx.lineWidth = 1;
   for (const [a, b] of EDGES) { ctx.beginPath(); ctx.moveTo(corners[a][0], corners[a][1]); ctx.lineTo(corners[b][0], corners[b][1]); ctx.stroke(); }

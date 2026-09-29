@@ -492,6 +492,27 @@ class TestFresh(Sandbox):
             self.in_step.start()
 
 
+class TestSecondStart(unittest.TestCase):
+    def test_a_second_orthros_on_a_folder_is_kept_out(self):
+        folder = tempfile.mkdtemp()
+        self.assertTrue(orthros.hold_the_folder(folder))
+        self.assertFalse(orthros.hold_the_folder(folder))
+        self.assertTrue(orthros.hold_the_folder(tempfile.mkdtemp()))
+
+    def test_a_second_start_leaves_the_first_alone(self):
+        start = types.SimpleNamespace(export=None, fresh=False, probe=False, no_browser=False)
+        with mock.patch.object(orthros, "read_json", return_value={}), \
+                mock.patch.object(orthros, "open_window") as opened, \
+                mock.patch("sys.stdout", new_callable=io.StringIO):
+            with mock.patch.object(orthros, "page_answers", return_value=True):
+                self.assertEqual(orthros.already_running(start), 0)     # its window, shown
+            with mock.patch.object(orthros, "page_answers", return_value=False):
+                self.assertEqual(orthros.already_running(start), 1)     # stuck: still not touched
+            self.assertEqual(orthros.already_running(
+                types.SimpleNamespace(**dict(vars(start), fresh=True))), 1)
+        self.assertEqual(opened.call_count, 1)
+
+
 class CutOff(Exception):
     """aider's FinishReasonLength: the reply reached max_tokens."""
 

@@ -399,19 +399,29 @@ class Dashboard:
             modes.columnconfigure(i, weight=1, uniform="tile")
             self.tiles[mode] = tile
 
+        # The big button sizes to its words, with the two lesser stops stacked
+        # beside it; what it is doing, and the settings, each get a whole line.
+        # Side by side in one row they ran off the panel's edge on a narrow window.
         go_row = tk.Frame(ops, bg=PANEL)
         go_row.pack(fill="x", pady=(16, 0))
         self.go = button(go_row, "START", self.go_pressed, "start", font=(DISPLAY, 14, "bold"),
-                         padx=22, pady=14, width=16)
-        self.go.pack(side="left")
-        text = tk.Frame(go_row, bg=PANEL)
-        text.pack(side="left", fill="x", expand=True, padx=(18, 0))
-        self.headline = label(text, "", INK, (DISPLAY, 13, "bold"), anchor="w", justify="left",
+                         padx=22, pady=14)
+        self.go.pack(side="left", fill="y")
+        self.stops = tk.Frame(go_row, bg=PANEL)
+        self.stop_round = button(self.stops, "Stop after this round",
+                                 lambda: self.post("/api/stop"), font=(DISPLAY, 9, "bold"))
+        self.stop_round.pack(fill="x")
+        self.force = button(self.stops, "FORCE STOP", self.force_stop, "link",
+                            font=(DISPLAY, 9, "bold"))
+        self.force.pack(fill="x", pady=(6, 0))
+        self.headline = label(ops, "", INK, (DISPLAY, 13, "bold"), anchor="w", justify="left",
                               wraplength=px(420))
-        self.headline.pack(anchor="w", fill="x")
-        text.bind("<Configure>", lambda e: self.headline.config(wraplength=e.width - px(8)))
-        ctl = tk.Frame(text, bg=PANEL)
-        ctl.pack(anchor="w", pady=(6, 0))
+        self.headline.pack(fill="x", pady=(12, 0))
+        self.headline.bind("<Configure>", lambda e: self.headline.config(
+            wraplength=e.width - px(8)))
+        ctl = tk.Frame(ops, bg=PANEL)
+        ctl.pack(fill="x", pady=(8, 0))
+        self.settings_row = ctl
         self.turns_box = tk.Frame(ctl, bg=PANEL)
         label(self.turns_box, "turns of", DIM, (BODY, 9)).pack(side="left")
         self.minutes = tk.Spinbox(self.turns_box, from_=5, to=480, increment=5, width=4,
@@ -429,9 +439,20 @@ class Dashboard:
         first_menu["menu"].config(bg=PANEL2, fg=INK, font=(BODY, 9))
         first_menu.pack(side="left", padx=4)
         self.turns_box.pack(side="left")
-        self.stop_round = button(ctl, "Stop after this round", lambda: self.post("/api/stop"),
-                                 font=(DISPLAY, 9, "bold"))
-        self.force = button(ctl, "FORCE STOP", self.force_stop, "link", font=(DISPLAY, 9, "bold"))
+        self.practice_box = tk.Frame(ctl, bg=PANEL)
+        label(self.practice_box, "practice every", DIM, (BODY, 9)).pack(side="left")
+        self.practice = tk.Spinbox(self.practice_box, from_=0, to=50, width=3, bg="#050a14",
+                                   fg=INK, buttonbackground=PANEL2, relief="flat",
+                                   font=(BODY, 10), command=self.practice_changed)
+        self.practice.bind("<Return>", lambda e: self.practice_changed())
+        self.practice.pack(side="left", padx=4)
+        label(self.practice_box, "turns", DIM, (BODY, 9)).pack(side="left")
+        mark = label(self.practice_box, " ? ", FAINT, (DISPLAY, 8, "bold"), bg=TRACK)
+        mark.pack(side="left", padx=8)
+        Tip(mark, "A works on B's code, then B on A's. Every few turns an agent does a practice "
+                  "exercise instead: a job it has never seen, scored by tests it never sees. "
+                  "0 turns practice off.\n\nEvery few good turns each version is also scored on "
+                  "held-out exercises; a version that does worse is rolled back.")
         self.mode_note = label(ops, "", WARN, (DISPLAY, 9, "bold"), anchor="w")
         self.mode_note.pack(fill="x", pady=(6, 0))
 
@@ -441,6 +462,7 @@ class Dashboard:
         self.build_self_pane(self.panes["self"])
         self.build_task_pane(self.panes["task"])
         self.build_serve_pane(self.panes["serve"])
+        self.build_turn_feed(ops)
         self.pane_shown = None
 
         side = tk.Frame(page, bg=BG)
@@ -464,24 +486,27 @@ class Dashboard:
         self.swap.grid(row=0, column=1, padx=10)
 
     def build_self_pane(self, pane):
-        row = tk.Frame(pane, bg=PANEL)
-        row.pack(anchor="w")
-        label(row, "practice every", DIM, (BODY, 9)).pack(side="left")
-        self.practice = tk.Spinbox(row, from_=0, to=50, width=3, bg="#050a14", fg=INK,
-                                   buttonbackground=PANEL2, relief="flat", font=(BODY, 10),
-                                   command=self.practice_changed)
-        self.practice.bind("<Return>", lambda e: self.practice_changed())
-        self.practice.pack(side="left", padx=4)
-        label(row, "turns", DIM, (BODY, 9)).pack(side="left")
-        mark = label(row, " ? ", FAINT, (DISPLAY, 8, "bold"), bg=TRACK)
-        mark.pack(side="left", padx=8)
-        Tip(mark, "A works on B's code, then B on A's. Every few turns an agent does a practice "
-                  "exercise instead: a job it has never seen, scored by tests it never sees. "
-                  "0 turns practice off.\n\nEvery few good turns each version is also scored on "
-                  "held-out exercises; a version that does worse is rolled back.")
-        self.self_summary = label(pane, "", DIM, (BODY, 9), anchor="w", justify="left",
-                                  wraplength=600)
-        self.self_summary.pack(anchor="w", pady=(10, 0))
+        self.self_summary = label(pane, "", DIM, (BODY, 9), anchor="w", justify="left")
+        self.self_summary.pack(fill="x")
+        self.self_summary.bind("<Configure>", lambda e: self.self_summary.config(
+            wraplength=e.width - px(8)))
+
+    def build_turn_feed(self, ops):
+        """The running turn, round by round, in the agent's own words: its loop's log
+        lines, never the model's. Fills what Evolve and a task leave of the panel."""
+        box = tk.Frame(ops, bg=PANEL)
+        self.turn_feed = box
+        self.feed_title = heading(box, "This turn")
+        self.feed_title.pack(anchor="w", pady=(12, 6))
+        self.feed = tk.Text(box, height=4, bg=PANEL, fg="#b7c6de", relief="flat", wrap="word",
+                            font=(BODY, 9), highlightthickness=0, spacing3=3, cursor="arrow")
+        self.feed.pack(fill="both", expand=True)
+        self.feed.tag_config("time", foreground=FAINT, font=(MONO, 8))
+        self.feed.tag_config("round", foreground=INK, font=(DISPLAY, 9, "bold"), spacing1=6)
+        for name, color in (("good", GOOD), ("warn", WARN), ("bad", BAD)):
+            self.feed.tag_config(name, foreground=color)
+        self.feed.config(state="disabled")
+        self.feed_lines, self.feed_turn = [], None
 
     def build_task_pane(self, pane):
         row = tk.Frame(pane, bg=PANEL)
@@ -586,15 +611,18 @@ class Dashboard:
         box.pack(fill="x")
         head = tk.Frame(box, bg=PANEL)
         head.pack(fill="x")
-        heading(head, "GPU", "The lattice turns slowly: the share of points lit is how busy the "
-                             "card is; the tinted plane rises with memory in use. The line "
-                             "below is the last two minutes.").pack(side="left")
+        heading(head, "GPU", "The share of points lit is how busy the card is; the purple "
+                             "plane rises with memory in use. The line below is the last two "
+                             "minutes.").pack(side="left")
         self.gpu_big = label(head, "-", SERVE, (DISPLAY, 22, "bold"))
         self.gpu_big.pack(side="right")
         self.gpu = tk.Canvas(box, height=px(150), bg=PANEL, highlightthickness=0)
         self.gpu.pack(fill="x", pady=(4, 0))
         self.spark = tk.Canvas(box, height=px(28), bg=PANEL, highlightthickness=0)
         self.spark.pack(fill="x", pady=(4, 0))
+        self.gpu_after = self.spark
+        # A short window keeps the numbers and the chat, and drops the picture.
+        self.root.bind("<Configure>", self.fit_height, add="+")
         mem = tk.Frame(box, bg=PANEL)
         mem.pack(fill="x", pady=(8, 0))
         label(mem, "MEMORY", DIM, (DISPLAY, 8, "bold")).pack(side="left")
@@ -754,6 +782,15 @@ class Dashboard:
 
     # -------------------------------------------------------------- the GPU lattice
 
+    def fit_height(self, event):
+        if event.widget is not self.root:
+            return
+        tall = event.height >= px(1000)
+        if tall and not self.gpu.winfo_ismapped():
+            self.gpu.pack(fill="x", pady=(4, 0), before=self.gpu_after)
+        elif not tall and self.gpu.winfo_ismapped():
+            self.gpu.pack_forget()
+
     def lattice_setup(self):
         n = 7
         self.pts = [(x / (n - 1) * 2 - 1, y / (n - 1) * 2 - 1, z / (n - 1) * 2 - 1)
@@ -769,14 +806,14 @@ class Dashboard:
         self.edges = [(0, 1), (1, 3), (3, 2), (2, 0), (4, 5), (5, 7), (7, 6), (6, 4), (0, 4),
                       (1, 5), (2, 6), (3, 7)]
         c = self.gpu
-        self.plane = c.create_polygon(0, 0, 0, 0, 0, 0, fill="#1c1838", outline="")
+        self.plane = c.create_polygon(0, 0, 0, 0, 0, 0, fill="#3b2b72", outline="#9b6fe8")
         self.edge_items = [c.create_line(0, 0, 0, 0, fill="#22314b") for _ in self.edges]
         self.dot_items = [c.create_oval(0, 0, 0, 0, fill=FAINT, outline="") for _ in self.pts]
         self.angle, self.lit_shown, self.mem_shown, self.last_draw = 0.6, 0.0, 0.0, time.time()
 
     def draw_gpu(self):
         self.root.after(60, self.draw_gpu)
-        if self.tab != "operate":
+        if self.tab != "operate" or not self.gpu.winfo_ismapped():
             return
         c = self.gpu
         w, h = c.winfo_width(), c.winfo_height()
@@ -877,19 +914,21 @@ class Dashboard:
         if not self.minutes_touched and self.root.focus_get() is not self.minutes:
             self.set_spin(self.minutes, d["settings"].get("session_minutes", 60))
         self.first.set(d["running"]["agent"] if d.get("running") else d.get("next", "A"))
+        # Turn settings belong to the turns: none in serve mode, practice only in Evolve.
         if mode == "serve":
-            self.turns_box.pack_forget()
-        elif not self.turns_box.winfo_ismapped():
-            self.turns_box.pack(side="left", before=self.stop_round if
-                                self.stop_round.winfo_ismapped() else None)
+            self.settings_row.pack_forget()
+        elif not self.settings_row.winfo_ismapped():
+            self.settings_row.pack(fill="x", pady=(8, 0), after=self.headline)
+        if mode == "self" and not self.practice_box.winfo_ismapped():
+            self.practice_box.pack(side="left", padx=(24, 0))
+        elif mode != "self":
+            self.practice_box.pack_forget()
         if d.get("running"):
-            if not self.stop_round.winfo_ismapped():
-                self.stop_round.pack(side="left", padx=(12, 0))
-                self.force.pack(side="left", padx=(6, 0))
+            if not self.stops.winfo_ismapped():
+                self.stops.pack(side="left", padx=(12, 0), anchor="n")
             enable(self.stop_round, d.get("stop_mode") not in ("now", "force"))
         else:
-            self.stop_round.pack_forget()
-            self.force.pack_forget()
+            self.stops.pack_forget()
 
     def render_mode(self, d):
         mode = "task" if self.want_task else d["mode"]
@@ -899,8 +938,14 @@ class Dashboard:
         if self.pane_shown != mode:
             for pane in self.panes.values():
                 pane.pack_forget()
-            self.panes[mode].pack(fill="both", expand=True)
+            self.turn_feed.pack_forget()
+            if mode == "serve":
+                self.panes[mode].pack(fill="both", expand=True)
+            else:
+                self.panes[mode].pack(fill="x")
+                self.turn_feed.pack(fill="both", expand=True)
             self.pane_shown = mode
+        self.render_feed(d)
         run = d.get("running")
         run_mode = None if not run else "self" if run.get("kind") != "task" else \
             "serve" if ("\\tools\\" in (run.get("workspace") or "")
@@ -930,7 +975,12 @@ class Dashboard:
             p = (a.get("practice") or [])[-1:]
             if p:
                 bits.append("%s practice %s %d/%d" % (n, p[0][1], p[0][2], p[0][3]))
-        self.self_summary.config(text="   ·   ".join(bits) or "No scores yet.")
+        # Only when there are scores: a line saying there are none took room from the feed.
+        self.self_summary.config(text="   ·   ".join(bits))
+        if bits and not self.self_summary.winfo_ismapped():
+            self.self_summary.pack(fill="x")
+        elif not bits:
+            self.self_summary.pack_forget()
         # the task pane
         keys = [t["key"] for t in d.get("tasks") or []]
         if keys != self.task_keys:
@@ -951,6 +1001,61 @@ class Dashboard:
             self.target_menu["menu"].add_command(label="the task",
                                                  command=lambda: self.target.set("task"))
             self.has_task_target = True
+
+    FEED_GOOD = ("Reviewer accepted", "Ticked off", "Test written", "is kept", "Kept")
+    FEED_WARN = ("sent back", "rejected", "Rolled back", "did not match", "Nothing changed",
+                 "Nothing moved")
+    FEED_BAD = ("Parked", "broke", "error", "cut off", "ran out", "outgrew", "lost")
+
+    def render_feed(self, d):
+        """Gather the running turn's loop lines as they arrive; the state holds only the last few."""
+        run = d.get("running")
+        if run:
+            key = (run.get("agent"), run.get("started") or run.get("token"))
+            if key != self.feed_turn:
+                self.feed_turn, self.feed_lines = key, []
+            for when, text in (d.get("live") or {}).get("log") or []:
+                row = (str(when)[:5], str(text).strip())
+                if row[1] and not row[1].startswith("VRAM free") and row not in self.feed_lines[-40:]:
+                    self.feed_lines.append(row)
+            self.feed_lines = self.feed_lines[-300:]
+            title = "This turn  ·  %s" % (self.describe_run(run))
+        else:
+            title = "Last turn" if self.feed_lines else "This turn"
+        self.feed_title.winfo_children()[-1].config(text=title.upper())
+        shown = (title, len(self.feed_lines), self.feed_lines[-1:] if self.feed_lines else None)
+        if shown == self.shown.get("feed"):
+            return
+        self.shown["feed"] = shown
+
+        def fill(t):
+            if not self.feed_lines:
+                t.insert("end", "Nothing running. The next turn's rounds show here as they "
+                                "happen.", "time")
+            for when, text in self.feed_lines:
+                if text.startswith("Round "):
+                    t.insert("end", when + "  ", "time")
+                    t.insert("end", " ".join(text.split()) + "\n", "round")
+                    continue
+                tag = ("good" if any(w in text for w in self.FEED_GOOD) else
+                       "bad" if any(w in text for w in self.FEED_BAD) else
+                       "warn" if any(w in text for w in self.FEED_WARN) else ())
+                t.insert("end", when + "  ", "time")
+                t.insert("end", text + "\n", tag)
+        readonly(self.feed, fill)
+        self.feed.see("end")
+
+    @staticmethod
+    def describe_run(run):
+        kind, label_ = run.get("kind"), run.get("label") or ""
+        ws = run.get("workspace") or ""
+        if kind == "task" and ("\\tools\\" in ws or "/tools/" in ws):
+            return "%s builds the tool %s" % (run.get("agent"), label_)
+        if kind == "task":
+            return "%s on the task %s" % (run.get("agent"), label_)
+        if kind in ("practice", "eval"):
+            return "%s, %s %s" % (run.get("agent"), kind, label_)
+        return "%s on %s's code" % (run.get("agent"), "B" if run.get("agent") == "A" else "A")
 
     def render_service(self, d):
         s = d.get("service") or {}
@@ -1483,7 +1588,8 @@ class AgentCard(tk.Frame):
                             if live.get("round") else "", " · try %s of %s" % (
                                 live["attempt"], live["budget"])
                             if live.get("attempt") and live.get("budget") else "")
-            detail = [what, (live.get("item") or live.get("detail") or "")[:160]]
+            item = live.get("item") or live.get("detail") or ""
+            detail = [what, item[:110] + (" …" if len(item) > 110 else "")]
             if live.get("last_round_seconds"):
                 detail.append("last round %ss · %s in / %s out%s" % (
                     live["last_round_seconds"], fmt_n(live.get("last_in")),

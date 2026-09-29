@@ -1,10 +1,10 @@
 # OrthrosCode
 
-**Two AI coding agents on one home PC that take turns improving each other --
+**Two AI coding agents on one Windows PC that take turns improving each other --
 and only keep the changes that make them measurably better.**
 
-No cloud, no API keys, no accounts. One NVIDIA GPU, one open model, and a
-referee called Orthros.
+**For Windows 10 and 11 (64-bit).** No cloud, no API keys, no accounts. One
+NVIDIA GPU, one open model, and a referee called Orthros.
 
 ![Image](https://i.imgur.com/OtYb2lp.jpeg)
 
@@ -60,7 +60,9 @@ Darwin Gödel Machine, SICA), cut down to fit one graphics card.
 
 ## What you need
 
-- **Windows 10 or 11** (the launchers are Windows-only).
+- **Windows 10 or 11, 64-bit.** It does not run on macOS or Linux: the
+  launchers, the limits the agents' code runs inside (Windows job objects)
+  and the dashboard window are all Windows-specific.
 - **An NVIDIA GPU.** 24 GB runs the default model (27B parameters, 4-bit)
   with 64k of context. Smaller cards work with smaller models.
 - **32 GB of RAM and a page file Windows can grow** -- see [Memory](#memory).

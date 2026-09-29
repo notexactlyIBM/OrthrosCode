@@ -5,6 +5,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -49,6 +50,32 @@ class TestPlan(unittest.TestCase):
                                 {"LC_CONTEXT": 32768, "LC_RALPH_ITER_TIMEOUT": 420})
         self.assertGreater(settings["LC_RALPH_ITER_TIMEOUT"], 1000)
 
+    def test_the_guards_lines_say_what_the_thinking_took(self):
+        said = tune.replies(reply(5000, 1000, "ran out of room") + reply(2000, 2000))
+        self.assertEqual((said["count"], said["ran_out"], said["longest"]), (2, 1, 6000))
+        self.assertAlmostEqual(said["thinking_share"], 0.7)
+        self.assertEqual(said["prompt"], 30000)
+
+    def test_timeouts_follow_the_room_the_window_leaves(self):
+        # The same prompt in a bigger window leaves a longer possible reply.
+        rounds = []
+        for context in (49152, 98304):
+            seen = tune.measured(turn_log(context, 5.0, extra=reply(5000, 1000, window=context)))
+            self.assertEqual(seen["tok_per_sec"], 60)           # the guard's rate, not 28
+            settings, why = tune.plan(LOOK, seen, {"LC_CONTEXT": context,
+                                                   "LC_RALPH_ITER_TIMEOUT": 420})
+            rounds.append(settings["LC_RALPH_ITER_TIMEOUT"])
+            self.assertIn("window leaves a reply up to", why[-1])
+        self.assertGreater(rounds[1], rounds[0])
+
+
+def reply(thinking, answer, ended="finished", prompt=30000, window=49152):
+    """The guard's line after a reply (orthros_guard/sitecustomize.py)."""
+    total = thinking + answer
+    return ("Orthros guard: reply {:,} tokens -- {:,} thinking, {:,} answer -- in {}s at 60 tok/s, "
+            "of {:,} it could use (prompt {:,}, window {:,}); {}.\n".format(
+                total, thinking, answer, total // 60, window - 33512, prompt, window, ended))
+
 
 class TestTuner(unittest.TestCase):
     def setUp(self):
@@ -86,6 +113,16 @@ class TestTuner(unittest.TestCase):
         open(os.path.join(self.dir, tune.REPROBE_FLAG), "w").close()
         self.assertEqual(self.tuner.due(("RTX 4090", 24564)), "setup was run")
         self.assertEqual(tune.Tuner(tempfile.mkdtemp()).due(), "first look")
+
+    def test_a_look_plans_from_the_last_turns_readings(self):
+        # "Check hardware" re-fits everything sized from the window, not only the card.
+        self.tuner.after_turn(turn_log(49152, 5.0, extra=reply(5000, 1000)), True,
+                              {"LC_CONTEXT": 49152})
+        self.tuner.data["trial"] = {}
+        with mock.patch.object(tune, "probe", return_value=dict(LOOK)):
+            why = self.tuner.look("", "qwen", {"LC_CONTEXT": 49152, "LC_RALPH_ITER_TIMEOUT": 420})
+        self.assertIn("LC_RALPH_ITER_TIMEOUT", self.tuner.data["trial"])
+        self.assertTrue(any("window leaves a reply" in w for w in why))
 
     def test_settings_survive_a_restart(self):
         self.tuner.data["good"] = {"LC_CONTEXT": 98304}

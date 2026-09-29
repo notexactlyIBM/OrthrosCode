@@ -16,6 +16,13 @@ longer timeouts for a slower machine. Every change is tried for one turn and
 kept as the last good settings only if that turn runs clean; one that fails
 to load or runs out of memory puts the last good settings back and is not
 tried again. Standard library only.
+
+The window is the one number the rest is sized from. The guard gives every
+reply the room its prompt leaves in it, and the timeouts here follow the
+longest reply that allows, at the rate the guard measured. So whenever the
+window is fitted again -- a look, or a turn's readings -- the rest follows,
+and nothing is calibrated to one window size. (2026-09-29: a reply ceiling
+chosen for 32,768 tokens was still cutting replies off at 49,152.)
 """
 
 import ctypes
@@ -114,17 +121,51 @@ def probe(lms="", model_key=""):
 LOADED = re.compile(r"context (\d+) x parallel \d+ = \d+ tokens of cache")
 HEADROOM = re.compile(r"VRAM after loading: ([\d.]+) GB free of ([\d.]+) GB")
 SPEED = re.compile(r"([\d.]+) tok/sec")
+# The guard's line after every reply (orthros_guard/sitecustomize.py).
+REPLY = re.compile(r"^Orthros guard: reply ([\d,]+) tokens -- ([\d,]+) thinking, ([\d,]+) answer "
+                   r"-- in (\d+)s at (\d+) tok/s, of ([\d,]+) it could use \(prompt ([\d,]+), "
+                   r"window ([\d,]+)\); ([^.]+)\.", re.MULTILINE)
+
+
+def _median(values):
+    values = sorted(values)
+    return values[len(values) // 2] if values else 0
+
+
+def replies(log_text):
+    """What the guard saw of every reply in a turn, or {} before it said anything.
+
+    The only record of the thinking: aider counts the answer alone, so by its
+    numbers a reply cut off at the ceiling looked like a short one.
+    """
+    rows = [[int(g.replace(",", "")) for g in m[:8]] + [m[8]] for m in REPLY.findall(log_text)]
+    if not rows:
+        return {}
+    wrote = sum(r[0] for r in rows)
+    return {"count": len(rows), "thinking": sum(r[1] for r in rows), "wrote": wrote,
+            "thinking_share": sum(r[1] for r in rows) / float(wrote) if wrote else 0.0,
+            "ran_out": sum(1 for r in rows if r[8] == "ran out of room"),
+            "longest": max(r[0] for r in rows), "longest_seconds": max(r[3] for r in rows),
+            "tok_per_sec": _median([r[4] for r in rows if r[3] >= 10]),
+            "prompt": _median([r[6] for r in rows]), "window": rows[-1][7]}
 
 
 def measured(log_text):
-    """What a turn's log shows: {context, free_mb, total_mb, tok_per_sec}, or {}."""
+    """What a turn's log shows: {context, free_mb, total_mb, tok_per_sec, prompt}, or {}.
+
+    Speed from the guard's lines when there are any: they count the thinking,
+    and the agents' own figure -- answer tokens over round time -- reads a
+    third of the real rate.
+    """
     loaded, room = LOADED.findall(log_text), HEADROOM.findall(log_text)
     if not loaded or not room:
         return {}
+    seen = replies(log_text)
     speeds = sorted(float(s) for s in SPEED.findall(log_text) if 0 < float(s) < 10000)
     return {"context": int(loaded[-1]), "free_mb": int(float(room[-1][0]) * 1024),
             "total_mb": int(float(room[-1][1]) * 1024),
-            "tok_per_sec": speeds[len(speeds) // 2] if speeds else 0}
+            "tok_per_sec": seen.get("tok_per_sec") or (speeds[len(speeds) // 2] if speeds else 0),
+            "prompt": seen.get("prompt") or 0}
 
 
 # ---------------------------------------------------------------- deciding
@@ -141,7 +182,8 @@ def plan(look, seen, current):
     out, why = {}, []
     ctx_now = int(current.get("LC_CONTEXT") or 32768)
     longest = look.get("model_max_context") or 0
-    if seen:
+    if seen and seen.get("context", ctx_now) == ctx_now:
+        # Only a reading taken at this context says what this context costs.
         free = seen["free_mb"]
         bigger = [c for c in CONTEXT_STEPS if c > ctx_now and (not longest or c <= longest)]
         smaller = [c for c in CONTEXT_STEPS if c < ctx_now]
@@ -160,17 +202,29 @@ def plan(look, seen, current):
         why.append("a %d GB card: starting at %d" % (vram // 1024, out["LC_CONTEXT"]))
     speed = seen.get("tok_per_sec") or 0
     if speed:
-        ceiling = int(current.get("LC_RALPH_MAX_OUTPUT") or 6000)
-        answer = ceiling / speed                    # seconds for the longest reply
-        want = {"LC_RALPH_API_TIMEOUT": int(min(900, max(240, answer * 1.5))),
-                "LC_RALPH_ITER_TIMEOUT": int(min(1800, max(420, answer * 2 + 120)))}
+        # How long the longest reply can take. With the guard's numbers, the
+        # longest reply is what the window leaves after a typical prompt -- the
+        # guard gives a reply all of it -- at the rate the model really writes,
+        # thinking included; so a bigger window or a bigger prompt moves the
+        # timeouts with it. Without them, the agents' own ceiling and rate.
+        window = int(out.get("LC_CONTEXT") or ctx_now)
+        if seen.get("prompt"):
+            reply = max(2048, window - int(seen["prompt"] * 1.1) - 512)
+            said = ("a %s-token window leaves a reply up to %s tokens after a %s-token prompt"
+                    % ("{:,}".format(window), "{:,}".format(reply), "{:,}".format(seen["prompt"])))
+        else:
+            reply = int(current.get("LC_RALPH_MAX_OUTPUT") or 6000)
+            said = "replies of up to %s tokens" % "{:,}".format(reply)
+        answer = reply / speed                      # seconds for the longest reply
+        want = {"LC_RALPH_API_TIMEOUT": int(min(1200, max(240, answer * 1.5))),
+                "LC_RALPH_ITER_TIMEOUT": int(min(2400, max(420, answer * 2 + 120)))}
         for key, value in want.items():
             have = int(current.get(key) or 0)
             if not have or abs(value - have) > have * 0.25:
                 out[key] = value
         if "LC_RALPH_ITER_TIMEOUT" in out:
-            why.append("replies come at %.0f tok/sec, so a round gets %ds"
-                       % (speed, out["LC_RALPH_ITER_TIMEOUT"]))
+            why.append("%s, written at %.0f tok/sec, so a round gets %ds"
+                       % (said, speed, out["LC_RALPH_ITER_TIMEOUT"]))
     return {k: v for k, v in out.items() if str(current.get(k)) != str(v)}, why
 
 
@@ -204,13 +258,17 @@ class Tuner:
         return ""
 
     def look(self, lms, model_key, current, seen=None):
-        """Look at the machine and put fitting settings on trial. Returns reasons."""
+        """Look at the machine and put fitting settings on trial. Returns reasons.
+
+        Planned from the last turn's readings too, so a look re-fits the
+        window and everything sized from it, not only the card's name.
+        """
         self.data["look"] = probe(lms, model_key)
         try:
             os.remove(self.flag)
         except OSError:
             pass
-        return self.propose(current, seen or {})
+        return self.propose(current, seen or self.data.get("seen") or {})
 
     def propose(self, current, seen):
         base = dict(current, **self.data["good"])
@@ -249,7 +307,10 @@ class Tuner:
                 self.data["trial"] = {"LC_CONTEXT": lower[-1]}
                 notes.append("ran out of memory; trying %d" % lower[-1])
         elif launched and not bad:
-            settings, why = plan(self.data["look"], measured(log_text), in_use)
+            seen = measured(log_text)
+            if seen:
+                self.data["seen"] = seen
+            settings, why = plan(self.data["look"], seen, in_use)
             failed = self.data.get("failed", {})
             settings = {k: v for k, v in settings.items() if failed.get(k) != v}
             if settings:

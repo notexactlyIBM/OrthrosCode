@@ -31,6 +31,8 @@ State: `orthros.json` holds settings and the serve key. `.orthros-state.json` ho
 6. **This repo is public.** Nothing machine-, person- or other-project-specific goes in code, docs or commit messages: no host names, IPs, keys, or names of the user's private projects.
 7. **Tests never touch live things**: no real ports (use 0, or mock `port_in_use`), no real ledger or state, no firewall prompts (`serve_host=127.0.0.1`).
 8. **Python 3.14 runs Orthros** (`py -3`). Escape backslashes in strings and docstrings (`agent\\`). An invalid escape prints a warning on every start.
+9. **Every token budget comes from the window in use, per request.** The guard (`orthros_guard\`) gives each reply the room its prompt leaves and reports each reply's thinking; the tuner sizes timeouts from that. Never add a token number calibrated to one window size: the window changes whenever the tuner re-fits it. The model's thinking counts against the reply, and aider does not count it.
+10. **Count what the loop wrote, not the turn's whole output.** The model quotes its task list and lessons while it thinks, so a phrase count over `logs\*.log` counts the model. Loop events come from the agent's `.localcoder-ralph.log`; aider's and the guard's own lines are safe in the turn log.
 
 ## How to work here
 

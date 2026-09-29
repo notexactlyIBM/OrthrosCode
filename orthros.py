@@ -176,28 +176,40 @@ print("\n".join(bad))
 sys.exit(1 if bad else 0)
 '''
 
-# What the field report counts in a turn's output: (label, phrase).
+# The agent's own log of what its loop did, in the folder it worked on: one
+# timestamped line per step, none of the model's words. 2026-09-29: counted in
+# the turn's whole output, where the model quotes its task list and lessons as
+# it thinks, the field report told the twin 47 items were parked and a second
+# look found bugs in 10 changes. The loop's log said 3 and 1.
+LOOP_LOG = ".localcoder-ralph.log"
+LOOP_SECTION = re.compile(r"^== (\d{4}-\d\d-\d\d \d\d:\d\d) ==[ \t]*$", re.MULTILINE)
+
+# What the field report counts in a turn: (where, label, phrase). "loop" is
+# counted in the loop's log; "aider" in the turn's output, and only for
+# aider's and the guard's own words, which the model never sees or repeats.
 FIELD_SIGNS = (
-    ("unexpected errors in the loop", "LocalCoder hit an unexpected error"),
-    ("rounds lost to the engine", "engine stopped answering"),
-    ("edits that did not apply", "did not match the file"),
-    ("replies cut off", "was cut off at the ceiling"),
-    ("replies that outgrew the window", "outgrew the context window"),
-    ("prompts too big to answer", "prompt alone is taking most of the window"),
-    ("rounds that broke start-up", "That round broke it"),
-    ("items parked", "Parked"),
-    ("invented attributes caught", "Invented "),
+    ("loop", "unexpected errors in the loop", "LocalCoder hit an unexpected error"),
+    ("loop", "rounds lost to the engine", "engine stopped answering"),
+    ("loop", "edits that did not apply", "did not match the file"),
+    ("loop", "replies cut off", "was cut off at the ceiling"),
+    ("loop", "replies that outgrew the window", "outgrew the context window"),
+    ("loop", "prompts too big to answer", "prompt alone is taking most of the window"),
+    ("loop", "rounds that broke start-up", "That round broke it"),
+    ("loop", "items parked", "Parked"),
+    ("loop", "invented attributes caught", "Invented "),
+    ("loop", "bad edits stopped by the automatic checks", "An automatic check rejected it"),
+    ("loop", "changes a second look at the diff found a bug in", "a second look found"),
     # A prompt the window cannot hold comes back from LM Studio as a 400 that
     # aider words as a connection error, so it was counted above as the
     # engine dying -- and the twin went looking for an engine problem.
-    ("requests refused as too big for the window (aider retries each)",
+    ("aider", "requests refused as too big for the window (aider retries each)",
      "exceeds the available context size"),
-    ("files pulled into a round because a reply named them",
+    ("aider", "files pulled into a round because a reply named them",
      "it's best to only add files that need changes"),
-    ("prompts the guard kept from being sent", GUARD_REFUSED),
-    ("files the guard kept out of a round", "Orthros guard: not adding"),
-    ("bad edits stopped by the automatic checks", "An automatic check rejected it"),
-    ("changes a second look at the diff found a bug in", "a second look found"),
+    ("aider", "prompts the guard kept from being sent", GUARD_REFUSED),
+    ("aider", "files a reply named that its item did not (kept out)",
+     "-- the item does not name them"),
+    ("aider", "files kept out of a round for want of room", "-- it would not fit in the window"),
 )
 OVERSIZE = re.compile(r"request \((\d+) tokens\) exceeds the available context size "
                       r"\((\d+) tokens\)")
@@ -316,6 +328,20 @@ def tail(path, lines=40):
     except OSError:
         return []
     return [l.rstrip() for l in text.splitlines() if l.strip()][-lines:]
+
+
+def loop_text(folder, started):
+    """What the loop wrote in its own log (LOOP_LOG) from `started` on, or ''.
+
+    Each session opens with a "== YYYY-MM-DD HH:MM ==" line; the turn's are
+    the ones from the minute it started.
+    """
+    text = read_text(os.path.join(folder, LOOP_LOG)) if folder else ""
+    since = time.strftime("%Y-%m-%d %H:%M", time.localtime(started))
+    for match in LOOP_SECTION.finditer(text):
+        if match.group(1) >= since:
+            return text[match.start():]
+    return ""
 
 
 # --------------------------------------------------------------------------
@@ -1172,8 +1198,12 @@ class Orthros:
                                            result["sent_back"],
                                            "{:,}".format(result["tokens"]),
                                            result["reason"] or "?")]
-        counts = ["%s: %d" % (label, text.count(phrase)) for label, phrase in FIELD_SIGNS
-                  if text.count(phrase)]
+        loop = loop_text(result.get("folder") or "", result["started"]) or text
+        counts = []
+        for where, label, phrase in FIELD_SIGNS:
+            n = (loop if where == "loop" else text).count(phrase)
+            if n:
+                counts.append("%s: %d" % (label, n))
         if result.get("lowest_free_mb") is not None:
             lines.append("Least memory free during the turn: %d MB." % result["lowest_free_mb"])
         if counts:
@@ -1189,12 +1219,22 @@ class Orthros:
         went = self.round_outcomes(name, result["started"])
         if went:
             lines.append("Where the rounds went: %s." % ", ".join("%s %d" % o for o in went))
-        rates = [float(m) for m in re.findall(r"([\d.]+) tok/sec", text)]
-        if rates:
-            lines.append("Typical speed: %.0f tok/sec." % sorted(rates)[len(rates) // 2])
-        reasons = re.findall(r"Reviewer rejected it: (.+)", text)[-3:]
+        said = tune.replies(text)
+        if said:
+            lines.append("Replies: %d, and %d%% of what the model wrote was thinking; %d ran out "
+                         "of room; the longest was %s tokens, in %ds; typical prompt %s tokens "
+                         "of a %s window; %d tok/sec." % (
+                             said["count"], round(100 * said["thinking_share"]), said["ran_out"],
+                             "{:,}".format(said["longest"]), said["longest_seconds"],
+                             "{:,}".format(said["prompt"]), "{:,}".format(said["window"]),
+                             said["tok_per_sec"]))
+        else:
+            rates = [float(m) for m in re.findall(r"([\d.]+) tok/sec", loop)]
+            if rates:
+                lines.append("Typical speed: %.0f tok/sec." % sorted(rates)[len(rates) // 2])
+        reasons = re.findall(r"Reviewer rejected it: (.+)", loop)[-3:]
         lines += ["Rejected: %s" % r.strip()[:160] for r in reasons]
-        errors = re.findall(r"LocalCoder hit an unexpected error: (.+)", text)[-2:]
+        errors = re.findall(r"LocalCoder hit an unexpected error: (.+)", loop)[-2:]
         lines += ["Error: %s" % e.strip()[:160] for e in errors]
         record = self.coding_record(name)
         if record:

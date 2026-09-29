@@ -8,6 +8,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import types
 import unittest
 from unittest import mock
@@ -17,6 +18,7 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 
 import importlib.util  # noqa: E402
+import io  # noqa: E402
 
 import orthros  # noqa: E402
 
@@ -173,6 +175,22 @@ class TestJudging(Sandbox):
         self.o.field_report(self.result("A", started=100))
         report = orthros.read_text(os.path.join(self.o.folders["A"], "FIELD_REPORT.md"))
         self.assertIn("Where the rounds went: kept 1, rejected by reviewer 1.", report)
+
+    def test_field_report_counts_the_loops_words_not_the_models(self):
+        started = time.mktime((2026, 9, 29, 5, 56, 0, 0, 0, -1))
+        folder = self.o.folders["B"]
+        self.write(folder, orthros.LOOP_LOG,
+                   "== 2026-09-29 02:45 ==\n02:50:00  Parked it and moving on to the next.\n"
+                   "== 2026-09-29 05:56 ==\n06:10:00  Parked it and moving on to the next.\n")
+        # The model reading its task list aloud, and the guard's line on the reply.
+        text = ("  - *Parked by Orthros*: stuck\n" * 40 +
+                "Orthros guard: reply 6,000 tokens -- 5,000 thinking, 1,000 answer -- in 100s "
+                "at 60 tok/s, of 6,000 it could use (prompt 30,000, window 49,152); "
+                "ran out of room.\n")
+        self.o.field_report(self.result("A", started=started, folder=folder, log_text=text))
+        report = orthros.read_text(os.path.join(self.o.folders["A"], "FIELD_REPORT.md"))
+        self.assertIn("Trouble: items parked: 1.", report)
+        self.assertIn("Replies: 1, and 83% of what the model wrote was thinking; 1 ran out", report)
 
 
 class TestRollbackNote(Sandbox):
@@ -474,8 +492,14 @@ class TestFresh(Sandbox):
             self.in_step.start()
 
 
+class CutOff(Exception):
+    """aider's FinishReasonLength: the reply reached max_tokens."""
+
+
 class FakeCoder:
     """The parts of aider's Coder the guard touches."""
+
+    reasoning_tag_name = "thinking"
 
     def __init__(self, window, files, mentioned):
         self.main_model = types.SimpleNamespace(info={"max_input_tokens": window},
@@ -483,8 +507,11 @@ class FakeCoder:
         self.abs_fnames, self.abs_read_only_fnames = set(files), set()
         self.ignore_mentions = set()
         self.mentioned = mentioned
-        self.io = types.SimpleNamespace(tool_output=lambda *a: None, tool_error=lambda *a: None)
+        self.said = []
+        self.io = types.SimpleNamespace(tool_output=lambda *a: self.said.append(" ".join(a)),
+                                        tool_error=lambda *a: self.said.append(" ".join(a)))
         self.added = []
+        self.partial_response_content = ""
 
     def abs_root_path(self, rel):
         return rel
@@ -499,13 +526,20 @@ class FakeCoder:
     def check_tokens(self, messages):
         return True
 
+    def send(self, messages, cut=False):
+        self.partial_response_content = "<thinking>\n\n" + "mull " * 800
+        yield "..."
+        if cut:
+            raise CutOff()
+        self.partial_response_content += "\n\n</thinking>\n\nthe edit"
+
 
 class TestGuard(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
         self.small = self.file("small.py", 400)
         self.big = self.file("big.py", 40000)
-        guard.patch(types.SimpleNamespace(Coder=FakeCoder))
+        guard.patch(types.SimpleNamespace(Coder=FakeCoder, FinishReasonLength=CutOff))
 
     def tearDown(self):
         shutil.rmtree(self.dir, ignore_errors=True)
@@ -529,6 +563,51 @@ class TestGuard(unittest.TestCase):
         coder = FakeCoder(1000, [], [])
         self.assertFalse(coder.check_tokens(["y" * 4000]))
         self.assertTrue(coder.check_tokens(["y" * 400]))
+
+    def test_a_reply_gets_the_room_its_prompt_leaves_in_this_window(self):
+        prompt = ["y" * 120000]                                  # 30,000 tokens
+        rooms = []
+        for window in (49152, 98304):
+            coder = FakeCoder(window, [], [])
+            self.assertTrue(coder.check_tokens(prompt))
+            rooms.append(coder.main_model.extra_params["max_tokens"])
+        self.assertEqual(rooms[0], 49152 - 33000 - 512)
+        self.assertEqual(rooms[1] - rooms[0], 49152)
+
+    def test_a_reply_pulls_in_only_files_its_item_names(self):
+        other, helper = self.file("other.py", 400), self.file("helper.py", 400)
+        tasks = self.file("orthros_tasks.md", 0)
+        with open(tasks, "w") as handle:
+            handle.write("- [x] In `g` (other.py), done.\n"
+                         "- [ ] In `f` (small.py), return 2. Done when: a test passes.\n"
+                         "  - *Note*: the constant lives in helper.py\n"
+                         "- [ ] In `h` (other.py), later.\n")
+        coder = FakeCoder(49152, [tasks], [self.small, other, helper])
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            coder.check_for_file_mentions("I need small.py, other.py and helper.py")
+        self.assertEqual(coder.added, sorted([self.small, helper]))
+        self.assertIn("other.py -- the item does not name them.\n", out.getvalue())
+
+    def test_aider_never_opens_a_browser(self):
+        import webbrowser
+        fresh = type("Coder", (FakeCoder,), {"_orthros_guarded": False})
+        with mock.patch.multiple(webbrowser, open=None, open_new=None, open_new_tab=None), \
+                mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            guard.patch(types.SimpleNamespace(Coder=fresh))
+            self.assertFalse(webbrowser.open("https://aider.chat/docs/troubleshooting/"))
+        self.assertIn("not opening https://aider.chat", out.getvalue())
+
+    def test_each_reply_is_reported_with_its_thinking(self):
+        coder = FakeCoder(49152, [], [])
+        coder.check_tokens(["y" * 120000])
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            list(coder.send([]))
+            with self.assertRaises(CutOff):
+                list(coder.send([], cut=True))
+        rows = orthros.tune.REPLY.findall(out.getvalue())
+        self.assertEqual([r[8] for r in rows], ["finished", "ran out of room"])
+        self.assertGreater(int(rows[0][1].replace(",", "")), int(rows[0][2]))   # thinking > answer
+        self.assertEqual(rows[0][6], "30,000")
 
 
 if __name__ == "__main__":

@@ -17,7 +17,7 @@ Orthros is the two-headed dog of Greek myth. Here the two heads are agents
   new folder or on a copy of one of yours.
 - **Serve the network** -- Orthros serves the other machines on your
   network: a free model behind the standard OpenAI API, and tools A and B
-  build on request, over MCP.
+  build on request, over MCP. I use mine to answer calls from pamvectorlogic.com
 
 Every step is a git commit you can read.
 

@@ -6,7 +6,7 @@ and only keep the changes that make them measurably better.**
 **For Windows 10 and 11 (64-bit).** No cloud, no API keys, no accounts. One
 NVIDIA GPU, one open model, and a referee called Orthros.
 
-![Image](https://i.imgur.com/OtYb2lp.jpeg)
+![Image](https://i.imgur.com/lloFucS.png)
 
 Orthros is the two-headed dog of Greek myth. Here the two heads are agents
 **A** and **B**, sharing one graphics card, one at a time. It has three modes:
@@ -15,7 +15,7 @@ Orthros is the two-headed dog of Greek myth. Here the two heads are agents
   changes and rewrites A.
 - **Work on a task** -- they take turns building a project you describe, in a
   new folder or on a copy of one of yours.
-- **Serve the network** -- the card works for the other machines on your
+- **Serve the network** -- Orthros serves the other machines on your
   network: a free model behind the standard OpenAI API, and tools A and B
   build on request, over MCP.
 
@@ -45,7 +45,7 @@ Every step is a git commit you can read.
    field report -- what went wrong in its twin's real turns -- into fixes, then
    checks the work already ticked off. Only when that finds nothing does it
    plan something new.
-6. **Handover.** The model is unloaded, the card freed, and the other agent
+6. **Handover.** The model is unloaded, the GPU freed, and the other agent
    starts.
 7. **Proof by score.** Working is not the same as better. Every few good
    turns, an agent's current version is scored on held-out coding exercises
@@ -152,7 +152,7 @@ folder: every change. `orthros.log`: what the referee did.
 
 ## Serve the network
 
-In this mode the card works for other machines on your network instead: a
+In this mode Orthros serves other machines on your network instead: a
 free model for anything that would otherwise pay per token, and tools built
 on request. Pick **Serve the network** and press **Start**. The page shows
 the address and a key; every request must send the key as

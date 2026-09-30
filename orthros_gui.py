@@ -393,7 +393,7 @@ class Dashboard:
         for i, (mode, glyph, title, sub) in enumerate((
                 ("self", "⟲", "Evolve", "A and B improve each other"),
                 ("task", "☑", "Work on a task", "Both build one project"),
-                ("serve", "◉", "Serve the network", "The card answers other machines"))):
+                ("serve", "◉", "Serve the network", "Orthros answers other machines"))):
             tile = Tile(modes, glyph, title, sub, mode, lambda m=mode: self.pick_mode(m))
             tile.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else 8, 0))
             modes.columnconfigure(i, weight=1, uniform="tile")

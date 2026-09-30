@@ -2445,7 +2445,7 @@ class Orthros:
         s = v["service"]
         if v["mode"] == "serve" or s["open"]:
             parts.append("Serving the network at %s with %s: %s requests answered, %s turned "
-                         "away (busy, or the card was building a tool), %s with a wrong key, "
+                         "away (busy, or Orthros was building a tool), %s with a wrong key, "
                          "%s tokens.\nTools: %s" % (
                              ", ".join(s["urls"]) or "?", s["model"] or "no model yet",
                              s["served"], s["refused"], s["denied"], "{:,}".format(s["tokens"]),

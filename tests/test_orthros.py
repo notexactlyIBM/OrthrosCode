@@ -492,6 +492,41 @@ class TestFresh(Sandbox):
             self.in_step.start()
 
 
+class TestModelsByJob(Sandbox):
+    def setUp(self):
+        super().setUp()
+        self.o.settings.update(serve_model="maker/uncensored-31b", lift_model="maker/uncensored-31b",
+                               model_contexts={"maker/uncensored-31b": 24576})
+        self.task = os.path.join(self.root, "tasks", "story")
+        self.tool = os.path.join(self.root, "tools", "csv-tool")
+
+    def test_agaric_lift_moves_only_the_chosen_tasks_turns(self):
+        self.assertIsNone(self.o.lift_model("task", self.task))            # switch off
+        self.o.settings["agaric_lift"] = True
+        self.assertEqual(self.o.lift_model("task", self.task), ("maker/uncensored-31b", 24576))
+        env = self.o.agent_env("A", self.task, "task")
+        self.assertEqual((env["LC_MODEL_KEY"], env["LC_CONTEXT"]), ("maker/uncensored-31b", "24576"))
+        self.assertIsNone(self.o.lift_model("task", self.tool))            # tool builds: agents'
+        self.assertIsNone(self.o.lift_model("self", self.o.folders["B"]))  # evolving: agents'
+        self.assertNotEqual(self.o.agent_env("A").get("LC_MODEL_KEY"), "maker/uncensored-31b")
+
+    def test_serving_uses_the_serve_model_at_its_own_context(self):
+        engine = self.o.engine()
+        self.assertEqual((engine["model"], engine["context"]), ("maker/uncensored-31b", 24576))
+        self.o.settings["serve_model"] = ""
+        self.assertNotEqual(self.o.engine()["model"], "maker/uncensored-31b")
+
+    def test_a_turn_on_another_model_teaches_the_tuner_nothing(self):
+        with mock.patch.object(self.o.tuner, "after_turn") as learn:
+            self.o.tune_after({"lifted": True, "log": "", "launched": True})
+        learn.assert_not_called()
+
+    def test_the_served_name_is_checked_for_the_model_behind_it(self):
+        self.assertTrue(orthros.service.same_model("maker/uncensored-31b", "uncensored-31b"))
+        self.assertFalse(orthros.service.same_model("qwen/qwen3.8-27b", "maker/uncensored-31b"))
+        self.assertFalse(orthros.service.same_model("", "maker/uncensored-31b"))
+
+
 class TestSecondStart(unittest.TestCase):
     def test_a_second_orthros_on_a_folder_is_kept_out(self):
         folder = tempfile.mkdtemp()

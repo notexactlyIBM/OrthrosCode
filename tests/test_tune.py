@@ -101,6 +101,15 @@ class TestTuner(unittest.TestCase):
         self.tuner.after_turn(turn_log(65536, 20.0, 48.0), True, {})
         self.assertNotEqual(self.tuner.data["trial"].get("LC_CONTEXT"), 98304)
 
+    def test_out_of_memory_with_drafting_on_drops_drafting_before_context(self):
+        self.tuner.data["good"] = {"LC_CONTEXT": 49152}
+        self.tuner.after_turn(turn_log(49152, 0.5, extra="bad allocation\n"), True,
+                              {"LC_SPECULATIVE": "1"})
+        self.assertEqual(self.tuner.data["trial"], {"LC_SPECULATIVE": "0"})
+        self.tuner.after_turn(turn_log(49152, 6.0), True, {"LC_SPECULATIVE": "1"})
+        self.assertEqual(self.tuner.settings()["LC_SPECULATIVE"], "0")      # kept off
+        self.assertEqual(self.tuner.settings()["LC_CONTEXT"], 49152)
+
     def test_a_model_that_will_not_load_steps_down(self):
         self.tuner.data["good"] = {"LC_CONTEXT": 65536}
         self.tuner.after_turn("!! Could not load 'qwen'.\n", False, {})

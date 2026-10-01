@@ -67,6 +67,7 @@ button.primary { color: #03141f; border-color: transparent; background: linear-g
 button.primary:hover:not(:disabled) { background: linear-gradient(180deg, #8ff3ff, #2cc6f2);
   box-shadow: 0 0 0 1px rgba(34, 225, 255, .7); }
 button.small { padding: 6px 11px; font-size: 11.5px; border-radius: 8px; }
+button.lift.on { color: #0d0420; border-color: transparent; background: linear-gradient(180deg, #b48cf5, #9b6fe8); box-shadow: none; }
 button:disabled { opacity: .32; cursor: not-allowed; box-shadow: none; }
 .link { background: none; border: none; color: var(--bad); font: 700 11.5px var(--display); letter-spacing: .08em;
   text-transform: uppercase; text-decoration: underline; text-underline-offset: 3px; padding: 6px 4px; }
@@ -422,6 +423,7 @@ dialog .line { justify-content: flex-end; }
           <div class="line">
             <label>Task <select id="taskPick"></select></label>
             <button type="button" id="newTaskBtn">New task</button>
+            <button type="button" class="lift" id="liftBtn">AGARIC LIFT</button>
             <span class="msgline" id="taskInfo"></span>
             <span class="tip" tabindex="0" id="taskTip" data-tip="A and B take turns on the task. Steer it with Suggest direction for &quot;the task&quot;.">?</span>
           </div>
@@ -815,6 +817,15 @@ function renderMode(d) {
       pick.dataset.key = key;
     }
   }
+  // AGARIC LIFT: lit, solid and coloured, while the task runs on the lift model.
+  const liftModel = d.settings.lift_model || "", lifted = !!(d.settings.agaric_lift && liftModel);
+  const lift = $("#liftBtn");
+  lift.classList.toggle("on", lifted);
+  lift.textContent = lifted ? "AGARIC LIFT  ON" : "AGARIC LIFT";
+  lift.disabled = !liftModel;
+  lift.title = liftModel ? `On: the task's turns run on ${liftModel}. Off: on the agents' own model. ` +
+    "Evolving and tool builds always use the agents' model. Takes effect at the next turn."
+    : 'Set "lift_model" in orthros.json to the model to switch to.';
   const t = d.tasks.find((x) => x.key === (pick.value || d.task));
   $("#taskInfo").textContent = t ? `${t.done} done · ${t.open} open${t.parked ? ` · ${t.parked} parked` : ""}` +
     (t.source ? ` · branch ${t.branch} of ${t.source}` : "") : "";
@@ -917,6 +928,11 @@ $("#modeTask").onclick = () => {
 };
 $("#taskPick").onchange = () => { if ($("#taskPick").value) chooseMode("task", $("#taskPick").value); };
 $("#newTaskBtn").onclick = () => { $("#newTask").classList.toggle("on"); $("#taskName").focus(); };
+$("#liftBtn").onclick = async () => {
+  if (!lastState) return;
+  await post("/api/settings", { agaric_lift: !lastState.settings.agaric_lift });
+  tick();
+};
 $("#cancelTask").onclick = () => { $("#newTask").classList.remove("on"); wantTask = false; tick(); };
 $("#createTask").onclick = async () => {
   const msg = $("#taskMsg"); msg.className = "msgline";

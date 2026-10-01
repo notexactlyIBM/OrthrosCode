@@ -50,6 +50,7 @@ BUTTONS = {                       # background, text, background under the point
     "start": ("#22c98a", "#02160f", "#40e0a3"),
     "stop": ("#d8374e", "#ffffff", "#ea5367"),
     "stopping": ("#e9a126", "#231500", "#e9a126"),
+    "lift": ("#9b6fe8", "#0d0420", "#b48cf5"),
     "link": (PANEL, BAD, PANEL),
 }
 
@@ -519,8 +520,11 @@ class Dashboard:
         self.task_menu["menu"].config(bg=PANEL2, fg=INK, font=(BODY, 9))
         self.task_menu.pack(side="left", padx=6)
         button(row, "New task", self.toggle_new_task, font=(DISPLAY, 9, "bold")).pack(side="left")
-        self.task_info = label(row, "", DIM, (BODY, 9))
-        self.task_info.pack(side="left", padx=10)
+        self.lift = button(row, "AGARIC LIFT", self.toggle_lift, font=(DISPLAY, 9, "bold"))
+        self.lift.pack(side="left", padx=(6, 0))
+        self.lift_tip = Tip(self.lift, "")
+        self.task_info = label(pane, "", DIM, (BODY, 9), anchor="w")
+        self.task_info.pack(fill="x", pady=(6, 0))
         self.task_keys = None
 
         form = tk.Frame(pane, bg=PANEL)
@@ -982,6 +986,7 @@ class Dashboard:
         elif not bits:
             self.self_summary.pack_forget()
         # the task pane
+        self.render_lift(d.get("settings") or {})
         keys = [t["key"] for t in d.get("tasks") or []]
         if keys != self.task_keys:
             self.task_keys = keys
@@ -1352,6 +1357,26 @@ class Dashboard:
             else:
                 self.want_task = False
         self.post("/api/mode", body, done)
+
+    def toggle_lift(self):
+        settings = (self.d or {}).get("settings") or {}
+        if settings.get("lift_model"):
+            self.post("/api/settings", {"agaric_lift": not settings.get("agaric_lift")})
+
+    def render_lift(self, settings):
+        """Lit -- solid and coloured -- while the task runs on the lift model."""
+        model, on = settings.get("lift_model") or "", bool(settings.get("agaric_lift"))
+        kind = "lift" if on and model else "secondary"
+        if self.lift.kind != kind:
+            paint(self.lift, kind)
+        self.lift.config(text="AGARIC LIFT  ON" if on and model else "AGARIC LIFT")
+        enable(self.lift, bool(model))
+        if on and model:
+            self.lift.config(bg=self.lift.normal)
+        self.lift_tip.text = (
+            "On: the task's turns run on %s. Off: on the agents' own model. Evolving and "
+            "tool builds always use the agents' model. Takes effect at the next turn." % model
+            if model else "Set \"lift_model\" in orthros.json to the model to switch to.")
 
     def toggle_new_task(self):
         if self.new_task.winfo_ismapped():

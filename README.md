@@ -209,6 +209,15 @@ Settings: `serve_port`, `tool_turns` (turns before a tool is given up) and
 | `eval_count`, `eval_minutes` | 8, 8 | exercises per scoring and minutes each (about 90 minutes in all) |
 | `pause_after_idle` | 4 | stop after this many turns in a row that kept nothing |
 | `auto_tune` | true | fit context size and timeouts to the machine from what each turn measures |
+| `serve_model` | "" | the model that answers the network's plain requests; empty = the agents' own |
+| `lift_model` | "" | the model a task switches to while **AGARIC LIFT** (the task pane's switch) is on |
+| `model_contexts` | {} | context for a model other than the agents', which the tuner does not fit (else 32,768) |
+
+One model does each job, and the card holds one at a time. The agents' own
+model -- `LC_MODEL_KEY` in their `config.cmd` -- always evolves them and always
+builds the tools other machines ask for. Another model can answer the network
+(`serve_model`), or work a task while AGARIC LIFT is on (`lift_model`): an
+uncensored model for open questions, say, and the coder for code.
 
 Each agent's own settings -- model, context, temperatures, tries per job --
 are in its `config.cmd`, each with the reason beside it. The agent itself is

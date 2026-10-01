@@ -123,14 +123,22 @@ def lms_run(lms, *args, timeout=300):
 
 
 def resident(lms):
-    """The names LM Studio holds a model in memory under."""
+    """{name LM Studio holds a model in memory under: that model's key}."""
     code, out = lms_run(lms, "ps", "--json", timeout=60)
     start = out.find("[")
     try:
         entries = json.loads(out[start:]) if code == 0 and start >= 0 else []
     except ValueError:
-        return []
-    return [str(e.get("identifier") or "") for e in entries if isinstance(e, dict)]
+        return {}
+    return {str(e.get("identifier") or ""): str(e.get("modelKey") or e.get("path") or "")
+            for e in entries if isinstance(e, dict)}
+
+
+def same_model(held, wanted):
+    """Is the model held the one wanted? Keys come with and without their publisher."""
+    held, wanted = (held or "").lower(), (wanted or "").lower()
+    return bool(held and wanted) and (held == wanted or held.endswith("/" + wanted)
+                                      or wanted.endswith("/" + held))
 
 
 class DualStack(http.server.ThreadingHTTPServer):
@@ -277,20 +285,27 @@ class Service:
         if not e["model"]:
             return "no model to serve: LC_MODEL_KEY is not set in the agents' config.cmd"
         self.upstream, self.model = ("127.0.0.1", e["port"]), e["model"]
-        if not self.answers(20):
-            lms_run(e["lms"], "server", "start", "-p", str(e["port"]))    # 127.0.0.1 only
+        # The name it is served under says nothing about which model is behind
+        # it: after the serving model is changed, the old one still answers.
+        if not (self.answers(20) and same_model(resident(e["lms"]).get(IDENTIFIER), e["model"])):
+            if self.upstream_get("/v1/models") is None:
+                lms_run(e["lms"], "server", "start", "-p", str(e["port"]))    # 127.0.0.1 only
             deadline = now() + 60
             while self.upstream_get("/v1/models") is None:
                 if now() > deadline:
                     return "the LM Studio server never came up"
                 time.sleep(1.5)
-            if IDENTIFIER not in resident(e["lms"]):
+            if not same_model(resident(e["lms"]).get(IDENTIFIER), e["model"]):
                 lms_run(e["lms"], "unload", "--all")
                 args = ["load", e["model"], "--gpu", e["gpu"], "-c", str(e["context"]),
                         "--parallel", str(e["parallel"]), "--identifier", IDENTIFIER, "-y"]
                 if not e["speculative"]:
                     args.append("--no-speculative-draft-mtp")
                 code, out = lms_run(e["lms"], *args, timeout=900)
+                if code and e["speculative"] and "mtp" in out.lower():
+                    # A build without the draft head: load it without, as the agents do.
+                    code, out = lms_run(e["lms"], *(args + ["--no-speculative-draft-mtp"]),
+                                        timeout=900)
                 if code:
                     return "Could not load '%s': %s" % (e["model"], " ".join(out.split())[-300:])
             if not self.answers(180):

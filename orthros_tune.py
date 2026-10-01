@@ -301,7 +301,16 @@ class Tuner:
                 self.data.setdefault("failed", {}).update(trial)
             self.data["trial"] = {}
         in_use = dict(current, **self.data["good"])
-        if bad and not trial:
+        drafting = str(in_use.get("LC_SPECULATIVE") or "0").lower() not in ("0", "no", "false",
+                                                                           "off")
+        if bad and not trial and drafting and \
+                self.data.get("failed", {}).get("LC_SPECULATIVE") != "0":
+            # The draft head and its buffers are the memory that can go without
+            # costing context. (2026-09-30, put on trial: off since an
+            # out-of-memory spell; 6 GB of the card now sits free after loading.)
+            self.data["trial"] = {"LC_SPECULATIVE": "0"}
+            notes.append("ran out of memory with drafting on; trying without it")
+        elif bad and not trial:
             lower = [c for c in CONTEXT_STEPS if c < int(in_use.get("LC_CONTEXT") or 32768)]
             if lower:
                 self.data["trial"] = {"LC_CONTEXT": lower[-1]}

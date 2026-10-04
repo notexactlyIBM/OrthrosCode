@@ -510,6 +510,20 @@ class TestModelsByJob(Sandbox):
         self.assertIsNone(self.o.lift_model("self", self.o.folders["B"]))  # evolving: agents'
         self.assertNotEqual(self.o.agent_env("A").get("LC_MODEL_KEY"), "maker/uncensored-31b")
 
+    def test_evolve_lift_moves_the_work_but_not_the_measuring(self):
+        self.o.settings.update(evolve_lift_model="maker/heretic-27b", agaric_lift_evolve=True,
+                               model_contexts={"maker/heretic-27b": "tuned"})
+        peer = self.o.folders["B"]
+        self.assertEqual(self.o.lift_model("self", peer), ("maker/heretic-27b", None))
+        tuned = self.o.agent_env("A", peer, "self", tuned=True).get("LC_CONTEXT")
+        env = self.o.agent_env("A", peer, "self")
+        self.assertEqual(env["LC_MODEL_KEY"], "maker/heretic-27b")
+        self.assertEqual(env.get("LC_CONTEXT"), tuned)         # built like theirs: their fit
+        for scoring in ("practice", "eval"):
+            self.assertIsNone(self.o.lift_model(scoring, peer))
+        self.o.settings["agaric_lift_evolve"] = False
+        self.assertIsNone(self.o.lift_model("self", peer))
+
     def test_serving_uses_the_serve_model_at_its_own_context(self):
         engine = self.o.engine()
         self.assertEqual((engine["model"], engine["context"]), ("maker/uncensored-31b", 24576))

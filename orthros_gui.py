@@ -487,6 +487,13 @@ class Dashboard:
         self.swap.grid(row=0, column=1, padx=10)
 
     def build_self_pane(self, pane):
+        row = tk.Frame(pane, bg=PANEL)
+        row.pack(fill="x")
+        lift = button(row, "AGARIC LIFT", lambda: self.toggle_lift("self"),
+                      font=(DISPLAY, 9, "bold"))
+        lift.pack(side="left")
+        self.lifts = getattr(self, "lifts", {})
+        self.lifts["self"] = (lift, Tip(lift, ""))
         self.self_summary = label(pane, "", DIM, (BODY, 9), anchor="w", justify="left")
         self.self_summary.pack(fill="x")
         self.self_summary.bind("<Configure>", lambda e: self.self_summary.config(
@@ -520,9 +527,11 @@ class Dashboard:
         self.task_menu["menu"].config(bg=PANEL2, fg=INK, font=(BODY, 9))
         self.task_menu.pack(side="left", padx=6)
         button(row, "New task", self.toggle_new_task, font=(DISPLAY, 9, "bold")).pack(side="left")
-        self.lift = button(row, "AGARIC LIFT", self.toggle_lift, font=(DISPLAY, 9, "bold"))
-        self.lift.pack(side="left", padx=(6, 0))
-        self.lift_tip = Tip(self.lift, "")
+        lift = button(row, "AGARIC LIFT", lambda: self.toggle_lift("task"),
+                      font=(DISPLAY, 9, "bold"))
+        lift.pack(side="left", padx=(6, 0))
+        self.lifts = getattr(self, "lifts", {})
+        self.lifts["task"] = (lift, Tip(lift, ""))
         self.task_info = label(pane, "", DIM, (BODY, 9), anchor="w")
         self.task_info.pack(fill="x", pady=(6, 0))
         self.task_keys = None
@@ -620,12 +629,12 @@ class Dashboard:
                              "minutes.").pack(side="left")
         self.gpu_big = label(head, "-", SERVE, (DISPLAY, 22, "bold"))
         self.gpu_big.pack(side="right")
-        self.gpu = tk.Canvas(box, height=px(150), bg=PANEL, highlightthickness=0)
+        self.gpu = tk.Canvas(box, height=px(300), bg=PANEL, highlightthickness=0)
         self.gpu.pack(fill="x", pady=(4, 0))
         self.spark = tk.Canvas(box, height=px(28), bg=PANEL, highlightthickness=0)
         self.spark.pack(fill="x", pady=(4, 0))
         self.gpu_after = self.spark
-        # A short window keeps the numbers and the chat, and drops the picture.
+        # A short window shrinks the picture, and never drops it.
         self.root.bind("<Configure>", self.fit_height, add="+")
         mem = tk.Frame(box, bg=PANEL)
         mem.pack(fill="x", pady=(8, 0))
@@ -787,13 +796,13 @@ class Dashboard:
     # -------------------------------------------------------------- the GPU lattice
 
     def fit_height(self, event):
+        """Full size on a tall window; on a short one, a share of its height, so the
+        chat keeps its room -- but never less than a readable picture."""
         if event.widget is not self.root:
             return
-        tall = event.height >= px(1000)
-        if tall and not self.gpu.winfo_ismapped():
-            self.gpu.pack(fill="x", pady=(4, 0), before=self.gpu_after)
-        elif not tall and self.gpu.winfo_ismapped():
-            self.gpu.pack_forget()
+        want = px(300) if event.height >= px(1000) else max(px(160), int(event.height * 0.22))
+        if int(self.gpu.cget("height")) != want:
+            self.gpu.config(height=want)
 
     def lattice_setup(self):
         n = 7
@@ -805,13 +814,8 @@ class Dashboard:
             j = seed % (i + 1)
             order[i], order[j] = order[j], order[i]
         self.lit_order = order
-        self.corners = [(x * 2 - 1, y * 2 - 1, z * 2 - 1) for x in (0, 1) for y in (0, 1)
-                        for z in (0, 1)]
-        self.edges = [(0, 1), (1, 3), (3, 2), (2, 0), (4, 5), (5, 7), (7, 6), (6, 4), (0, 4),
-                      (1, 5), (2, 6), (3, 7)]
-        c = self.gpu
-        self.plane = c.create_polygon(0, 0, 0, 0, 0, 0, fill="#3b2b72", outline="#9b6fe8")
-        self.edge_items = [c.create_line(0, 0, 0, 0, fill="#22314b") for _ in self.edges]
+        c = self.gpu                      # dots only: no cube edges, no outline
+        self.plane = c.create_polygon(0, 0, 0, 0, 0, 0, fill="#3b2b72", outline="")
         self.dot_items = [c.create_oval(0, 0, 0, 0, fill=FAINT, outline="") for _ in self.pts]
         self.angle, self.lit_shown, self.mem_shown, self.last_draw = 0.6, 0.0, 0.0, time.time()
 
@@ -845,13 +849,10 @@ class Dashboard:
             yy = self.mem_shown * 2 - 1
             quad = [project(p) for p in ((-1, yy, -1), (1, yy, -1), (1, yy, 1), (-1, yy, 1))]
             c.coords(self.plane, *[v for x, y, _ in quad for v in (x, y)])
-        corners = [project(p) for p in self.corners]
-        for item, (a, b) in zip(self.edge_items, self.edges):
-            c.coords(item, corners[a][0], corners[a][1], corners[b][0], corners[b][1])
         lit = set(self.lit_order[:int(round(self.lit_shown))])
         for i, (item, p) in enumerate(zip(self.dot_items, self.pts)):
             x, y, k = project(p)
-            r = (2.6 if i in lit else 1.3) * k
+            r = (2.6 if i in lit else 1.3) * k * max(1.0, min(w, h) / px(150))
             c.coords(item, x - r, y - r, x + r, y + r)
             c.itemconfig(item, fill=A_C if i in lit else "#34405a")
 
@@ -1358,25 +1359,32 @@ class Dashboard:
                 self.want_task = False
         self.post("/api/mode", body, done)
 
-    def toggle_lift(self):
+    # AGARIC LIFT, one switch per mode: (setting it flips, model setting, what moves).
+    LIFTS = {"task": ("agaric_lift", "lift_model",
+                      "the task's turns run on %s. Tool builds always use the agents' model."),
+             "self": ("agaric_lift_evolve", "evolve_lift_model",
+                      "evolving turns run on %s. Practice and held-out scoring stay on the "
+                      "agents' model, so a score says what the changes are worth on it.")}
+
+    def toggle_lift(self, mode):
         settings = (self.d or {}).get("settings") or {}
-        if settings.get("lift_model"):
-            self.post("/api/settings", {"agaric_lift": not settings.get("agaric_lift")})
+        switch, model, _ = self.LIFTS[mode]
+        if settings.get(model):
+            self.post("/api/settings", {switch: not settings.get(switch)})
 
     def render_lift(self, settings):
-        """Lit -- solid and coloured -- while the task runs on the lift model."""
-        model, on = settings.get("lift_model") or "", bool(settings.get("agaric_lift"))
-        kind = "lift" if on and model else "secondary"
-        if self.lift.kind != kind:
-            paint(self.lift, kind)
-        self.lift.config(text="AGARIC LIFT  ON" if on and model else "AGARIC LIFT")
-        enable(self.lift, bool(model))
-        if on and model:
-            self.lift.config(bg=self.lift.normal)
-        self.lift_tip.text = (
-            "On: the task's turns run on %s. Off: on the agents' own model. Evolving and "
-            "tool builds always use the agents' model. Takes effect at the next turn." % model
-            if model else "Set \"lift_model\" in orthros.json to the model to switch to.")
+        """Each switch lit -- solid and coloured -- while its mode runs on the lift model."""
+        for mode, (switch, key, says) in self.LIFTS.items():
+            button_, tip = self.lifts[mode]
+            model, on = settings.get(key) or "", bool(settings.get(switch))
+            kind = "lift" if on and model else "secondary"
+            if button_.kind != kind:
+                paint(button_, kind)
+            button_.config(text="AGARIC LIFT  ON" if on and model else "AGARIC LIFT")
+            enable(button_, bool(model))
+            tip.text = ("On: " + says % model + " Off: the agents' own model. Takes effect "
+                        "at the next turn." if model else
+                        "Set \"%s\" in orthros.json to the model to switch to." % key)
 
     def toggle_new_task(self):
         if self.new_task.winfo_ismapped():

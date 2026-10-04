@@ -113,13 +113,17 @@ DEFAULTS = {
     "tool_seconds": 120,
     # Which model does which job. The agents' own (LC_MODEL_KEY in their
     # config.cmd) always evolves them and always builds tools. `serve_model`
-    # answers the network's plain requests in serve mode; `lift_model` works the
-    # chosen task while AGARIC LIFT is on (the page's switch). Empty: the agents'
+    # answers the network's plain requests in serve mode. AGARIC LIFT, a switch
+    # on the page per mode, moves the work onto another model: `lift_model` for
+    # the chosen task, `evolve_lift_model` for evolving turns. Empty: the agents'
     # model. Any other model is not fitted by the tuner, so it loads at its
-    # entry in `model_contexts`, or 32,768 tokens.
+    # entry in `model_contexts` -- "tuned" for one built like the agents', which
+    # takes their fitted context -- or 32,768 tokens.
     "serve_model": "",
     "lift_model": "",
     "agaric_lift": False,
+    "evolve_lift_model": "",
+    "agaric_lift_evolve": False,
     "model_contexts": {},
 }
 SECOND_CONTEXT = 32768               # a model the tuner does not fit, unless model_contexts says
@@ -788,7 +792,9 @@ class Orthros:
             env.update(LC_RALPH_FILES=PROJECT_FILES, LC_RALPH_RUN="")
         lifted = self.lift_model(kind, target)
         if lifted:
-            env.update(LC_MODEL_KEY=lifted[0], LC_CONTEXT=str(lifted[1]))
+            env["LC_MODEL_KEY"] = lifted[0]
+            if lifted[1]:
+                env["LC_CONTEXT"] = str(lifted[1])
         if self.settings.get("aider_guard", True) and os.path.isdir(GUARD_DIR):
             env["PYTHONPATH"] = os.pathsep.join(p for p in (GUARD_DIR, env.get("PYTHONPATH"))
                                                 if p)
@@ -815,15 +821,28 @@ class Orthros:
         return path if os.path.isfile(path) else sys.executable
 
     def second_context(self, key):
-        """The context a model other than the agents' loads with: it is not tuned."""
-        return int((self.settings.get("model_contexts") or {}).get(key) or SECOND_CONTEXT)
+        """The context a model other than the agents' loads with: it is not tuned,
+        unless `model_contexts` calls it "tuned" -- built like theirs. None then:
+        it takes the agents' fitted context."""
+        given = (self.settings.get("model_contexts") or {}).get(key)
+        if str(given).lower() == "tuned":
+            return None
+        return int(given or SECOND_CONTEXT)
 
     def lift_model(self, kind, folder):
-        """(model, context) for a turn on the chosen task while AGARIC LIFT is on, or None.
+        """(model, context or None) for a turn AGARIC LIFT moves onto another model, or None.
 
-        Not for tool builds -- their folders are under tools\\, not tasks\\ -- and
-        never for evolving: those always run on the agents' own model.
+        A turn on the chosen task while the task's switch is on -- not a tool
+        build, whose folder is under tools\\, not tasks\\. Or an evolving turn while
+        evolve's switch is on: the work moves, the measuring does not. Practice
+        and held-out scoring stay on the agents' own model, so a score says what
+        the changes are worth on it (2026-10-03).
         """
+        if kind == "self":
+            key = self.settings.get("evolve_lift_model") or ""
+            if key and self.settings.get("agaric_lift_evolve"):
+                return key, self.second_context(key)
+            return None
         key = self.settings.get("lift_model") or ""
         if not (key and self.settings.get("agaric_lift") and kind == "task" and folder):
             return None
@@ -844,7 +863,7 @@ class Orthros:
             except ValueError:
                 return default
         return {"lms": self.find_lms("A"), "model": serve or env.get("LC_MODEL_KEY", ""),
-                "context": self.second_context(serve) if serve else number("LC_CONTEXT", 32768),
+                "context": (serve and self.second_context(serve)) or number("LC_CONTEXT", 32768),
                 "gpu": env.get("LC_GPU") or "max",
                 "parallel": number("LC_PARALLEL", 1), "port": number("LC_PORT", 1234),
                 "speculative": (env.get("LC_SPECULATIVE") or "1").lower() not in
@@ -2805,12 +2824,16 @@ def serve(orthros, port):
                     if "practice_every" in body:
                         orthros.settings["practice_every"] = max(0, min(50, int(
                             body["practice_every"])))
-                    if "agaric_lift" in body:
-                        orthros.settings["agaric_lift"] = bool(body["agaric_lift"])
-                        orthros.event("AGARIC LIFT %s: the task's next turns run on %s"
-                                      % ("on" if body["agaric_lift"] else "off",
-                                         orthros.settings.get("lift_model") or "the agents' model"
-                                         if body["agaric_lift"] else "the agents' model"))
+                    for switch, model, what in (
+                            ("agaric_lift", "lift_model", "the task's next turns"),
+                            ("agaric_lift_evolve", "evolve_lift_model", "evolving turns")):
+                        if switch in body:
+                            on = bool(body[switch])
+                            orthros.settings[switch] = on
+                            orthros.event("AGARIC LIFT %s: %s run on %s" % (
+                                "on" if on else "off", what,
+                                (orthros.settings.get(model) if on else "") or
+                                "the agents' model"))
                     write_json(orthros.settings_path, orthros.settings)
                     self.send(200, {"result": "ok"})
                 else:

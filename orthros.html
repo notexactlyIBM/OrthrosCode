@@ -275,7 +275,8 @@ details.help .body { margin-top: 12px; display: grid; gap: 10px; font-size: 13px
 .swap span { display: inline-block; transition: transform .6s; }
 
 /* ---- Orthros and the conversation ---- */
-#gpu { width: 100%; height: 150px; display: block; }
+/* Twice its old size, and never dropped: a narrow screen only shrinks it. */
+#gpu { width: 100%; height: clamp(180px, 45vw, 300px); display: block; }
 .gpubig { font: 700 30px/1 var(--display); color: var(--serve); }
 .gpubig small { font: 700 10.5px var(--display); letter-spacing: .16em; text-transform: uppercase; color: var(--dim);
   margin-left: 6px; }
@@ -413,6 +414,7 @@ dialog .line { justify-content: flex-end; }
 
         <div class="pane" id="selfPane">
           <div class="line">
+            <button type="button" class="lift" id="liftEvolveBtn">AGARIC LIFT</button>
             <label>practice every <input type="number" id="practiceEvery" min="0" max="50"> turns</label>
             <span class="tip" tabindex="0" data-tip="A works on B's code, then B on A's. Every few turns an agent does a practice exercise instead: a small job it has never seen, scored by tests it never sees. 0 turns practice off.&#10;&#10;Every few good turns, each version is also scored on held-out exercises it never practises on. A version that does worse is rolled back, and its changes never reach the other agent.">?</span>
           </div>
@@ -595,6 +597,14 @@ const fmtT = (s) => { s = Math.max(0, Math.round(s || 0)); const h = Math.floor(
 const hhmm = (t) => new Date(t * 1000).toTimeString().slice(0, 5);
 const PHASES = { idle: "Idle", paused: "Paused", running: "Running", handover: "Handing over", serving: "Serving", error: "Needs attention" };
 const MODES = { self: "Evolving", task: "Working on a task", serve: "Serving the network" };
+// AGARIC LIFT per mode: button id -> [setting it flips, model setting, what moves].
+const LIFTS = {
+  liftBtn: ["agaric_lift", "lift_model",
+            "the task's turns run on %s. Tool builds always use the agents' model."],
+  liftEvolveBtn: ["agaric_lift_evolve", "evolve_lift_model",
+                  "evolving turns run on %s. Practice and held-out scoring stay on the agents' " +
+                  "model, so a score says what the changes are worth on it."],
+};
 let minutesTouched = false, swapTurn = 0, lastRunning = null, lastAlert = null, lastState = null, gpuState = null;
 
 async function post(path, body) {
@@ -817,15 +827,15 @@ function renderMode(d) {
       pick.dataset.key = key;
     }
   }
-  // AGARIC LIFT: lit, solid and coloured, while the task runs on the lift model.
-  const liftModel = d.settings.lift_model || "", lifted = !!(d.settings.agaric_lift && liftModel);
-  const lift = $("#liftBtn");
-  lift.classList.toggle("on", lifted);
-  lift.textContent = lifted ? "AGARIC LIFT  ON" : "AGARIC LIFT";
-  lift.disabled = !liftModel;
-  lift.title = liftModel ? `On: the task's turns run on ${liftModel}. Off: on the agents' own model. ` +
-    "Evolving and tool builds always use the agents' model. Takes effect at the next turn."
-    : 'Set "lift_model" in orthros.json to the model to switch to.';
+  // AGARIC LIFT, one switch per mode: lit, solid and coloured, while it runs on the lift model.
+  for (const [id, [sw, key, says]] of Object.entries(LIFTS)) {
+    const model = d.settings[key] || "", lifted = !!(d.settings[sw] && model), b = $("#" + id);
+    b.classList.toggle("on", lifted);
+    b.textContent = lifted ? "AGARIC LIFT  ON" : "AGARIC LIFT";
+    b.disabled = !model;
+    b.title = model ? `On: ${says.replace("%s", model)} Off: the agents' own model. ` +
+      "Takes effect at the next turn." : `Set "${key}" in orthros.json to the model to switch to.`;
+  }
   const t = d.tasks.find((x) => x.key === (pick.value || d.task));
   $("#taskInfo").textContent = t ? `${t.done} done · ${t.open} open${t.parked ? ` · ${t.parked} parked` : ""}` +
     (t.source ? ` · branch ${t.branch} of ${t.source}` : "") : "";
@@ -928,9 +938,9 @@ $("#modeTask").onclick = () => {
 };
 $("#taskPick").onchange = () => { if ($("#taskPick").value) chooseMode("task", $("#taskPick").value); };
 $("#newTaskBtn").onclick = () => { $("#newTask").classList.toggle("on"); $("#taskName").focus(); };
-$("#liftBtn").onclick = async () => {
+for (const [id, [sw]] of Object.entries(LIFTS)) $("#" + id).onclick = async () => {
   if (!lastState) return;
-  await post("/api/settings", { agaric_lift: !lastState.settings.agaric_lift });
+  await post("/api/settings", { [sw]: !lastState.settings[sw] });
   tick();
 };
 $("#cancelTask").onclick = () => { $("#newTask").classList.remove("on"); wantTask = false; tick(); };
@@ -975,8 +985,6 @@ for (let x = 0; x < N; x++) for (let y = 0; y < N; y++) for (let z = 0; z < N; z
 const ORDER = PTS.map((_, i) => i);
 for (let i = ORDER.length - 1, seed = 7; i > 0; i--) { seed = (seed * 16807) % 2147483647;
   const j = seed % (i + 1); [ORDER[i], ORDER[j]] = [ORDER[j], ORDER[i]]; }
-const EDGES = [[0,1],[1,3],[3,2],[2,0],[4,5],[5,7],[7,6],[6,4],[0,4],[1,5],[2,6],[3,7]];
-const CORNERS = [0, 1].flatMap((x) => [0, 1].flatMap((y) => [0, 1].map((z) => [x * 2 - 1, y * 2 - 1, z * 2 - 1])));
 const still = matchMedia("(prefers-reduced-motion: reduce)");
 let angle = 0.6, lastT = 0, litShown = 0, memShown = 0;
 const cvs = $("#gpu"), ctx = cvs.getContext("2d");
@@ -1008,10 +1016,7 @@ function drawGpu(t) {
   memShown += (memTarget - memShown) * Math.min(1, dt / 600);
   if (memShown) { const yy = memShown * 2 - 1, quad = [[-1, yy, -1], [1, yy, -1], [1, yy, 1], [-1, yy, 1]].map(project);
     ctx.beginPath(); quad.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)); ctx.closePath();
-    ctx.fillStyle = color("--b", 0.3); ctx.fill(); ctx.strokeStyle = color("--b", 0.8); ctx.stroke(); }
-  const corners = CORNERS.map(project);
-  ctx.strokeStyle = color("--line"); ctx.lineWidth = 1;
-  for (const [a, b] of EDGES) { ctx.beginPath(); ctx.moveTo(corners[a][0], corners[a][1]); ctx.lineTo(corners[b][0], corners[b][1]); ctx.stroke(); }
+    ctx.fillStyle = color("--b", 0.3); ctx.fill(); }
   const lit = new Set(), n = Math.round(litShown);
   for (let i = 0; i < n; i++) lit.add(ORDER[i]);
   const shown = PTS.map((p, i) => [...project(p), lit.has(i)]).sort((a, b) => b[2] - a[2]);
@@ -1019,7 +1024,7 @@ function drawGpu(t) {
   for (const [x, y, , p, isLit] of shown) {
     ctx.globalAlpha = isLit ? 0.85 : 0.5;
     ctx.fillStyle = isLit ? on : off;
-    ctx.beginPath(); ctx.arc(x, y, (isLit ? 2.6 : 1.3) * p, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(x, y, (isLit ? 2.6 : 1.3) * p * Math.max(1, Math.min(w, h) / 150), 0, Math.PI * 2); ctx.fill();
   }
   ctx.globalAlpha = 1;
 }

@@ -624,9 +624,10 @@ class Dashboard:
         box.pack(fill="x")
         head = tk.Frame(box, bg=PANEL)
         head.pack(fill="x")
-        heading(head, "GPU", "The share of points lit is how busy the card is; the purple "
-                             "plane rises with memory in use. The line below is the last two "
-                             "minutes.").pack(side="left")
+        heading(head, "GPU", "The share of points lit is how busy the card is. The line "
+                             "below is the last two minutes; the bar, memory in use. "
+                             "Double-click the picture for full screen."
+                             ).pack(side="left")
         self.gpu_big = label(head, "-", SERVE, (DISPLAY, 22, "bold"))
         self.gpu_big.pack(side="right")
         self.gpu = tk.Canvas(box, height=px(300), bg=PANEL, highlightthickness=0)
@@ -814,18 +815,41 @@ class Dashboard:
             j = seed % (i + 1)
             order[i], order[j] = order[j], order[i]
         self.lit_order = order
-        c = self.gpu                      # dots only: no cube edges, no outline
-        self.plane = c.create_polygon(0, 0, 0, 0, 0, 0, fill="#3b2b72", outline="")
-        self.dot_items = [c.create_oval(0, 0, 0, 0, fill=FAINT, outline="") for _ in self.pts]
-        self.angle, self.lit_shown, self.mem_shown, self.last_draw = 0.6, 0.0, 0.0, time.time()
+        # (canvas, its dots): the panel's, and the full-screen one while it is open.
+        self.lattices = [(self.gpu, self.dots_on(self.gpu))]
+        self.full = None
+        self.gpu.bind("<Double-Button-1>", lambda e: self.toggle_full())
+        self.angle, self.lit_shown, self.last_draw = 0.6, 0.0, time.time()
+
+    def dots_on(self, canvas):
+        """Dots only: no cube edges, no outline."""
+        return [canvas.create_oval(0, 0, 0, 0, fill=FAINT, outline="") for _ in self.pts]
+
+    def toggle_full(self):
+        """Double-click: the lattice on the whole screen. Double-click or Escape: back."""
+        if self.full:
+            self.lattices = [l for l in self.lattices if l[0].winfo_toplevel() is not self.full]
+            self.full.destroy()
+            self.full = None
+            return
+        top = tk.Toplevel(self.root, bg=PANEL)
+        top.attributes("-fullscreen", True)
+        canvas = tk.Canvas(top, bg=PANEL, highlightthickness=0, cursor="hand2")
+        canvas.pack(fill="both", expand=True)
+        canvas.create_text(0, 0, text="", fill=SERVE, font=(DISPLAY, 40, "bold"),
+                           anchor="ne", tags="busy")
+        for widget in (top, canvas):
+            widget.bind("<Double-Button-1>", lambda e: self.toggle_full())
+            widget.bind("<Escape>", lambda e: self.toggle_full())
+        top.focus_force()
+        self.full = top
+        self.lattices.append((canvas, self.dots_on(canvas)))
 
     def draw_gpu(self):
         self.root.after(60, self.draw_gpu)
-        if self.tab != "operate" or not self.gpu.winfo_ismapped():
-            return
-        c = self.gpu
-        w, h = c.winfo_width(), c.winfo_height()
-        if w < 10:
+        shown = [(c, dots) for c, dots in self.lattices if c.winfo_ismapped()
+                 and c.winfo_width() >= 10 and (c is not self.gpu or self.tab == "operate")]
+        if not shown:
             return
         now_t = time.time()
         dt, self.last_draw = min(0.2, now_t - self.last_draw), now_t
@@ -833,28 +857,23 @@ class Dashboard:
         self.angle += dt * 0.06
         util = max(0.0, min(100.0, float(g.get("util") or 0)))
         self.lit_shown += (util / 100 * len(self.pts) - self.lit_shown) * min(1, dt / 0.6)
-        mem = (g.get("mem_used") or 0) / g["mem_total"] if g.get("mem_total") else 0
-        self.mem_shown += (mem - self.mem_shown) * min(1, dt / 0.6)
         ca, sa, ct, st = math.cos(self.angle), math.sin(self.angle), math.cos(.42), math.sin(.42)
-        scale, cx, cy = min(w, h) * 0.36, w / 2, h / 2
-
-        def project(p):
-            x, y, z = p
-            x1, z1 = x * ca + z * sa, -x * sa + z * ca
-            y1, z2 = y * ct - z1 * st, y * st + z1 * ct
-            k = 6 / (6 + z2)
-            return cx + x1 * scale * k, cy - y1 * scale * k, k
-
-        if self.mem_shown > 0.01:
-            yy = self.mem_shown * 2 - 1
-            quad = [project(p) for p in ((-1, yy, -1), (1, yy, -1), (1, yy, 1), (-1, yy, 1))]
-            c.coords(self.plane, *[v for x, y, _ in quad for v in (x, y)])
         lit = set(self.lit_order[:int(round(self.lit_shown))])
-        for i, (item, p) in enumerate(zip(self.dot_items, self.pts)):
-            x, y, k = project(p)
-            r = (2.6 if i in lit else 1.3) * k * max(1.0, min(w, h) / px(150))
-            c.coords(item, x - r, y - r, x + r, y + r)
-            c.itemconfig(item, fill=A_C if i in lit else "#34405a")
+        for c, dots in shown:
+            w, h = c.winfo_width(), c.winfo_height()
+            scale, cx, cy = min(w, h) * 0.36, w / 2, h / 2
+            grow = max(1.0, min(w, h) / px(150))
+            for i, (item, (x, y, z)) in enumerate(zip(dots, self.pts)):
+                x1, z1 = x * ca + z * sa, -x * sa + z * ca
+                y1, z2 = y * ct - z1 * st, y * st + z1 * ct
+                k = 6 / (6 + z2)
+                px_, py_ = cx + x1 * scale * k, cy - y1 * scale * k
+                r = (2.6 if i in lit else 1.3) * k * grow
+                c.coords(item, px_ - r, py_ - r, px_ + r, py_ + r)
+                c.itemconfig(item, fill=A_C if i in lit else "#34405a")
+            if c is not self.gpu:
+                c.coords("busy", w - px(40), px(30))
+                c.itemconfig("busy", text="%d%%" % round(util))
 
     # -------------------------------------------------------------- rendering
 

@@ -276,7 +276,8 @@ details.help .body { margin-top: 12px; display: grid; gap: 10px; font-size: 13px
 
 /* ---- Orthros and the conversation ---- */
 /* Twice its old size, and never dropped: a narrow screen only shrinks it. */
-#gpu { width: 100%; height: clamp(180px, 45vw, 300px); display: block; }
+#gpu { width: 100%; height: clamp(180px, 45vw, 300px); display: block; cursor: zoom-in; }
+#gpu:fullscreen { width: 100vw; height: 100vh; background: var(--panel); cursor: zoom-out; }
 .gpubig { font: 700 30px/1 var(--display); color: var(--serve); }
 .gpubig small { font: 700 10.5px var(--display); letter-spacing: .16em; text-transform: uppercase; color: var(--dim);
   margin-left: 6px; }
@@ -482,7 +483,7 @@ dialog .line { justify-content: flex-end; }
       <div class="side"><div class="inner">
         <section class="card gpucard">
           <div class="cardhead"><h2>GPU</h2>
-            <span class="tip left" tabindex="0" data-tip="The share of points lit is how busy the card is (nvidia-smi, every 2 s); the purple plane rises with memory in use. The line below is the last two minutes.">?</span>
+            <span class="tip left" tabindex="0" data-tip="The share of points lit is how busy the card is (nvidia-smi, every 2 s). The line below is the last two minutes; the bar, memory in use. Double-click the picture for full screen.">?</span>
             <span class="sp"></span><span class="gpubig" id="gpuBig">-</span></div>
           <canvas id="gpu" aria-label="The GPU as a slowly turning lattice: the share of points lit is how busy the card is"></canvas>
           <svg class="spark" id="spark" viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true"><polygon id="sparkFill"/><polyline id="sparkLine"/></svg>
@@ -978,7 +979,7 @@ $("#practiceEvery").addEventListener("change", () => post("/api/settings", { pra
 // A lattice of points turning slowly. The share of points lit is the card's
 // utilization as nvidia-smi reports it every 2 seconds: the share of time the
 // CUDA cores had work. The same points stay lit; only the count moves, easing
-// to each new reading. The tinted plane is memory in use. No reading, no change.
+// to each new reading. No reading, no change. Memory is the bar below, not the picture.
 const N = 7, PTS = [];
 for (let x = 0; x < N; x++) for (let y = 0; y < N; y++) for (let z = 0; z < N; z++)
   PTS.push([x / (N - 1) * 2 - 1, y / (N - 1) * 2 - 1, z / (N - 1) * 2 - 1]);
@@ -986,8 +987,11 @@ const ORDER = PTS.map((_, i) => i);
 for (let i = ORDER.length - 1, seed = 7; i > 0; i--) { seed = (seed * 16807) % 2147483647;
   const j = seed % (i + 1); [ORDER[i], ORDER[j]] = [ORDER[j], ORDER[i]]; }
 const still = matchMedia("(prefers-reduced-motion: reduce)");
-let angle = 0.6, lastT = 0, litShown = 0, memShown = 0;
+let angle = 0.6, lastT = 0, litShown = 0;
 const cvs = $("#gpu"), ctx = cvs.getContext("2d");
+// Double-click: the picture on the whole screen; double-click or Escape: back.
+cvs.ondblclick = () => document.fullscreenElement ? document.exitFullscreen()
+  : cvs.requestFullscreen && cvs.requestFullscreen().catch(() => {});
 
 function color(name, alpha) {
   const c = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -1012,11 +1016,6 @@ function drawGpu(t) {
   const project = ([x, y, z]) => { const x1 = x * ca + z * sa, z1 = -x * sa + z * ca;
     const y1 = y * ct - z1 * st, z2 = y * st + z1 * ct, p = 6 / (6 + z2);
     return [cx + x1 * scale * p, cy - y1 * scale * p, z2, p]; };
-  const memTarget = g.mem_total ? Math.max(0, Math.min(1, g.mem_used / g.mem_total)) : 0;
-  memShown += (memTarget - memShown) * Math.min(1, dt / 600);
-  if (memShown) { const yy = memShown * 2 - 1, quad = [[-1, yy, -1], [1, yy, -1], [1, yy, 1], [-1, yy, 1]].map(project);
-    ctx.beginPath(); quad.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)); ctx.closePath();
-    ctx.fillStyle = color("--b", 0.3); ctx.fill(); }
   const lit = new Set(), n = Math.round(litShown);
   for (let i = 0; i < n; i++) lit.add(ORDER[i]);
   const shown = PTS.map((p, i) => [...project(p), lit.has(i)]).sort((a, b) => b[2] - a[2]);

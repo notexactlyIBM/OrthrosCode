@@ -6,7 +6,7 @@ and only keep the changes that make them measurably better.**
 **For Windows 10 and 11 (64-bit).** No cloud, no API keys, no accounts. One
 NVIDIA GPU, one open model, and a referee called Orthros.
 
-![Image](https://i.imgur.com/lloFucS.png)
+![Image]([https://i.imgur.com/PyL1ztp.png)
 
 Orthros is the two-headed dog of Greek myth. Here the two heads are agents
 **A** and **B**, sharing one graphics card, one at a time. It has three modes:

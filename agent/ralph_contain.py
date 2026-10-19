@@ -14,12 +14,24 @@ gap before it is in the job is as short as it can be without starting it
 suspended (a venv's python.exe is a launcher that starts the real one).
 Elsewhere each check gets a process group of its own, killed whole on a
 timeout. If a job cannot be made, the check runs as before.
+
+Each check also gets a temp folder of its own, emptied when it is over. The
+tests make git repos in temp and remove them with rmtree(ignore_errors=True),
+which on Windows cannot delete git's read-only files and says nothing. By
+2026-10-18 the user's temp held 17,884 of them, and logging in took 12
+minutes while Windows walked through them. Cleaning up after the check, not
+in each test, keeps temp empty whatever the tests do, and a test killed on a
+timeout leaves nothing either.
 """
 
 import ctypes
 import os
+import shutil
 import signal
+import stat
 import subprocess
+import tempfile
+import time
 
 from ralph_common import QUICK_TESTS, _env_int
 
@@ -97,9 +109,46 @@ def without_harness(env, keep=(QUICK_TESTS,)):
     return {k: v for k, v in env.items() if k in keep or not k.upper().startswith(HARNESS)}
 
 
+TEMP_PREFIX = "lc-check-"
+STALE_TEMP_SECONDS = 3600    # older than any check: its check was killed with us
+
+
+def wipe(path):
+    """Remove `path` and everything in it, read-only files too. Never raises."""
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                os.chmod(os.path.join(root, name), stat.S_IREAD | stat.S_IWRITE)
+            except OSError:
+                pass
+    shutil.rmtree(path, ignore_errors=True)
+
+
+def _sweep_stale_temps():
+    """Remove the check temps a killed agent never got to. Only ours, by prefix."""
+    base = tempfile.gettempdir()
+    try:
+        names = [n for n in os.listdir(base) if n.startswith(TEMP_PREFIX)]
+    except OSError:
+        return
+    for name in names:
+        path = os.path.join(base, name)
+        try:
+            if time.time() - os.path.getmtime(path) > STALE_TEMP_SECONDS:
+                wipe(path)
+        except OSError:
+            pass
+
+
 def start(cmd, memory_mb=None, **kwargs):
-    """subprocess.Popen, inside a limited job where there is one. Returns (proc, job)."""
-    kwargs["env"] = without_harness(os.environ if kwargs.get("env") is None else kwargs["env"])
+    """subprocess.Popen, inside a limited job where there is one. Returns (proc, job).
+
+    Pass both to finish() when the check is over: that empties its temp."""
+    env = without_harness(os.environ if kwargs.get("env") is None else kwargs["env"])
+    _sweep_stale_temps()
+    temp = tempfile.mkdtemp(prefix=TEMP_PREFIX)
+    env.update(TEMP=temp, TMP=temp, TMPDIR=temp)
+    kwargs["env"] = env
     job = _limited_job(CHECK_MEMORY_MB if memory_mb is None else memory_mb, CHECK_PROCESSES)
     if os.name != "nt":
         kwargs.setdefault("start_new_session", True)    # its own group, to kill whole
@@ -108,7 +157,9 @@ def start(cmd, memory_mb=None, **kwargs):
     except Exception:
         if job is not None:
             _close(job)
+        wipe(temp)
         raise
+    proc.check_temp = temp
     if job is not None and not _assign(job, proc):
         _close(job)
         job = None
@@ -134,9 +185,13 @@ def stop(proc, job):
         pass             # something outside our reach still holds a pipe: go on
 
 
-def finish(job):
+def finish(job, proc=None):
+    """The check is over: close its job, killing what is left, and empty its temp."""
     if job is not None:
         _close(job)
+    temp = getattr(proc, "check_temp", None)
+    if isinstance(temp, str):         # a test's stand-in proc has none
+        wipe(temp)
 
 
 def run(cmd, timeout=None, memory_mb=None, **kwargs):
@@ -158,4 +213,4 @@ def run(cmd, timeout=None, memory_mb=None, **kwargs):
             raise
         return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
     finally:
-        finish(job)
+        finish(job, proc)

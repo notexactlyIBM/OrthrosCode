@@ -610,9 +610,10 @@ def check_agent(folder, python, quick=False, seconds=600):
     env, flags, started = check_env(quick), CREATE_NO_WINDOW if os.name == "nt" else 0, now()
 
     def run(args, timeout):
-        proc = subprocess.run([python] + args, cwd=folder, env=env, capture_output=True,
-                              text=True, timeout=timeout, encoding="utf-8", errors="replace",
-                              creationflags=flags)
+        with work.own_temp(env) as own:
+            proc = subprocess.run([python] + args, cwd=folder, env=own, capture_output=True,
+                                  text=True, timeout=timeout, encoding="utf-8",
+                                  errors="replace", creationflags=flags)
         return proc.returncode, (proc.stderr or "") + (proc.stdout or "")
 
     def verdict(problem="", flaky=()):

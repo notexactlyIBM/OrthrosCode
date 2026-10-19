@@ -87,6 +87,32 @@ class TestContainedRun(unittest.TestCase):
                                 "'import time; time.sleep(20)']); time.sleep(20)"], 1)
         self.assertLess(time.time() - started, 8)
 
+    def test_a_run_leaves_nothing_in_temp_not_even_read_only_files(self):
+        # git's object files are read-only; rmtree(ignore_errors=True) left
+        # 17,884 such repos in temp by 2026-10-18.
+        leave = ("import os, stat, tempfile; d = os.path.join(tempfile.gettempdir(), 'repo'); "
+                 "os.makedirs(d); p = os.path.join(d, 'obj'); open(p, 'w').close(); "
+                 "os.chmod(p, stat.S_IREAD); print(tempfile.gettempdir())")
+        temp = work.contained_run([sys.executable, "-c", leave], 30,
+                                  env=work.check_env()).stdout.strip()
+        self.assertTrue(os.path.basename(temp).startswith(work.CHECK_TEMP_PREFIX))
+        self.assertFalse(os.path.exists(temp))
+
+    def test_stale_run_temps_are_swept_and_nothing_else(self):
+        import time
+        from unittest import mock
+        base = tempfile.mkdtemp()
+        self.addCleanup(work.wipe, base)
+        old, other = (os.path.join(base, n) for n in (work.CHECK_TEMP_PREFIX + "old", "tmpkeep"))
+        for d in (old, other):
+            os.makedirs(d)
+            long_ago = time.time() - 2 * work.STALE_TEMP_SECONDS
+            os.utime(d, (long_ago, long_ago))
+        with mock.patch.object(work.tempfile, "gettempdir", return_value=base):
+            with work.own_temp({}) as env:
+                self.assertEqual(os.path.dirname(env["TEMP"]), base)
+        self.assertEqual(os.listdir(base), ["tmpkeep"])
+
 
 if __name__ == "__main__":
     unittest.main()

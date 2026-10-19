@@ -43,6 +43,7 @@ class TestRun(unittest.TestCase):
         with mock.patch.object(contain, "_limited_job", return_value=None):
             proc, job = contain.start([sys.executable, "-c", "pass"])
             proc.wait()
+            contain.finish(job, proc)
             self.assertIsNone(job)
 
     def test_the_code_checked_gets_nothing_of_the_harness(self):
@@ -56,6 +57,32 @@ class TestRun(unittest.TestCase):
             self.assertEqual(os.environ["ORTHROS_LEDGER"], "shared.sqlite")   # ours is untouched
         self.assertEqual(inherited, ["-", "-", "1", "-"])      # the quick switch gets through
         self.assertEqual(given, ["-", "-", "1", "1"])
+
+    def test_a_check_leaves_nothing_in_temp_not_even_read_only_files(self):
+        # git's object files are read-only; rmtree(ignore_errors=True) left
+        # 17,884 such repos in temp by 2026-10-18.
+        leave = ("import os, stat, tempfile; d = os.path.join(tempfile.gettempdir(), 'repo'); "
+                 "os.makedirs(d); p = os.path.join(d, 'obj'); open(p, 'w').close(); "
+                 "os.chmod(p, stat.S_IREAD); print(tempfile.gettempdir())")
+        proc = contain.run([sys.executable, "-c", leave], text=True, timeout=30)
+        temp = proc.stdout.strip()
+        self.assertTrue(os.path.basename(temp).startswith(contain.TEMP_PREFIX))
+        self.assertFalse(os.path.exists(temp))
+
+    def test_stale_check_temps_are_swept_and_nothing_else(self):
+        import tempfile, time
+        base = tempfile.mkdtemp()
+        self.addCleanup(contain.wipe, base)
+        old, new, other = (os.path.join(base, n) for n in
+                           (contain.TEMP_PREFIX + "old", contain.TEMP_PREFIX + "new", "tmpkeep"))
+        for d in (old, new, other):
+            os.makedirs(d)
+        long_ago = time.time() - 2 * contain.STALE_TEMP_SECONDS
+        os.utime(old, (long_ago, long_ago))
+        os.utime(other, (long_ago, long_ago))
+        with mock.patch.object(contain.tempfile, "gettempdir", return_value=base):
+            contain._sweep_stale_temps()
+        self.assertEqual(sorted(os.listdir(base)), sorted([os.path.basename(new), "tmpkeep"]))
 
     @unittest.skipUnless(os.name == "nt", "Windows job objects")
     def test_a_test_that_eats_memory_is_stopped(self):

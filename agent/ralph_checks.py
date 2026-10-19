@@ -112,7 +112,7 @@ def smoke_run(workspace, entry, seconds=6):
         contain.stop(proc, job)      # it and anything it started, before draining
         return True, ""
     finally:
-        contain.finish(job)
+        contain.finish(job, proc)
     # A clean exit with nothing printed is healthy too. Failing it (tried
     # 2026-09-24) flags every `if __name__ == "__main__": doctest.testmod()`
     # or quiet batch script as crashing on startup, and rolls back each round.

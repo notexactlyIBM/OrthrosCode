@@ -12,10 +12,13 @@ machines ask for, in tools\\<name>.
 Standard library only, like orthros.py.
 """
 
+import contextlib
 import os
 import re
 import shutil
+import stat
 import subprocess
+import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -387,6 +390,47 @@ def check_env(quick=False):
     return env
 
 
+# Each run of the model's code gets a temp folder of its own, emptied when it
+# ends. Its tests make git repos in temp and remove them with
+# rmtree(ignore_errors=True), which on Windows cannot delete git's read-only
+# files and says nothing: by 2026-10-18 the user's temp held 17,884 of them,
+# and logging in took 12 minutes while Windows walked through them. The same
+# prefix as agent/ralph_contain.py, so either one sweeps what the other left.
+CHECK_TEMP_PREFIX = "lc-check-"
+STALE_TEMP_SECONDS = 3600
+
+
+def wipe(path):
+    """Remove `path` and everything in it, read-only files too. Never raises."""
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                os.chmod(os.path.join(root, name), stat.S_IREAD | stat.S_IWRITE)
+            except OSError:
+                pass
+    shutil.rmtree(path, ignore_errors=True)
+
+
+@contextlib.contextmanager
+def own_temp(env):
+    """`env` with TEMP, TMP and TMPDIR naming a new folder, wiped afterwards.
+    Also clears check temps older than an hour: a run killed with Orthros."""
+    base = tempfile.gettempdir()
+    try:
+        for name in os.listdir(base):
+            path = os.path.join(base, name)
+            if name.startswith(CHECK_TEMP_PREFIX) \
+                    and time.time() - os.path.getmtime(path) > STALE_TEMP_SECONDS:
+                wipe(path)
+    except OSError:
+        pass
+    temp = tempfile.mkdtemp(prefix=CHECK_TEMP_PREFIX)
+    try:
+        yield dict(env, TEMP=temp, TMP=temp, TMPDIR=temp)
+    finally:
+        wipe(temp)
+
+
 def _job():
     if os.name != "nt":
         return None
@@ -430,8 +474,13 @@ def _job():
 
 
 def contained_run(cmd, timeout, input=None, **kwargs):
-    """subprocess.run with captured text output, inside the limits above.
-    `input`, if given, is sent on stdin."""
+    """subprocess.run with captured text output, inside the limits above and
+    with a temp of its own. `input`, if given, is sent on stdin."""
+    with own_temp(kwargs.pop("env", None) or os.environ) as env:
+        return _contained_run(cmd, timeout, input, env=env, **kwargs)
+
+
+def _contained_run(cmd, timeout, input, **kwargs):
     job = _job()
     if os.name != "nt":
         kwargs["start_new_session"] = True

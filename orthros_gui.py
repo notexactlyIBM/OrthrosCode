@@ -210,57 +210,74 @@ class Tip:
             self.top = None
 
 
-class Flip(tk.Canvas):
-    """A switch with two sides that turns over when pressed: solid and coloured, as
-    everything pressable is, its second side the louder. `sides`: (text, BUTTONS
-    kind) each; `command(side)` is called as it turns."""
+class Switch(tk.Canvas):
+    """A two-position switch: both sides' names in one track, and a solid knob, in the
+    colour of the side that is on, that slides across when it is pressed. Under the
+    pointer the track lights a little and the knob jiggles, so it reads as something
+    to press. `sides`: (text, knob colour, text colour on it) each; `command(side)`
+    is called as it moves."""
 
-    FRAMES, STEP = 8, 22                  # turned over in eight frames of 22 ms
+    SLIDE, JIGGLE, STEP = 7, 10, 20       # frames of each, 20 ms apart
 
     def __init__(self, parent, sides, command):
         self.font = tkfont.Font(family=DISPLAY, size=10, weight="bold")
-        w = max(self.font.measure(text) for text, _ in sides) + px(24)
-        h = self.font.metrics("linespace") + px(10) + 2
-        super().__init__(parent, width=w, height=h, bg=parent["bg"], highlightthickness=0,
-                         cursor="hand2")
-        self.sides, self.side, self.command, self.k, self.over = sides, 0, command, None, False
-        self.bind("<Button-1>", lambda e: self.flip())
+        self.half = max(self.font.measure(text) for text, _, _ in sides) + px(22)
+        h = self.font.metrics("linespace") + px(10) + 6
+        super().__init__(parent, width=2 * self.half + 6, height=h, bg=parent["bg"],
+                         highlightthickness=0, cursor="hand2")
+        self.sides, self.side, self.command, self.over = sides, 0, command, False
+        self.pos, self.slide, self.jig = 0.0, None, None
+        self.bind("<Button-1>", lambda e: self.toggle())
         self.bind("<Enter>", lambda e: self.hover(True))
         self.bind("<Leave>", lambda e: self.hover(False))
-        self.draw(1.0)
+        self.draw()
+
+    def draw(self, shake=0.0):
+        self.delete("all")
+        w, h = int(self["width"]), int(self["height"])
+        self.create_rectangle(0, 0, w - 1, h - 1, fill="#0a1220" if self.over else "#070d18",
+                              outline="#3d5f8f" if self.over else EDGE)
+        x = 3 + self.pos * self.half + shake
+        _, knob, _ = self.sides[self.side]
+        self.create_rectangle(x, 3, x + self.half, h - 3, fill=knob, outline="")
+        for i, (text, _, on) in enumerate(self.sides):
+            self.create_text(3 + (i + 0.5) * self.half + (shake if i == self.side else 0), h / 2,
+                             text=text, font=self.font, fill=on if i == self.side else DIM)
 
     def hover(self, on):
         self.over = on
-        if self.k is None:
-            self.draw(1.0)
+        if on and self.jig is None and self.slide is None:
+            self.jig = 0
+            self.jiggle()
+        else:
+            self.draw()
 
-    def draw(self, s):
-        self.delete("all")
-        w, h = int(self["width"]), int(self["height"])
-        text, kind = self.sides[self.side]
-        bg, fg, over = BUTTONS[kind]
-        half = h / 2 * max(0.06, s)
-        self.create_rectangle(0, h / 2 - half, w, h / 2 + half, fill=over if self.over else bg,
-                              outline="")
-        if s > 0.55:
-            self.create_text(w / 2, h / 2, text=text, fill=fg, font=self.font)
+    def jiggle(self):
+        self.jig += 1
+        if self.jig > self.JIGGLE or self.slide is not None:
+            self.jig = None
+            return self.draw()
+        k = self.jig / self.JIGGLE
+        self.draw(math.sin(k * math.pi * 4) * px(3) * (1 - k))
+        self.after(self.STEP, self.jiggle)
 
-    def flip(self):
-        if self.k is None:
-            self.k = 0
-            self.turn()
-
-    def turn(self):
-        self.k += 1
-        if self.k == self.FRAMES // 2:           # edge on: the other side comes round
+    def toggle(self):
+        if self.slide is None:
             self.side = 1 - self.side
             self.command(self.side)
-        self.draw(abs(math.cos(math.pi * self.k / self.FRAMES)))
-        if self.k < self.FRAMES:
-            self.after(self.STEP, self.turn)
+            self.slide = 0
+            self.move()
+
+    def move(self):
+        self.slide += 1
+        k = self.slide / self.SLIDE
+        ease = k * k * (3 - 2 * k)
+        self.pos = ease if self.side else 1 - ease
+        self.draw()
+        if self.slide < self.SLIDE:
+            self.after(self.STEP, self.move)
         else:
-            self.k = None
-            self.draw(1.0)
+            self.slide = None
 
 
 class Tile(tk.Frame):
@@ -768,9 +785,11 @@ class Dashboard:
         self.chat.tag_config("you_when", foreground=FAINT, font=(DISPLAY, 8), justify="right")
         self.chat.config(state="disabled")
         # TASK or WILD: what Ask asks. Wild has no direction to suggest, so that goes.
+        # The switch stands apart, a rule between it and what it changes.
         self.wild = False
-        Flip(btns, [("TASK", "secondary"), ("WILD", "lift")], self.set_wild).pack(
-            side="left", padx=(0, 6))
+        Switch(btns, [("TASK", "#2b5a94", INK), ("WILD", BUTTONS["lift"][0], BUTTONS["lift"][1])],
+               self.set_wild).pack(side="left")
+        tk.Frame(btns, bg=EDGE, width=1, height=px(22)).pack(side="left", padx=px(14))
         self.ask = button(btns, "Ask", lambda: self.send_chat("ask"), "primary")
         self.ask.pack(side="left")
         self.directions = tk.Frame(btns, bg=PANEL)

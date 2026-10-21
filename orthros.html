@@ -301,12 +301,22 @@ details.help .body { margin-top: 12px; display: grid; gap: 10px; font-size: 13px
 .ask { display: flex; gap: 10px; flex-wrap: wrap; align-items: stretch; }
 .ask textarea { flex: 1 1 260px; min-width: 0; resize: vertical; min-height: 44px; }
 .ask .btns { display: flex; gap: 9px; flex-wrap: wrap; align-items: center; }
-/* TASK or WILD: a switch that turns over when pressed, its wild side the louder */
-.flip { min-width: 66px; }
-.flip.wild { color: #0d0420; border-color: transparent; background: linear-gradient(180deg, #b48cf5, #9b6fe8); }
-.flip.wild:hover:not(:disabled) { background: linear-gradient(180deg, #c6a5f8, #ab84ee); box-shadow: none; }
-.flip.turning { animation: flipover .18s linear; }
-@keyframes flipover { 50% { transform: scaleY(.06); } }
+/* TASK or WILD: a two-position switch, both names in one track and a solid knob that
+   slides to the side that is on. Under the pointer the track lights a little and the
+   switch jiggles, so it reads as something to press. It stands apart from Ask. */
+.switch { position: relative; display: inline-grid; grid-template-columns: 1fr 1fr; padding: 3px;
+  border-radius: 10px; background: var(--field); border: 1px solid var(--edge); box-shadow: none; }
+.switch::after { content: ""; position: absolute; right: -15px; top: 15%; bottom: 15%; width: 1px; background: var(--edge); }
+.switch span { position: relative; z-index: 1; padding: 6px 13px; color: var(--dim); transition: color .18s; }
+.switch::before { content: ""; position: absolute; top: 3px; bottom: 3px; left: 3px; width: calc(50% - 3px);
+  border-radius: 7px; background: #2b5a94; transition: transform .18s ease, background .18s; }
+.switch[aria-checked="true"]::before { transform: translateX(100%); background: #9b6fe8; }
+.switch[aria-checked="false"] span:first-child { color: var(--ink); }
+.switch[aria-checked="true"] span:last-child { color: #0d0420; }
+.switch:hover:not(:disabled) { background: #0a1424; border-color: #3d5f8f; box-shadow: none; animation: jiggle .4s ease; }
+.switch:active:not(:disabled) { transform: none; }
+.ask .btns .switch { margin-right: 20px; }
+@keyframes jiggle { 20% { rotate: -3deg; } 40% { rotate: 2.5deg; } 60% { rotate: -1.5deg; } 80% { rotate: .8deg; } }
 .hint { color: var(--serve); font-size: 12px; margin-top: 8px; min-height: 16px; }
 
 /* ---- diagnostics ---- */
@@ -504,7 +514,7 @@ dialog .line { justify-content: flex-end; }
           <div class="ask">
             <textarea id="chatText" rows="2" placeholder="e.g. how is it going?  /  what has the network been asking?  /  make research cache its results"></textarea>
             <div class="btns">
-              <button class="flip" type="button" id="modeFlip" title="TASK: about the work, from Orthros's records. WILD: anything at all, thought through first.">TASK</button>
+              <button class="switch" type="button" role="switch" aria-checked="false" id="modeFlip" title="TASK: about the work, from Orthros's records. WILD: anything at all, thought through first."><span>TASK</span><span>WILD</span></button>
               <button class="primary" id="askBtn" title="Send it to Orthros">Ask</button>
               <button id="directBtn" title="Put this at the top of the chosen agent's task list">Suggest direction</button>
               <label id="chatFor">for <select id="chatTarget"><option value="both">both</option><option>A</option><option>B</option></select></label>
@@ -1140,20 +1150,14 @@ function renderChat(chat, waiting) {
 let wild = false;
 try { wild = localStorage.getItem("orthros-chat-mode") === "wild"; } catch (e) { /* task, then */ }
 function showMode() {
-  const f = $("#modeFlip");
-  f.textContent = wild ? "WILD" : "TASK";
-  f.classList.toggle("wild", wild);
+  $("#modeFlip").setAttribute("aria-checked", String(wild));
   $("#directBtn").hidden = $("#chatFor").hidden = wild;
 }
 $("#modeFlip").onclick = () => {
-  const f = $("#modeFlip");
-  f.classList.remove("turning"); void f.offsetWidth; f.classList.add("turning");
-  setTimeout(() => {                        // edge on: the other side comes round
-    wild = !wild;
-    try { localStorage.setItem("orthros-chat-mode", wild ? "wild" : "task"); } catch (e) { /* fine */ }
-    showMode();
-    $("#chatHint").textContent = wild ? "Wild: anything at all, thought through first, so answers take longer." : "";
-  }, 90);
+  wild = !wild;
+  try { localStorage.setItem("orthros-chat-mode", wild ? "wild" : "task"); } catch (e) { /* fine */ }
+  showMode();
+  $("#chatHint").textContent = wild ? "Wild: anything at all, thought through first, so answers take longer." : "";
 };
 showMode();
 

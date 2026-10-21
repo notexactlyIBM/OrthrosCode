@@ -116,6 +116,10 @@ class TestInference(Served):
         self.assertEqual(status, 200)
         answer = json.loads(raw)["choices"][0]["message"]["content"]
         self.assertEqual(answer, "(simulated %s) hello" % service.IDENTIFIER)
+        # counted just after the answer goes out: a busy machine lets the caller read first
+        deadline = time.time() + 10
+        while not self.svc.served and time.time() < deadline:
+            time.sleep(0.05)
         self.assertEqual(self.svc.served, 1)
         self.assertGreater(self.svc.tokens, 0)
 

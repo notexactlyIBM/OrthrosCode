@@ -301,6 +301,12 @@ details.help .body { margin-top: 12px; display: grid; gap: 10px; font-size: 13px
 .ask { display: flex; gap: 10px; flex-wrap: wrap; align-items: stretch; }
 .ask textarea { flex: 1 1 260px; min-width: 0; resize: vertical; min-height: 44px; }
 .ask .btns { display: flex; gap: 9px; flex-wrap: wrap; align-items: center; }
+/* TASK or WILD: a switch that turns over when pressed, its wild side the louder */
+.flip { min-width: 66px; }
+.flip.wild { color: #0d0420; border-color: transparent; background: linear-gradient(180deg, #b48cf5, #9b6fe8); }
+.flip.wild:hover:not(:disabled) { background: linear-gradient(180deg, #c6a5f8, #ab84ee); box-shadow: none; }
+.flip.turning { animation: flipover .18s linear; }
+@keyframes flipover { 50% { transform: scaleY(.06); } }
 .hint { color: var(--serve); font-size: 12px; margin-top: 8px; min-height: 16px; }
 
 /* ---- diagnostics ---- */
@@ -492,15 +498,16 @@ dialog .line { justify-content: flex-end; }
         </section>
         <section class="card chat">
           <div class="cardhead"><h2>Talk to Orthros</h2>
-            <span class="tip" tabindex="0" data-tip="Ask: an answer from Orthros's own records, put into words by the model -- the served one, the running agent's, or loaded for the purpose while paused.&#10;&#10;Suggest direction: goes first on the chosen agent's task list, which its twin works through. If a turn is using that list, it waits for the turn to end.">?</span>
+            <span class="tip" tabindex="0" data-tip="TASK, Ask: an answer from Orthros's own records, put into words by the model -- the served one, the running agent's, or loaded for the purpose while paused.&#10;&#10;Suggest direction: goes first on the chosen agent's task list, which its twin works through. If a turn is using that list, it waits for the turn to end.&#10;&#10;WILD, Ask: anything at all. The same model thinks it through first, so answers take longer, and may look one thing up on the web.">?</span>
             <span class="sp"></span><button class="small" type="button" id="chatClear" title="Clear the conversation: the log here, and what the model is reminded of">Clear</button></div>
           <div class="chatlog" id="chatlog"><div class="empty">Ask how it is going, or suggest where the work should go next.</div></div>
           <div class="ask">
             <textarea id="chatText" rows="2" placeholder="e.g. how is it going?  /  what has the network been asking?  /  make research cache its results"></textarea>
             <div class="btns">
-              <button class="primary" id="askBtn" title="An answer from Orthros's own records, put into words by the model">Ask</button>
+              <button class="flip" type="button" id="modeFlip" title="TASK: about the work, from Orthros's records. WILD: anything at all, thought through first.">TASK</button>
+              <button class="primary" id="askBtn" title="Send it to Orthros">Ask</button>
               <button id="directBtn" title="Put this at the top of the chosen agent's task list">Suggest direction</button>
-              <label>for <select id="chatTarget"><option value="both">both</option><option>A</option><option>B</option></select></label>
+              <label id="chatFor">for <select id="chatTarget"><option value="both">both</option><option>A</option><option>B</option></select></label>
             </div>
           </div>
           <div class="hint" id="chatHint"></div>
@@ -1129,11 +1136,34 @@ function renderChat(chat, waiting) {
   if (atEnd) log.scrollTop = log.scrollHeight;
 }
 
+// TASK or WILD: what Ask asks. Wild has no direction to suggest, so that goes.
+let wild = false;
+try { wild = localStorage.getItem("orthros-chat-mode") === "wild"; } catch (e) { /* task, then */ }
+function showMode() {
+  const f = $("#modeFlip");
+  f.textContent = wild ? "WILD" : "TASK";
+  f.classList.toggle("wild", wild);
+  $("#directBtn").hidden = $("#chatFor").hidden = wild;
+}
+$("#modeFlip").onclick = () => {
+  const f = $("#modeFlip");
+  f.classList.remove("turning"); void f.offsetWidth; f.classList.add("turning");
+  setTimeout(() => {                        // edge on: the other side comes round
+    wild = !wild;
+    try { localStorage.setItem("orthros-chat-mode", wild ? "wild" : "task"); } catch (e) { /* fine */ }
+    showMode();
+    $("#chatHint").textContent = wild ? "Wild: anything at all, thought through first, so answers take longer." : "";
+  }, 90);
+};
+showMode();
+
 async function sendChat(kind) {
   const box = $("#chatText"), text = box.value.trim();
   if (!text) { box.focus(); return; }
+  if (kind === "ask" && wild) kind = "wild";
   $("#askBtn").disabled = $("#directBtn").disabled = true;
-  $("#chatHint").textContent = kind === "ask" ? "Thinking... If the model has to load first, that takes a minute." : "";
+  $("#chatHint").textContent = { ask: "Thinking... If the model has to load first, that takes a minute.",
+    wild: "Thinking it through... wild answers take a while." }[kind] || "";
   const r = await post("/api/chat", { text, kind, target: $("#chatTarget").value });
   $("#chatHint").textContent = "";
   $("#askBtn").disabled = $("#directBtn").disabled = false;

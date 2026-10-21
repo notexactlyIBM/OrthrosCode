@@ -178,21 +178,25 @@ def excerpt(text):
     return (text[:320] + " … " + text[-160:]) if len(text) > 500 else (text or "(no text)")
 
 
-def ask(upstream, model, messages, max_tokens=700, timeout=180):
+def ask(upstream, model, messages, max_tokens=700, timeout=180, effort="low", temperature=0.3,
+        total=None):
     """One chat completion from a model LM Studio has up: its answer, or ''. The model
-    thinks first, out of the same budget, so it is asked to think little and given room."""
+    thinks first, out of the same budget, so it is asked to think little and given room.
+    `total`: the whole budget, thinking included, for a caller that sized it from the
+    window in use (the chat's wild mode, which thinks hard)."""
     try:
         conn = http.client.HTTPConnection(*upstream, timeout=timeout)
         conn.request("POST", "/v1/chat/completions", json.dumps({
-            "model": model, "messages": messages, "max_tokens": max_tokens + 1024,
-            "temperature": 0.3, "reasoning_effort": "low"}),
+            "model": model, "messages": messages, "max_tokens": total or max_tokens + 1024,
+            "temperature": temperature, "reasoning_effort": effort}),
             {"Content-Type": "application/json", "Authorization": "Bearer lm-studio"})
         resp = conn.getresponse()
         data = json.loads(resp.read() or b"{}")
         if resp.status != 200:
             return ""
         text = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
-        return re.sub(r"<think>.*?</think>", "", text, flags=re.S | re.I).strip()
+        # an unfinished one (out of tokens) too
+        return re.sub(r"<think>.*?(?:</think>|$)", "", text, flags=re.S | re.I).strip()
     except (OSError, ValueError, http.client.HTTPException):
         return ""
 

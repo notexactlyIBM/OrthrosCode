@@ -26,6 +26,8 @@ import urllib.parse
 import urllib.request
 
 import tkinter as tk
+import tkinter.font as tkfont
+import types
 from tkinter import filedialog, messagebox
 
 import orthros_bear
@@ -153,6 +155,29 @@ def heading(parent, text, tip=None):
     return row
 
 
+def monitor_at(x, y):
+    """(left, top, width, height) of the monitor at a point on the desktop, or None off
+    Windows. Tk's own full screen always fills the main monitor (2026-10-21)."""
+    if os.name != "nt":
+        return None
+    import ctypes
+    import ctypes.wintypes as wt
+
+    class MonitorInfo(ctypes.Structure):
+        _fields_ = [("cbSize", wt.DWORD), ("rcMonitor", wt.RECT), ("rcWork", wt.RECT),
+                    ("dwFlags", wt.DWORD)]
+    user32 = ctypes.windll.user32
+    user32.MonitorFromPoint.restype = wt.HMONITOR
+    user32.MonitorFromPoint.argtypes = (wt.POINT, wt.DWORD)
+    info = MonitorInfo()
+    info.cbSize = ctypes.sizeof(info)
+    if not user32.GetMonitorInfoW(user32.MonitorFromPoint(wt.POINT(x, y), 2),   # or nearest
+                                  ctypes.byref(info)):
+        return None
+    r = info.rcMonitor
+    return r.left, r.top, r.right - r.left, r.bottom - r.top
+
+
 def readonly(text_widget, fill):
     text_widget.config(state="normal")
     text_widget.delete("1.0", "end")
@@ -183,6 +208,59 @@ class Tip:
         if self.top:
             self.top.destroy()
             self.top = None
+
+
+class Flip(tk.Canvas):
+    """A switch with two sides that turns over when pressed: solid and coloured, as
+    everything pressable is, its second side the louder. `sides`: (text, BUTTONS
+    kind) each; `command(side)` is called as it turns."""
+
+    FRAMES, STEP = 8, 22                  # turned over in eight frames of 22 ms
+
+    def __init__(self, parent, sides, command):
+        self.font = tkfont.Font(family=DISPLAY, size=10, weight="bold")
+        w = max(self.font.measure(text) for text, _ in sides) + px(24)
+        h = self.font.metrics("linespace") + px(10) + 2
+        super().__init__(parent, width=w, height=h, bg=parent["bg"], highlightthickness=0,
+                         cursor="hand2")
+        self.sides, self.side, self.command, self.k, self.over = sides, 0, command, None, False
+        self.bind("<Button-1>", lambda e: self.flip())
+        self.bind("<Enter>", lambda e: self.hover(True))
+        self.bind("<Leave>", lambda e: self.hover(False))
+        self.draw(1.0)
+
+    def hover(self, on):
+        self.over = on
+        if self.k is None:
+            self.draw(1.0)
+
+    def draw(self, s):
+        self.delete("all")
+        w, h = int(self["width"]), int(self["height"])
+        text, kind = self.sides[self.side]
+        bg, fg, over = BUTTONS[kind]
+        half = h / 2 * max(0.06, s)
+        self.create_rectangle(0, h / 2 - half, w, h / 2 + half, fill=over if self.over else bg,
+                              outline="")
+        if s > 0.55:
+            self.create_text(w / 2, h / 2, text=text, fill=fg, font=self.font)
+
+    def flip(self):
+        if self.k is None:
+            self.k = 0
+            self.turn()
+
+    def turn(self):
+        self.k += 1
+        if self.k == self.FRAMES // 2:           # edge on: the other side comes round
+            self.side = 1 - self.side
+            self.command(self.side)
+        self.draw(abs(math.cos(math.pi * self.k / self.FRAMES)))
+        if self.k < self.FRAMES:
+            self.after(self.STEP, self.turn)
+        else:
+            self.k = None
+            self.draw(1.0)
 
 
 class Tile(tk.Frame):
@@ -650,6 +728,12 @@ class Dashboard:
         self.gpu_stat.pack(fill="x", pady=(6, 0))
         self.gpu_state = {}
         self.lattice_setup()
+        # Orthros the bear stands left of the picture and plays with it (orthros_bear.py).
+        self.bear = orthros_bear.Bear(
+            self.gpu, line=orthros_bear.mix(INK, PANEL, 0.2), fill=PANEL, spot=self.bear_spot,
+            toy=types.SimpleNamespace(center=self.lattice_center, nearest=self.lattice_nearest,
+                                      poke=self.lattice_poke),
+            visible=lambda: self.tab == "operate" and self.gpu.winfo_ismapped())
 
     def build_chat(self, side):
         box = panel(side)
@@ -657,9 +741,11 @@ class Dashboard:
         head = tk.Frame(box, bg=PANEL)
         head.pack(fill="x")
         heading(head, "Talk to Orthros",
-                "Ask: an answer from Orthros's own records, put into words by the model.\n\n"
+                "TASK, Ask: an answer from Orthros's own records, put into words by the model.\n\n"
                 "Suggest direction: goes first on the chosen agent's task list, which its twin "
-                "works through.").pack(side="left")
+                "works through.\n\n"
+                "WILD, Ask: anything at all. The same model thinks it through first, so answers "
+                "take longer, and may look one thing up on the web.").pack(side="left")
         button(head, "Clear", self.clear_chat, font=(DISPLAY, 8, "bold")).pack(side="right")
         # The box to type in and its buttons keep their place; the conversation takes the rest.
         self.chat_hint = label(box, "", SERVE, (BODY, 9), anchor="w")
@@ -675,24 +761,25 @@ class Dashboard:
                             font=(BODY, 10), padx=2, pady=4, spacing1=2, spacing3=10,
                             highlightthickness=0)
         self.chat.pack(fill="both", expand=True, pady=(8, 8))
-        # The bear stands down the card's right side while there is a conversation, and
-        # leaves when it goes quiet (orthros_bear.py); its canvas is packed only then.
-        self.bear_box = tk.Canvas(box, width=px(150), height=1, bg=PANEL, highlightthickness=0)
-        self.bear = orthros_bear.Bear(self.bear_box, line=orthros_bear.mix(INK, PANEL, 0.2),
-                                      fill=PANEL, shown=self.show_bear)
         self.chat.tag_config("you", foreground="#bff6ff", lmargin1=px(110), lmargin2=px(110),
                              justify="right")
         self.chat.tag_config("orthros", foreground=INK, rmargin=px(60))
         self.chat.tag_config("when", foreground=FAINT, font=(DISPLAY, 8))
         self.chat.tag_config("you_when", foreground=FAINT, font=(DISPLAY, 8), justify="right")
         self.chat.config(state="disabled")
+        # TASK or WILD: what Ask asks. Wild has no direction to suggest, so that goes.
+        self.wild = False
+        Flip(btns, [("TASK", "secondary"), ("WILD", "lift")], self.set_wild).pack(
+            side="left", padx=(0, 6))
         self.ask = button(btns, "Ask", lambda: self.send_chat("ask"), "primary")
         self.ask.pack(side="left")
-        self.direct = button(btns, "Suggest direction", lambda: self.send_chat("direct"))
+        self.directions = tk.Frame(btns, bg=PANEL)
+        self.directions.pack(side="left")
+        self.direct = button(self.directions, "Suggest direction", lambda: self.send_chat("direct"))
         self.direct.pack(side="left", padx=6)
-        label(btns, "for", DIM, (BODY, 9)).pack(side="left", padx=(6, 4))
+        label(self.directions, "for", DIM, (BODY, 9)).pack(side="left", padx=(6, 4))
         self.target = tk.StringVar(value="both")
-        self.target_menu = tk.OptionMenu(btns, self.target, "both", "A", "B")
+        self.target_menu = tk.OptionMenu(self.directions, self.target, "both", "A", "B")
         self.target_menu.config(bg=PANEL2, fg=INK, activebackground="#28446e",
                                 activeforeground=INK, relief="flat", highlightthickness=0, bd=0,
                                 font=(BODY, 9))
@@ -828,27 +915,58 @@ class Dashboard:
         self.full = None
         self.gpu.bind("<Double-Button-1>", lambda e: self.toggle_full())
         self.angle, self.lit_shown, self.last_draw = 0.6, 0.0, time.time()
+        self.spin, self.poked, self.dot_xy = 0.0, {}, []      # the bear's pokes, and the dots
 
     def dots_on(self, canvas):
         """Dots only: no cube edges, no outline."""
         return [canvas.create_oval(0, 0, 0, 0, fill=FAINT, outline="") for _ in self.pts]
 
+    def bear_spot(self, w, h):
+        """Where the bear stands on the picture's canvas: left of the cube, as tall as
+        the room there allows. (x of its feet's middle, y of its feet, scale)."""
+        room = w / 2 - 0.5 * min(w, h)            # from the canvas's left edge to the cube's
+        tall = max(min(h * 0.86, room / 0.6), h * 0.45)
+        return max(tall * 0.3, room / 2), h - 3, tall / orthros_bear.ART_TALL
+
+    def lattice_center(self):
+        w, h = self.gpu.winfo_width(), self.gpu.winfo_height()
+        return (w / 2, h / 2) if w >= 10 else None
+
+    def lattice_nearest(self, x, y):
+        """(dot, x, y) of the front dot nearest a point on the panel's canvas."""
+        front = [(math.hypot(px_ - x, py_ - y), i, px_, py_)
+                 for i, (px_, py_, z) in enumerate(self.dot_xy) if z < 0.2]
+        return min(front)[1:] if front else None
+
+    def lattice_poke(self, dot):
+        """The bear tapped a dot: it flares, and the cube turns faster for a moment."""
+        self.poked[dot] = time.time()
+        self.spin += 0.9
+
     def toggle_full(self):
-        """Double-click: the lattice on the whole screen. Double-click or Escape: back."""
+        """Double-click: the lattice full screen, on the monitor it is on. Double-click
+        or Escape: back."""
         if self.full:
             self.lattices = [l for l in self.lattices if l[0].winfo_toplevel() is not self.full]
             self.full.destroy()
             self.full = None
             return
         top = tk.Toplevel(self.root, bg=PANEL)
-        top.attributes("-fullscreen", True)
+        rect = monitor_at(self.gpu.winfo_rootx() + self.gpu.winfo_width() // 2,
+                          self.gpu.winfo_rooty() + self.gpu.winfo_height() // 2)
+        if rect:
+            top.overrideredirect(True)
+            top.geometry("%dx%d+%d+%d" % (rect[2], rect[3], rect[0], rect[1]))
+        else:
+            top.attributes("-fullscreen", True)
         canvas = tk.Canvas(top, bg=PANEL, highlightthickness=0, cursor="hand2")
         canvas.pack(fill="both", expand=True)
         canvas.create_text(0, 0, text="", fill=SERVE, font=(DISPLAY, 40, "bold"),
                            anchor="ne", tags="busy")
-        for widget in (top, canvas):
-            widget.bind("<Double-Button-1>", lambda e: self.toggle_full())
-            widget.bind("<Escape>", lambda e: self.toggle_full())
+        # On the window only: an event on the canvas reaches its window's bindings too, and
+        # bound on both, one double-click turned it off and on again.
+        top.bind("<Double-Button-1>", lambda e: self.toggle_full())
+        top.bind("<Escape>", lambda e: self.toggle_full())
         top.focus_force()
         self.full = top
         self.lattices.append((canvas, self.dots_on(canvas)))
@@ -862,23 +980,31 @@ class Dashboard:
         now_t = time.time()
         dt, self.last_draw = min(0.2, now_t - self.last_draw), now_t
         g = self.gpu_state or {}
-        self.angle += dt * 0.06
+        self.angle += dt * (0.06 + self.spin)
+        self.spin *= math.exp(-dt / 1.5)
         util = max(0.0, min(100.0, float(g.get("util") or 0)))
         self.lit_shown += (util / 100 * len(self.pts) - self.lit_shown) * min(1, dt / 0.6)
+        self.bear.energy = self.lit_shown / len(self.pts)     # its glow follows the same
         ca, sa, ct, st = math.cos(self.angle), math.sin(self.angle), math.cos(.42), math.sin(.42)
         lit = set(self.lit_order[:int(round(self.lit_shown))])
+        flared = {i for i, at in self.poked.items() if now_t - at < 0.7}
+        self.poked = {i: self.poked[i] for i in flared}
         for c, dots in shown:
             w, h = c.winfo_width(), c.winfo_height()
             scale, cx, cy = min(w, h) * 0.36, w / 2, h / 2
             grow = max(1.0, min(w, h) / px(150))
+            if c is self.gpu:
+                self.dot_xy = []
             for i, (item, (x, y, z)) in enumerate(zip(dots, self.pts)):
                 x1, z1 = x * ca + z * sa, -x * sa + z * ca
                 y1, z2 = y * ct - z1 * st, y * st + z1 * ct
                 k = 6 / (6 + z2)
                 px_, py_ = cx + x1 * scale * k, cy - y1 * scale * k
-                r = (2.6 if i in lit else 1.3) * k * grow
+                r = (4.2 if i in flared else 2.6 if i in lit else 1.3) * k * grow
                 c.coords(item, px_ - r, py_ - r, px_ + r, py_ + r)
-                c.itemconfig(item, fill=A_C if i in lit else "#34405a")
+                c.itemconfig(item, fill=SERVE if i in flared else A_C if i in lit else "#34405a")
+                if c is self.gpu:
+                    self.dot_xy.append((px_, py_, z2))
             if c is not self.gpu:
                 c.coords("busy", w - px(40), px(30))
                 c.itemconfig("busy", text="%d%%" % round(util))
@@ -1187,7 +1313,7 @@ class Dashboard:
             if not chat:
                 t.insert("end", "Ask how it is going, or suggest where the work should go next.",
                          "when")
-            for when, who, text in chat:
+            for when, who, text, *_ in chat:
                 mine = who == "you"
                 t.insert("end", text + "\n", "you" if mine else "orthros")
                 t.insert("end", hhmm(when) + "\n", "you_when" if mine else "when")
@@ -1471,17 +1597,30 @@ class Dashboard:
             return "break"
         return None
 
+    def set_wild(self, side):
+        self.wild = side == 1
+        if self.wild:
+            self.directions.pack_forget()
+        else:
+            self.directions.pack(side="left", after=self.ask)
+        if not self.chat_busy:
+            self.chat_hint.config(text="Wild: anything at all, thought through first, so answers "
+                                       "take longer." if self.wild else "")
+
     def send_chat(self, kind):
         text = self.chat_text.get("1.0", "end").strip()
         if not text or self.chat_busy:
             return
+        if kind == "ask" and self.wild:
+            kind = "wild"
         self.chat_busy = True
         enable(self.ask, False)
         enable(self.direct, False)
-        self.chat_hint.config(text="Thinking... If the model has to load first, that takes a "
-                                   "minute." if kind == "ask" else "")
+        self.chat_hint.config(text={
+            "ask": "Thinking... If the model has to load first, that takes a minute.",
+            "wild": "Thinking it through... wild answers take a while."}.get(kind, ""))
         self.bear.heard()
-        self.bear.thinking(kind == "ask")
+        self.bear.thinking(kind != "direct")
 
         def done(r):
             self.chat_busy = False
@@ -1489,21 +1628,13 @@ class Dashboard:
             enable(self.direct, True)
             self.chat_hint.config(text="Could not send: %s" % r["error"] if r.get("error") else "")
             self.bear.thinking(False)
-            self.bear.answered("confused" if r.get("error") else r.get("mood"))
+            self.bear.answered("confused" if r.get("error") else r.get("mood"), r.get("acts"))
             if not r.get("error"):
                 self.chat_text.delete("1.0", "end")
                 self.render_chat(r.get("chat") or [], 0)
         self.post("/api/chat", {"text": text, "kind": kind, "target": self.target.get()}, done)
 
-    def show_bear(self, on):
-        if on:
-            # before the box and buttons, so it takes the card's whole height below the heading
-            self.bear_box.pack(side="right", fill="y", padx=(8, 0), before=self.chat_hint)
-        else:
-            self.bear_box.pack_forget()
-
     def clear_chat(self):
-        self.bear.leave()
         self.post("/api/chat/clear", None, lambda r: self.chat_hint.config(
             text="" if r.get("result") == "ok" else "Restart Orthros once to use Clear."))
 

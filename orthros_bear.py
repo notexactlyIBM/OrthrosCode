@@ -1,20 +1,25 @@
-"""The bear beside the chat in Orthros's window: a low-poly grizzly that stands up
-when you talk to Orthros, ponders while it thinks, shows the mood of its answer,
-and leaves once the chat has gone quiet for a while.
+"""Orthros the bear: a low-poly grizzly standing beside the GPU picture in Orthros's
+window. It watches you type, ponders while Orthros thinks, acts out the mood of
+each answer, now and then pokes at the picture's dots, and its lines glow faintly,
+more the busier the card is. (It had sparks along its lines too, for a day: they
+read as dots on the bear, and cost a redraw of it a few times a second.)
 
 Two halves. Rig is the puppet: the drawing's mesh (orthros_bear_mesh.py) on a
 skeleton, 2.5D -- every vertex has a depth from a rounded body shape, bones turn
 in 3D, polygons are drawn back to front -- with two-bone IK for the paws and feet.
-Bear is its brain and its tkinter canvas: every part of the body has somewhere it
-would like to be, made of layers (posture, breathing, slow weight shifts, where it
-looks, what it is doing, any mood), and follows it on a spring, so nothing pops.
+Bear is its brain and its drawing on a tkinter canvas it shares with the picture:
+every part of the body has somewhere it would like to be, made of layers (posture,
+breathing, slow weight shifts, where it looks, what it is doing, any mood), and
+follows it on a spring, so nothing pops.
 
-The model ends each chat answer with [mood: ...] (orthros.py strips it) and the
-bear plays that mood, with a small sign over its head.
+The model ends each chat answer with [mood: ...] and may cue moves with [do: ...]
+(orthros.py takes both off); the bear plays them.
 
 Light on purpose (2026-10-21): tkinter takes about 35 ms to draw the whole bear,
-so it runs at most 15 frames a second, draws only when something moved, has no
-moves that turn it far round (no back faces to draw), and is gone between chats.
+so it runs at 15 frames a second only while it moves or you chat and at 5 while it
+only stands, redraws only when it has moved enough to see or its glow has changed
+by a tenth, has no moves that turn it far round (no back faces to draw), and stops
+while its tab is hidden.
 
 Coordinates are the drawing's pixels: x right, y down, z towards the viewer.
 Standard library only, like orthros.py.
@@ -37,8 +42,8 @@ DEPTH = {"body": 0.8, "head": 0.85, "muzzle": 72, "arm": 34, "leg": 40, "armMid"
 F = 2600                           # the camera's distance (far: a gentle perspective)
 CAM = (ART_MID, 560)               # what the camera looks at
 VIEWER = 2200                      # where the person at the screen is, in front of the bear
-FPS = 15
-LINGER = 180                       # seconds of a quiet chat before the bear leaves
+FPS, IDLE_FPS = 15, 5             # while it moves or you chat; while it only stands and breathes
+GLOW = "#9fd6ff"                   # its lines, lit
 
 
 # ---- small 3D maths: 3x3 matrices row-major, vectors as tuples
@@ -598,8 +603,33 @@ def greet(c):
     c.add("head.roll", -o * 7 * k), c.add("earL.pitch", 10 * k), c.add("earR.pitch", 10 * k)
 
 
+def poke(c):
+    """Lean over and tap a dot of the GPU picture (c.goal, picked when it began)."""
+    s, o, k = c.side, c.out, c.env(0.9, 0.8)
+    tap = max(0, osc(c.t - 1.4, 2.2)) * c.window(1.4, 2.7, 0.15)
+    # the wrist, short of the dot by the claws' length, nudging in to tap it
+    c.arm(s, add(c.goal, (-o * (70 - 26 * tap), -10, 0)), None, k, 8)
+    c.add("root.x", o * c.lean * k), c.add("root.roll", o * 2.4 * k)
+    c.add("spine.roll", o * 2 * k), c.add("head.roll", o * 5 * k)
+    c.look(c.goal, k)
+    if c.t > 1.55 and c.once("tap"):
+        c.tapped()
+
+
+def watch(c):
+    """Turn to the GPU picture, head on one side, ears up, and sniff at it."""
+    k, o = c.env(0.7, 0.9), c.out
+    c.add("head.roll", -o * 12 * k), c.add("spine.pitch", 4 * k)
+    c.add("earL.pitch", 12 * k), c.add("earR.pitch", 12 * k)
+    burst = 1 if 1.2 < c.t < 2.6 and c.t % 1.1 < 0.5 else 0
+    c.face("twitch", max(0, osc(c.t, 7)) * burst * k)
+    if c.goal:
+        c.look(c.goal, k)
+
+
 ACTIONS = {"scratch_face": (3.6, scratch_face), "sniff": (4.0, sniff), "stretch": (5.0, stretch),
-           "ponder": (5.5, ponder), "sway": (4.4, sway), "nod": (1.4, nod), "greet": (2.8, greet)}
+           "ponder": (5.5, ponder), "sway": (4.4, sway), "nod": (1.4, nod), "greet": (2.8, greet),
+           "poke": (3.6, poke), "watch": (4.0, watch)}
 
 
 # ---- how it feels: (seconds, the sign over its head, the move)
@@ -700,10 +730,22 @@ def omega_of(key):
 class Clip:
     """One action or mood under way, and what its move may do to the frame."""
 
-    def __init__(self, name, dur, run, side):
+    def __init__(self, name, dur, run, side, goal=None, lean=0, tapped=None):
         self.name, self.dur, self.run, self.side = name, dur, run, side
         self.out = -1 if side == "L" else 1
         self.t, self.stop_at, self.frame = 0.0, dur, None
+        self.goal, self.lean = goal, lean            # where a poke or a look goes (art space)
+        self.tapped = tapped or (lambda: None)
+        self.flags = set()
+
+    def once(self, flag):
+        if flag in self.flags:
+            return False
+        self.flags.add(flag)
+        return True
+
+    def look(self, pt, k):
+        self.frame.look = (pt, k)
 
     def env(self, a, b):
         return ease(self.t / a) * (1 - ease((self.t - (self.stop_at - b)) / b))
@@ -737,27 +779,40 @@ class Frame:
         self.arms = {"L": [], "R": []}
         self.face = {"blink": 0, "twitch": 0}
         self.jaw = 0
+        self.look = None
 
     def add(self, key, v):
         self.T[key] = self.T.get(key, 0) + v
 
 
 class Bear:
-    """The bear on its own tkinter canvas. The window calls heard(), typing(), thinking()
-    and answered(); the bear shows itself on the first and leaves by itself."""
+    """The bear on a tkinter canvas it shares with the GPU picture. The window calls
+    heard(), typing(), thinking() and answered() from the chat, and sets energy (how
+    busy the card is, 0 to 1) each frame of the picture.
 
-    def __init__(self, canvas, line="#e8f1ff", fill="#0d1524", shown=None):
+    spot(w, h) says where it stands: (x of its feet's middle, y of its feet, scale).
+    toy, the GPU picture, if there is one: center() -> (x, y) on the canvas or None,
+    nearest(x, y) -> (dot, x, y) or None, poke(dot)."""
+
+    def __init__(self, canvas, line="#e8f1ff", fill="#0d1524", spot=None, toy=None,
+                 visible=None):
         self.c = canvas
         self.line, self.fill = line, fill
-        self.shown = shown or (lambda on: None)      # the window puts the canvas up or away
+        self.spot = spot or (lambda w, h: (w / 2, h - 4, min(h * 0.8 / ART_TALL, w * 0.95 / ART_W)))
+        self.toy = toy
+        self.visible = visible or (lambda: True)
         self.clock = time.monotonic                   # (the tests run it on a clock of their own)
         self.rig = Rig()
-        self.items = {}                  # face number -> canvas polygon
+        self.items, self.fills = {}, {}               # face number -> polygon, and its colours
+        self.palette, self.placed = {}, {}            # colours worked out; where each face is
         self.val, self.vel = {}, {}
-        self.drawn, self.order, self.fills = None, [], {}
-        self.job = None
-        self.on = False
+        self.drawn, self.order, self.o = None, [], None
+        self.energy, self.glow = 0.0, 0.0
+        self.poked = None                             # the dot a poke is going for
         self.reset()
+        self.start("greet", "L")
+        self.job = None
+        self.tick()
 
     def reset(self):
         now = self.clock()
@@ -765,39 +820,26 @@ class Bear:
         self.action = self.mood = self.then = None
         self.next_action = now + random.uniform(5, 9)
         self.cool = {}
-        self.look = {"what": "chat", "until": 0, "pt": None}
+        self.look = {"what": "viewer", "until": 0, "pt": None}
         self.blink_at, self.blink_until = now + random.uniform(1.5, 4), 0
         self.flick, self.flick_at = None, now + random.uniform(4, 9)
         self.shift = {"roll": 0, "x": 0, "sroll": 0, "at": now + random.uniform(3, 6)}
         self.breath = [0.0, 4.2]
         self.feet = {"L": {"x": 0, "step": None}, "R": {"x": 0, "step": None}}
         self.emote = None
+        self.busy_seen = 0.0
         self.last = now
-        self.active_at = now
 
     # ---- what the window tells it
 
-    def wake(self):
-        """Stand up beside the chat (if not there yet), and stay a while longer."""
-        self.active_at = self.clock()
-        if not self.on:
-            self.on = True
-            self.shown(True)
-            self.reset()
-            self.start("greet", "L")
-            self.tick()
-
     def heard(self):
-        self.wake()
         self.heard_at = self.clock()
         if not self.mood:
             self.start("nod")
 
     def typing(self):
-        if not self.on:
-            return
-        self.active_at = self.typed_at = self.clock()
-        if self.action and self.action.name == "stretch":
+        self.typed_at = self.clock()
+        if self.action and self.action.name in ("stretch", "poke"):
             self.action.stop_at = min(self.action.stop_at, self.action.t + 1.2)
 
     def thinking(self, on):
@@ -805,37 +847,41 @@ class Bear:
         if on:
             self.next_action = min(self.next_action, self.clock() + random.uniform(1.2, 2.5))
 
-    def answered(self, mood=None):
-        """Orthros answered: its mood (one of MOODS), or a small nod."""
-        self.wake()
+    def answered(self, mood=None, acts=()):
+        """Orthros answered: a move it cued, then its mood (one of MOODS); or a nod."""
         self.answered_at = self.clock()
         self.look["until"] = 0
-        if not (mood in MOOD and self.feel(mood)):
+        mood = mood if mood in MOOD else None
+        act = next((a for a in acts or () if a in ACTIONS), None)
+        if act and self.start(act):
+            self.then = mood
+            return
+        if not (mood and self.feel(mood)):
             self.start("nod")
-
-    def leave(self):
-        self.on = False
-        if self.job:
-            self.c.after_cancel(self.job)
-            self.job = None
-        self.c.delete("all")
-        self.items, self.drawn, self.order, self.fills = {}, None, [], {}
-        self.shown(False)
 
     # ---- starting things
 
     def start(self, name, side=None):
+        """Begin a move. A poke needs a dot in reach; without one it watches instead."""
         dur, run = ACTIONS[name]
+        goal, lean = None, 0
+        if name in ("poke", "watch"):
+            side = self.toy_side()
+            goal, lean = self.toy_goal(name, side)
+            if name == "poke" and goal is None:
+                return self.start("watch") if self.toy and self.o else False
         if self.action:
             self.action.stop_at = min(self.action.stop_at, self.action.t + 0.35)
-        self.action = Clip(name, dur, run, side or random.choice("LR"))
+        self.action = Clip(name, dur, run, side or random.choice("LR"), goal, lean,
+                           tapped=lambda: self.tap(goal))
         self.cool[name] = self.clock()
+        return True
 
     def feel(self, name):
         dur, glyph, run = MOOD[name]
         if self.action:
             self.action.stop_at = min(self.action.stop_at, self.action.t + 0.4)
-        self.mood = Clip(name, dur, run, "L")       # the chat is to its left
+        self.mood = Clip(name, dur, run, self.toy_side() or "L")
         self.mood.t = -0.25
         if glyph:
             self.emote = {"glyph": glyph, "at": self.clock() + 0.15}
@@ -843,16 +889,24 @@ class Bear:
 
     def decide(self, now):
         """Pick what to do next, now and then, from what's going on."""
-        if self.action or self.mood or now < self.next_action:
+        if self.action or self.mood:
             return
-        self.next_action = now + random.uniform(7, 15)
+        # the card got busy all at once: it turns to look
+        if self.energy - self.busy_seen > 0.25 and now - self.cool.get("watch", -1e9) > 40:
+            return self.start("watch")
+        if now < self.next_action:
+            return
+        self.next_action = now + random.uniform(12, 25)     # a calm bear is a cheap one
         if now - self.typed_at < 5 or now - self.heard_at < 2.5 or now - self.answered_at < 4:
             return
         ok = lambda name, secs: now - self.cool.get(name, -1e9) > secs
-        weights = ({"ponder": 2 * ok("ponder", 45), "sway": 3 * ok("sway", 12), "sniff": 2 * ok("sniff", 20)}
+        toy = 1 if self.toy and self.o else 0
+        weights = ({"ponder": 2 * ok("ponder", 45), "sway": 3 * ok("sway", 12),
+                    "sniff": 2 * ok("sniff", 20), "watch": toy * ok("watch", 30)}
                    if self.thinking_on else
-                   {"scratch_face": 0.8 * ok("scratch_face", 180), "sniff": 3 * ok("sniff", 30),
-                    "stretch": 1 * ok("stretch", 200), "sway": 1 * ok("sway", 25)})
+                   {"scratch_face": 0.8 * ok("scratch_face", 180), "sniff": 2 * ok("sniff", 30),
+                    "stretch": 1 * ok("stretch", 200), "sway": 1 * ok("sway", 25),
+                    "poke": 2 * toy * ok("poke", 45), "watch": 2 * toy * ok("watch", 30)})
         pick = [(k, w) for k, w in weights.items() if w > 0]
         if pick:
             r = random.uniform(0, sum(w for _, w in pick))
@@ -861,6 +915,43 @@ class Bear:
                 if r <= 0:
                     return self.start(k)
             self.start(pick[-1][0])
+
+    # ---- the GPU picture
+
+    def to_art(self, x, y, z=0.0):
+        ox, feet, scale = self.o
+        return (ART_MID + (x - ox) / scale, ART_FEET + (y - feet) / scale, z)
+
+    def toy_side(self):
+        """Which paw is nearer the picture: 'L' or 'R' (None without one)."""
+        c = self.toy and self.o and self.toy.center()
+        return ("R" if c[0] > self.o[0] else "L") if c else None
+
+    def toy_goal(self, name, side):
+        """(art point, lean) for a poke at the dot nearest its paw, or for a look at the
+        picture's middle; (None, 0) when there is no picture, or no dot in reach."""
+        c = self.toy and self.o and self.toy.center()
+        if not c:
+            return None, 0
+        if name == "watch":
+            return self.to_art(c[0], c[1], 200), 0
+        shoulder = self.rig.joint("upper" + side)
+        sx = self.o[0] + (shoulder[0] - ART_MID) * self.o[2]
+        sy = self.o[1] + (shoulder[1] - ART_FEET) * self.o[2]
+        out = 1 if side == "R" else -1
+        dot = self.toy.nearest(sx + out * 260 * self.o[2], sy + 60 * self.o[2])
+        if not dot:
+            return None, 0
+        goal = self.to_art(dot[1], dot[2], 60)
+        far = math.dist(goal, shoulder) - 330          # an arm and a paw reach about that far
+        if far > 110:                                  # leaning and a step help only so much
+            return None, 0
+        self.poked = dot[0]
+        return goal, clamp(far + 20, 0, 110)
+
+    def tap(self, goal):
+        if self.toy and goal is not None and self.poked is not None:
+            self.toy.poke(self.poked)
 
     # ---- one frame
 
@@ -874,22 +965,29 @@ class Bear:
         self.val[key], self.vel[key] = x, v
         return x
 
+    def lively(self, now):
+        """Is it doing something, or is the chat going? Else it only stands and breathes."""
+        return bool(self.action or self.mood or self.emote or self.thinking_on or
+                    now - max(self.typed_at, self.heard_at, self.answered_at) < 6)
+
     def tick(self):
-        if not self.on:
-            return
-        self.job = self.c.after(1000 // FPS, self.tick)
         now = self.clock()
-        if now - self.active_at > LINGER and not self.thinking_on:
-            return self.leave()
+        self.job = self.c.after(1000 // (FPS if self.lively(now) else IDLE_FPS), self.tick)
+        if not self.visible():
+            self.last = now
+            return
         try:
             self.step(now)
         except Exception:                # a bear must never take the window down
-            self.leave()
+            self.c.after_cancel(self.job)
+            self.c.delete("bear", "extra")
 
     def step(self, now):
-        dt = clamp(now - self.last, 0, 0.1)
+        dt = clamp(now - self.last, 0, 0.25)
         self.last = now
         t = now
+        self.glow += (self.energy - self.glow) * min(1, dt / 1.5)
+        self.busy_seen += (self.energy - self.busy_seen) * min(1, dt / 4)   # lags: a jump shows
         self.decide(now)
         fr = Frame()
         # life: breathing at a varying rhythm, slow weight shifts with stillness between
@@ -931,10 +1029,15 @@ class Bear:
             if clip.t >= clip.stop_at:
                 setattr(self, which, None)
                 if which == "action":
-                    self.next_action = max(self.next_action, now + random.uniform(4, 9))
-        # where it looks: the chat to its left (mostly), you, or off somewhere; typing: the box
+                    self.next_action = max(self.next_action, now + random.uniform(8, 15))
+                    if self.then:                    # the mood that came with a cued move
+                        self.feel(self.then)
+                        self.then = None
+        # where it looks: the picture, you, the chat below, or off somewhere
         head = self.rig.joint("head")
         look = self.look_target(now, head)
+        if fr.look:
+            look = lerp3(look, fr.look[0], fr.look[1])
         lk = 1 - fr.mutes.get("look", 0)
         d = sub(look, head)
         yaw = clamp(math.degrees(math.atan2(d[0], d[2])), -36, 36) - self.val.get("root.yaw", 0)
@@ -986,55 +1089,80 @@ class Bear:
         self.draw(now)
 
     def look_target(self, now, head):
+        w, h = self.c.winfo_width(), self.c.winfo_height()
+        below = self.to_art(w * 0.55, h * 1.6, 380) if self.o else (ART_MID, 1500, 380)
         if now - self.typed_at < 3.5:
-            return (ART_MID - 500, 1150, 380)                 # the box you type in: down to the left
+            return below                                      # the box you type in, below
         if now > self.look["until"]:
-            weights = {"chat": 8 if now - self.answered_at < 8 else 4.5, "viewer": 2.5, "away": 1}
-            r, what = random.uniform(0, sum(weights.values())), "chat"
-            for what, w in weights.items():
-                r -= w
+            toy = 3 if self.toy and self.o and self.toy.center() else 0
+            weights = {"chat": 8 if now - self.answered_at < 8 else 1.5, "toy": toy,
+                       "viewer": 2.5, "away": 1}
+            r, what = random.uniform(0, sum(weights.values())), "viewer"
+            for what, wt in weights.items():
+                r -= wt
                 if r <= 0:
                     break
             self.look = {"what": what, "until": now + random.uniform(2.5, 7.5),
                          "pt": (random.uniform(-300, 300), random.uniform(-260, 40), 900)}
-        if self.look["what"] == "chat":
-            return (ART_MID - 700, 420, 380)
-        if self.look["what"] == "away":
+        what = self.look["what"]
+        if what == "chat":
+            return below
+        if what == "toy":
+            c = self.toy.center() if self.toy and self.o else None
+            if c:
+                return self.to_art(c[0], c[1], 200)
+        if what == "away":
             return add(head, self.look["pt"])
         return (head[0], head[1] + 40, VIEWER)
 
     # ---- drawing
 
+    def colours(self, lit):
+        """A face's fill and its lines, lit from within as the card gets busy (and only
+        faintly: no glow spills outside the bear). Tenths of each, worked out once."""
+        key = (round(lit, 1), round(self.glow, 1))
+        if key not in self.palette:
+            lit, g = key
+            self.palette[key] = (mix(mix(self.fill, self.line, 0.03 + 0.09 * lit), GLOW, 0.03 + 0.10 * g),
+                                 mix(self.line, GLOW, 0.12 + 0.4 * g))
+        return self.palette[key]
+
     def draw(self, now):
+        """Draw the body if it moved enough to see (or its glow changed). True if drawn."""
         w, h = self.c.winfo_width(), self.c.winfo_height()
         if w < 20 or h < 40:
-            return
-        scale = min(h * 0.8 / ART_TALL, w * 0.95 / ART_W)
-        o = (w / 2, h - 4, scale)
-        shapes = self.rig.shapes(o)
+            return False
+        o = self.o = self.spot(w, h)
         emote = self.emote_at(now, o)
-        flats = {n: flat for n, flat, _ in shapes}
-        if self.drawn and emote == self.drawn[1] and set(flats) == set(self.drawn[0]):
+        glow = round(self.glow * 10)
+        if self.drawn and (emote, glow, o) == self.drawn[1]:
             # Drawing is the expensive part (tkinter), so slow movement -- breathing,
-            # a drifting head -- is drawn a few times a second, and movement at full rate.
-            moved = max(max(abs(a - b) for a, b in zip(flat, self.drawn[0][n]))
-                        for n, flat in flats.items())
-            if moved < 0.4 or (moved < 1.5 and now - self.drawn[2] < 0.3):
-                return
-        self.drawn = (flats, emote, now)
+            # a drifting head -- is drawn now and then, and movement at full rate.
+            moved = max(max(abs(p[0] - q[0]), abs(p[1] - q[1]))
+                        for p, q in zip(self.rig.out, self.drawn[3])) * o[2]
+            calm = 0.4 if self.lively(now) else 1.0
+            if moved < calm or (moved < 1.5 and now - self.drawn[2] < calm):
+                return False
+        shapes = self.rig.shapes(o)
+        flats = {n: flat for n, flat, _ in shapes}
+        self.drawn = (flats, (emote, glow, o), now, [p[:] for p in self.rig.out])
         order = [n for n, _, _ in shapes]
         for n, flat, lit in shapes:
             item = self.items.get(n)
-            fill = mix(self.fill, self.line, 0.03 + 0.09 * round(lit, 1))
+            fill, line = self.colours(lit)
             if item is None:
-                self.items[n] = self.c.create_polygon(flat, fill=fill, outline=self.line,
-                                                      width=1, joinstyle="round", tags="bear")
-                self.fills[n] = fill
+                self.items[n] = self.c.create_polygon(flat, fill=fill, outline=line, width=1,
+                                                      joinstyle="round", tags="bear")
+                self.fills[n], self.placed[n] = (fill, line), flat
                 continue
-            self.c.coords(item, flat)
-            if self.fills.get(n) != fill:
-                self.c.itemconfigure(item, fill=fill)
-                self.fills[n] = fill
+            # tkinter repaints whatever lies under a changed item: only what moved is
+            # changed, so a blink repaints the eyes and not the whole bear
+            if max(abs(a - b) for a, b in zip(flat, self.placed[n])) > 0.35:
+                self.c.coords(item, flat)
+                self.placed[n] = flat
+            if self.fills.get(n) != (fill, line):
+                self.c.itemconfigure(item, fill=fill, outline=line)
+                self.fills[n] = (fill, line)
             if n not in self.order:
                 self.c.itemconfigure(item, state="normal")
         if order != self.order:              # restacked only when the order changes
@@ -1049,8 +1177,9 @@ class Bear:
             m = self.rig.project(lerp3(self.rig.anchor("chinL"), self.rig.anchor("chinR"), 0.5), o)
             nz = self.rig.project(self.rig.anchor("nose"), o)
             cx, cy = (m[0] + nz[0]) / 2, nz[1] + (m[1] - nz[1]) * 0.62
-            rx, ry = 11 * scale, 14 * mouth * scale
-            self.c.create_oval(cx - rx, cy - ry, cx + rx, cy + ry, fill=self.line, outline="", tags="extra")
+            rx, ry = 11 * o[2], 14 * mouth * o[2]
+            self.c.create_oval(cx - rx, cy - ry, cx + rx, cy + ry, fill=self.line, outline="",
+                               tags="extra")
         if emote:                            # a small sign over its head for a mood
             x, y, glyph = emote
             r = 13
@@ -1058,6 +1187,7 @@ class Bear:
                                width=1.5, tags="extra")
             self.c.create_text(x, y + 1, text=glyph, fill="#ff6b9a" if glyph in "♥♡" else self.line,
                                font=("Segoe UI", 9 if len(glyph) > 1 else 12, "bold"), tags="extra")
+        return True
 
     def emote_at(self, now, o):
         e = self.emote
@@ -1070,5 +1200,4 @@ class Bear:
             self.emote = None
             return None
         top = self.rig.project(self.rig.anchor("top"), o)
-        w = self.c.winfo_width()
-        return (round(min(w - 15, top[0] + 30)), round(max(15, top[1] - 14 - age * 8)), e["glyph"])
+        return (round(top[0] + 30), round(max(15, top[1] - 14 - age * 8)), e["glyph"])

@@ -105,6 +105,14 @@ the chat box:
   reports, rollback reasons, recent events and requests) and says when they
   do not tell.
 - **Suggest direction** -- your words go to the top of an agent's list.
+- **TASK / WILD**, the switch beside Ask: in wild mode the same model talks
+  about anything, thinks before it answers, and may look one thing up on the
+  web. Suggest direction is hidden there.
+
+In the window, Orthros the bear stands beside the GPU picture: it watches you
+type, ponders while Orthros thinks, acts out the mood of each answer, pokes at
+the picture now and then, and its lines glow more the busier the card is.
+Double-click the picture for it full screen, on the monitor the window is on.
 
 For **Work on a task**, describe what to build; the agents break it into small
 checkable jobs. It gets a new folder under `tasks\`, or pick an existing one

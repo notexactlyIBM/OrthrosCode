@@ -116,8 +116,10 @@ behind the box after two quiet minutes. Now and then a salmon swims along the
 GPU graph and it climbs up to catch and eat it; while you chat, only when you
 ask. Its lines glow more the busier the card is. Double-click the GPU picture
 for it full screen, on the monitor the window is on. The divider between the
-window's two halves can be dragged; resizing the window puts it back in the
-middle. A and B's cards are on the window's Diagnostics tab.
+window's two halves can be dragged, and stays where you leave it, as a share of
+the width, through new window sizes and restarts; neither half can be dragged
+or squeezed below a usable width. A and B's cards are on the window's
+Diagnostics tab.
 
 For **Work on a task**, describe what to build; the agents break it into small
 checkable jobs. It gets a new folder under `tasks\`, or pick an existing one

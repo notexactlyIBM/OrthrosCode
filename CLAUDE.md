@@ -20,7 +20,7 @@ rule below. Most bugs here so far came from breaking one without noticing.
 | `OrthrosCode A\`, `B\` | The **running** agents. Each is its own git repo, rewritten by the other, and gitignored here. |
 | `tests\` | Orthros's tests (unittest, no GPU). `agent\test_*.py` are the agents' own tests. |
 
-State: `orthros.json` holds settings and the serve key. `.orthros-state.json` holds the mode, turns, events and chat. `ledger.sqlite` has one row per round. `logs\` has the turn logs, and `orthros.log` the events. Per agent: `config.cmd` (model and context), `orthros_tasks.md` (its list, worked by its twin), `FIELD_REPORT.md`, `LESSONS.md` and `ROLLBACK.md`. All of this is gitignored.
+State: `orthros.json` holds settings and the serve key. `.orthros-state.json` holds the mode, turns, events and chat, and `.orthros-window.json` where the window's divider was left. `ledger.sqlite` has one row per round. `logs\` has the turn logs, and `orthros.log` the events. Per agent: `config.cmd` (model and context), `orthros_tasks.md` (its list, worked by its twin), `FIELD_REPORT.md`, `LESSONS.md` and `ROLLBACK.md`. All of this is gitignored.
 
 ## Rules that fail silently when broken
 

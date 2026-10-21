@@ -8,8 +8,9 @@ too, for a day: they read as dots on the bear, and cost a redraw a few times a
 second. For another day it stood by the GPU picture and poked its dots.)
 
 Two halves. Rig is the puppet: the drawing's mesh (orthros_bear_mesh.py) on a
-skeleton, 2.5D -- every vertex has a depth from a rounded body shape, bones turn
-in 3D, polygons are drawn back to front -- with two-bone IK for the paws and feet.
+skeleton, 2.5D -- every vertex has a depth from a rounded body shape, the drawing's
+outline is a wall round each piece from its front to its back, bones turn in 3D,
+polygons are drawn back to front -- with two-bone IK for the paws and feet.
 Bear is its brain and its drawing on a tkinter canvas (its den, or the picture's):
 every part of the body has somewhere it would like to be, made of layers (posture,
 breathing, slow weight shifts, where it looks, what it is doing, any mood), and
@@ -21,8 +22,9 @@ The model ends each chat answer with [mood: ...] and may cue moves with [do: ...
 Light on purpose (2026-10-21): tkinter takes about 35 ms to draw the whole bear,
 so it runs at 15 frames a second only while it moves or you chat and at 5 while it
 only stands, redraws only when it has moved enough to see or its glow has changed
-by a tenth, has no moves that turn it far round (no back faces to draw), stops
-while its tab is hidden, and draws nothing while it hides behind the chat box.
+by a tenth, turns far round only while it walks (the only time its back and sides
+are drawn), stops while its tab is hidden, and draws nothing while it hides behind
+the chat box.
 
 Coordinates are the drawing's pixels: x right, y down, z towards the viewer.
 Standard library only, like orthros.py.
@@ -41,7 +43,12 @@ ART_W, ART_MID, ART_FEET, ART_TALL = 493, 248, 950, 925
 SNAP = 11                          # a joint this close to a line intersection sits on it
 # how far each piece stands out from its middle plane: a deep-chested bear with a round
 # head and a long muzzle; the arms' middle plane is a little in front of the body's
-DEPTH = {"body": 0.8, "head": 0.85, "muzzle": 72, "arm": 34, "leg": 40, "armMid": 22}
+DEPTH = {"body": 0.55, "head": 0.6, "muzzle": 72, "arm": 30, "leg": 34, "armMid": 22}
+# how thick each piece is at its outline, either side of its middle plane: its side
+# walls (2026-10-21: the outline lay on the middle plane, so side-on, or on all fours,
+# the bear was a paper cut-out -- the drawing has too few points inside its outline
+# for a bulge alone to give it a body)
+WALL = {"body": 74, "head": 44, "leg": 26, "arm": 22, "ear": 5}
 F = 2600                           # the camera's distance (far: a gentle perspective)
 CAM = (ART_MID, 560)               # what the camera looks at
 VIEWER = 2200                      # where the person at the screen is, in front of the bear
@@ -127,6 +134,61 @@ def swing(a, b):
     return tuple(I3[i] + s * K[i] + (1 - c) * K2[i] for i in range(9))
 
 
+def newell(pts):
+    """A polygon's normal (not unit), whichever way round it goes."""
+    n = (0, 0, 0)
+    for k in range(len(pts)):
+        n = add(n, cross(pts[k - 1], pts[k]))
+    return n
+
+
+def cross2(p, q, r):
+    return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+
+
+def triangulate(pts):
+    """Ear clipping: a polygon (2D points, either way round) as triangles of its corner
+    numbers, each going the same way round as the polygon."""
+    n = len(pts)
+    area = sum(pts[k - 1][0] * pts[k][1] - pts[k][0] * pts[k - 1][1] for k in range(n))
+    s = 1 if area >= 0 else -1
+    turn = lambda a, b, c: cross2(pts[a], pts[b], pts[c]) * s
+    idx, out = list(range(n)), []
+    while len(idx) > 3:
+        cut = 0                          # (a polygon with no ear: clip anyway)
+        for k in range(len(idx)):
+            a, b, c = idx[k - 1], idx[k], idx[(k + 1) % len(idx)]
+            if turn(a, b, c) > 1e-9 and not any(
+                    j not in (a, b, c) and turn(a, b, j) > 0 and turn(b, c, j) > 0 and turn(c, a, j) > 0
+                    for j in idx):
+                cut = k
+                break
+        out.append((idx[cut - 1], idx[cut], idx[(cut + 1) % len(idx)]))
+        del idx[cut]
+    out.append(tuple(idx))
+    return out
+
+
+def outline(tris):
+    """The loops round some triangles of one polygon (corner numbers, all the same way
+    round): its own sides where they show, and the fold where the rest turned away."""
+    edges = {(t[k], t[(k + 1) % 3]) for t in tris for k in range(3)}
+    nxt = {a: b for a, b in edges if (b, a) not in edges}
+    loops = []
+    while nxt:
+        a = next(iter(nxt))
+        loop = [a]
+        while True:
+            b = nxt.pop(a, None)
+            if b is None or b == loop[0]:
+                break
+            loop.append(b)
+            a = b
+        if len(loop) >= 3:
+            loops.append(loop)
+    return loops
+
+
 def smooth(a, b, x):
     t = max(0.0, min(1.0, (x - a) / (b - a)))
     return t * t * (3 - 2 * t)
@@ -191,17 +253,17 @@ SNOUT = (
     (234, 215, 0.75), (273, 215, 0.75), (242, 221, 0.7), (266, 220, 0.7), (226, 208, 0.35),
     (277, 208, 0.35), (252, 247, 0.3), (258, 248, 0.3),
 )
-# points on the body a paw can reach for: (bone, x, y, z)
+# points on the body a paw can reach for: (bone, x, y, z), just in front of its surface
 ANCHORS = {
-    "muzzleL": ("head", 226, 196, 92), "muzzleR": ("head", 288, 196, 92),
-    "cheekL": ("head", 178, 170, 44), "cheekR": ("head", 338, 170, 44),
-    "crownL": ("head", 200, 60, 30), "crownR": ("head", 312, 60, 30),
-    "chinL": ("head", 238, 252, 70), "chinR": ("head", 276, 252, 70),
-    "bellyL": ("spine", 215, 560, 104), "bellyR": ("spine", 298, 560, 104),
-    "chestL": ("chest", 225, 400, 110), "chestR": ("chest", 300, 400, 110),
-    "hipL": ("spine", 168, 586, 58), "hipR": ("spine", 330, 586, 58),
-    "upL": ("chest", 96, 210, 70), "upR": ("chest", 404, 210, 70),
-    "top": ("head", 258, 10, 0), "nose": ("head", 256, 176, 90),
+    "muzzleL": ("head", 226, 196, 125), "muzzleR": ("head", 288, 196, 125),
+    "cheekL": ("head", 178, 170, 78), "cheekR": ("head", 338, 170, 78),
+    "crownL": ("head", 200, 60, 52), "crownR": ("head", 312, 60, 52),
+    "chinL": ("head", 238, 252, 125), "chinR": ("head", 276, 252, 125),
+    "bellyL": ("spine", 215, 560, 175), "bellyR": ("spine", 298, 560, 175),
+    "chestL": ("chest", 225, 400, 180), "chestR": ("chest", 300, 400, 180),
+    "hipL": ("spine", 168, 586, 125), "hipR": ("spine", 330, 586, 125),
+    "upL": ("chest", 96, 210, 125), "upR": ("chest", 404, 210, 125),
+    "top": ("head", 258, 10, 0), "nose": ("head", 256, 176, 121),
 }
 LIGHT = norm((-0.45, -0.55, 0.7))
 
@@ -321,6 +383,19 @@ class Rig:
                   "legL": (J("thighL"), J("shinL"), J("footL"), TIPS["footL"]),
                   "legR": (J("thighR"), J("shinR"), J("footR"), TIPS["footR"])}
 
+        def wall(y, part):
+            """How thick the piece is at its outline (the head widening into the neck,
+            the body narrowing into the legs)."""
+            if part in ("armL", "armR"):
+                return WALL["arm"]
+            if part in ("earL", "earR"):
+                return WALL["ear"]
+            if part == "head":
+                return WALL["head"] + (WALL["body"] - WALL["head"]) * smooth(150, 262, y)
+            if part in ("legL", "legR"):
+                return WALL["leg"] + (WALL["body"] - WALL["leg"]) * (1 - smooth(700, 760, y))
+            return WALL["body"]
+
         def depth(x, y, part, front=True):
             """How far a point stands out from its piece's middle plane; the front has the
             muzzle and the toes, the back neither."""
@@ -338,7 +413,7 @@ class Rig:
                 return bulge(x, y, head_span, DEPTH["head"]) + (DEPTH["muzzle"] * s[2] if s else 0)
             return bulge(x, y, body_span, DEPTH["body"])
 
-        # the outline (edges with a polygon on one side only) lies on the middle plane
+        # the outline (edges with a polygon on one side only) is the top of the side walls
         uses = {}
         for f in faces:
             vs = f["vs"]
@@ -354,8 +429,8 @@ class Rig:
                          next((p for p in parts if p.startswith("ear")), None) or
                          ("legL" if "legL" in parts else "legR" if "legR" in parts else "body"))
             mid = DEPTH["armMid"] if v["part"].startswith("arm") else 0
-            out = lambda front: (0 if i in rim else
-                                 sum(depth(v["x"], v["y"], p, front) for p in parts) / len(parts))
+            out = lambda front: sum(wall(v["y"], p) + (0 if i in rim else depth(v["x"], v["y"], p, front))
+                                    for p in parts) / len(parts)
             v["z"], v["zback"] = mid + out(True), mid - out(False)
             v["w"] = self.weights(v)
         near = lambda c, r: [i for i, v in enumerate(verts)
@@ -379,19 +454,45 @@ class Rig:
                 ((c[0] - 257) / 42) ** 2 + ((c[1] - 188) / 64) ** 2 < 1 or
                 math.hypot(c[0] - 219, c[1] - 116) < 16 or math.hypot(c[0] - 280, c[1] - 117) < 16)
         # The back: each polygon again, behind its piece's middle plane and the other way
-        # round, sharing the outline -- so a bear on all fours, or turned, is a solid and
-        # not a cut-out (2026-10-21: it had none, and could neither bend nor turn far).
+        # round; and round the outline a wall from the front to the back -- so a bear on
+        # all fours, or turned, is a solid and not a cut-out (2026-10-21: it had no back,
+        # and could neither bend nor turn far; then a back and no walls, and side-on it
+        # was a sheet).
         back_of = {}
 
         def behind(i):
-            if i in rim:
-                return i
             if i not in back_of:
                 back_of[i] = len(verts)
                 verts.append(dict(verts[i], z=verts[i]["zback"]))
             return back_of[i]
+        walls = []
+        for f in faces:
+            vs = f["vs"]
+            for k in range(len(vs)):
+                a, b = vs[k], vs[(k + 1) % len(vs)]
+                if uses[(min(a, b), max(a, b))] > 1:
+                    continue
+                quad = [a, b, behind(b), behind(a)]
+                # it faces out of its polygon: across the edge, away from the inside
+                dx, dy = verts[b]["x"] - verts[a]["x"], verts[b]["y"] - verts[a]["y"]
+                n = newell([(verts[i]["x"], verts[i]["y"], verts[i]["z"]) for i in quad])
+                walls.append(dict(f, vs=quad, wall=True, feature=False,
+                                  sign=1 if (n[0] * dy - n[1] * dx) * f["sign"] > 0 else -1))
         for f in list(faces):
             faces.append(dict(f, vs=[behind(i) for i in reversed(f["vs"])], back=True))
+        faces += walls
+        # The front in triangles: a long polygon that is not flat (the snout's sides, from
+        # the brow to the mouth) turns away a part at a time, its fold drawn where it turns,
+        # and not all at once, which leaves a hole: the snout side-on looked hollow.
+        for f in faces:
+            if f.get("back") or f.get("wall"):
+                continue
+            pts = [(verts[i]["x"], verts[i]["y"]) for i in f["vs"]]
+            f["tris"] = triangulate(pts)
+            f["size"] = [max(4, abs(cross2(pts[i], pts[j], pts[k]))) for i, j, k in f["tris"]]
+            f["whole2"] = max(4, abs(sum(pts[k][0] * pts[k - 1][1] - pts[k - 1][0] * pts[k][1]
+                                         for k in range(len(pts)))))
+            f["vis"], f["turning"] = [True] * len(f["tris"]), False
         self.faces, self.verts = faces, verts
 
     def weights(self, v):
@@ -553,23 +654,49 @@ class Rig:
                 o[1] + (CAM[1] + (p[1] - CAM[1]) * k - ART_FEET) * o[2])
 
     def shapes(self, o):
-        """The polygons facing you, back to front: (face number, flat screen points, light)."""
+        """The polygons facing you, back to front: (key, face number, flat screen points,
+        light). The key is the face number, or (face number, k) for the k-th piece of a
+        front polygon partly turned away."""
         screen = [self.project(p, o) for p in self.out]
+        s2 = o[2] * o[2]
         order = []
         for n, f in enumerate(self.faces):
             vs = f["vs"]
             m = len(vs)
             a = sum(screen[vs[k]][0] * screen[vs[(k + 1) % m]][1] -
-                    screen[vs[(k + 1) % m]][0] * screen[vs[k]][1] for k in range(m))
-            if a * f["sign"] < (0.5 if f.get("back") else -0.5):
-                continue                     # turned away from you (a back: unless it faces you)
+                    screen[vs[(k + 1) % m]][0] * screen[vs[k]][1] for k in range(m)) * f["sign"]
+            pieces = [vs]
+            if "tris" not in f:              # a back or a wall: all of it, if it faces you
+                if a < 0.5:
+                    continue
+            else:
+                # A big polygon is split into its triangles only while it is clearly turning
+                # (shrunk under a third of its size, until back over two fifths), and then a
+                # triangle goes only once clearly turned away: near rest every polygon is
+                # whole, so a sliver held nearly edge-on doesn't flash a fold on and off.
+                tris = f["tris"]
+                f["turning"] = len(tris) > 1 and f["whole2"] >= 800 and \
+                    a / (f["whole2"] * s2) < (0.4 if f["turning"] else 0.3)
+                if f["turning"]:
+                    vis = f["vis"] = [cross2(screen[vs[i]], screen[vs[j]], screen[vs[k]]) * f["sign"] /
+                                      (f["size"][t] * s2) >= (-0.12 if f["vis"][t] else -0.02)
+                                      for t, (i, j, k) in enumerate(tris)]
+                    if not any(vis):
+                        continue
+                    if not all(vis):
+                        pieces = [[vs[c] for c in loop]
+                                  for loop in outline([t for t, on in zip(tris, vis) if on])]
+                elif a < -0.5:
+                    continue                 # turned away from you
             z = sum(self.out[i][2] for i in vs) / m + f["bias"]
             p, q, r = self.out[vs[0]], self.out[vs[1]], self.out[vs[2]]
             nrm = norm(cross(sub(q, p), sub(r, p)))
             lit = max(0, dot(nrm if nrm[2] >= 0 else mulv(nrm, -1), LIGHT))
-            order.append((z, n, [c for i in vs for c in screen[i]], lit))
+            for k, piece in enumerate(pieces):
+                key = n if piece is vs else (n, k)
+                order.append((z, key, n, [c for i in piece for c in screen[i]], lit))
         order.sort(key=lambda e: e[0])
-        return [(n, flat, lit) for _, n, flat, lit in order]
+        return [e[1:] for e in order]
 
 
 # ---- what it does: each runs for dur seconds with c (see Clip)
@@ -1368,40 +1495,40 @@ class Bear:
         o = self.o = self.spot(w, h)
         emote = self.emote_at(now, o)
         glow = round(self.glow * 10)
-        if self.drawn and (emote, glow, o) == self.drawn[1]:
+        if self.drawn and (emote, glow, o) == self.drawn[0]:
             # Drawing is the expensive part (tkinter), so slow movement -- breathing,
             # a drifting head -- is drawn now and then, and movement at full rate.
             moved = max(max(abs(p[0] - q[0]), abs(p[1] - q[1]))
-                        for p, q in zip(self.rig.out, self.drawn[3])) * o[2]
+                        for p, q in zip(self.rig.out, self.drawn[2])) * o[2]
             # (2026-10-21: while it moved, small moves were drawn only every 0.4 s, so a
             # slow turn of the head played at two or three frames a second and looked jerky)
             if self.lively(now) and moved < 0.4 or not self.lively(now) and (
-                    moved < 1.0 or moved < 1.5 and now - self.drawn[2] < 1.0):
+                    moved < 1.0 or moved < 1.5 and now - self.drawn[1] < 1.0):
                 return False
         shapes = self.rig.shapes(o)
-        flats = {n: flat for n, flat, _ in shapes}
-        self.drawn = (flats, (emote, glow, o), now, [p[:] for p in self.rig.out])
-        order = [n for n, _, _ in shapes]
-        for n, flat, lit in shapes:
-            item = self.items.get(n)
+        self.drawn = ((emote, glow, o), now, [p[:] for p in self.rig.out])
+        order = [key for key, _, _, _ in shapes]
+        for key, n, flat, lit in shapes:
+            item = self.items.get(key)
             fill, line = self.colours(lit)
             face = self.rig.faces[n]
             if face.get("back") and face["feature"]:
                 line = fill                  # the inside of the face: no eyes drawn on it
             if item is None:
-                self.items[n] = self.c.create_polygon(flat, fill=fill, outline=line, width=1,
-                                                      joinstyle="round", tags="bear")
-                self.fills[n], self.placed[n] = (fill, line), flat
+                self.items[key] = self.c.create_polygon(flat, fill=fill, outline=line, width=1,
+                                                        joinstyle="round", tags="bear")
+                self.fills[key], self.placed[key] = (fill, line), flat
                 continue
             # tkinter repaints whatever lies under a changed item: only what moved is
             # changed, so a blink repaints the eyes and not the whole bear
-            if max(abs(a - b) for a, b in zip(flat, self.placed[n])) > 0.35:
+            was = self.placed[key]
+            if len(flat) != len(was) or max(abs(a - b) for a, b in zip(flat, was)) > 0.35:
                 self.c.coords(item, flat)
-                self.placed[n] = flat
-            if self.fills.get(n) != (fill, line):
+                self.placed[key] = flat
+            if self.fills.get(key) != (fill, line):
                 self.c.itemconfigure(item, fill=fill, outline=line)
-                self.fills[n] = (fill, line)
-            if n not in self.order:
+                self.fills[key] = (fill, line)
+            if key not in self.order:
                 self.c.itemconfigure(item, state="normal")
         if order != self.order:              # restacked only when the order changes
             for n in order:

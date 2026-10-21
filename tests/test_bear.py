@@ -83,7 +83,9 @@ def run(bear, seconds, t0=None, seen=None):
 class RigTest(unittest.TestCase):
     def test_every_face_has_a_part_and_every_vertex_its_bones(self):
         rig = ob.Rig()
-        self.assertEqual(len(rig.faces), 2 * len(ob.FACES))      # front and back
+        walls = sum(1 for f in rig.faces if f.get("wall"))
+        self.assertGreater(walls, 50)
+        self.assertEqual(len(rig.faces), 2 * len(ob.FACES) + walls)      # front, back, sides
         for v in rig.verts:
             self.assertAlmostEqual(sum(k for _, k in v["w"]), 1.0, places=6)
 
@@ -91,12 +93,34 @@ class RigTest(unittest.TestCase):
         rig = ob.Rig()
         shapes = rig.shapes((75, 316, 0.25))
         self.assertGreater(len(shapes), len(ob.FACES) * 0.9)
-        xs = [c for _, flat, _ in shapes for c in flat[0::2]]
-        ys = [c for _, flat, _ in shapes for c in flat[1::2]]
+        xs = [c for _, _, flat, _ in shapes for c in flat[0::2]]
+        ys = [c for _, _, flat, _ in shapes for c in flat[1::2]]
         self.assertGreater(min(xs), 0)
         self.assertLess(max(xs), 150)
         self.assertGreater(min(ys), 0)
         self.assertLess(max(ys), 320)
+
+    def test_side_on_its_body_is_a_solid_not_a_sheet(self):
+        # 2026-10-21: the outline lay on the middle plane, and side-on the chest was 0 deep
+        rig = ob.Rig()
+
+        def across(yaw, top):
+            rig.set_pose({"root": {"yaw": yaw}})
+            xs = [p[0] for p, v in zip(rig.out, rig.verts) if top < p[1] < top + 60 and v["part"] == "body"]
+            return max(xs) - min(xs)
+        for top in range(260, 620, 60):           # from the shoulders down to the hips
+            self.assertGreater(across(90, top), across(0, top) * 0.5, top)
+
+    def test_a_snout_turning_away_shows_the_part_still_facing_you(self):
+        rig = ob.Rig()
+        rig.set_pose({"head": {"yaw": 50}})
+        pieces = [(key, flat) for key, _, flat, _ in rig.shapes((100, 300, 0.36)) if isinstance(key, tuple)]
+        self.assertTrue(pieces)
+        for key, flat in pieces:
+            self.assertGreaterEqual(len(flat), 6, key)
+            self.assertNotIn("back", rig.faces[key[0]])
+        rig.set_pose({})                          # facing you, every polygon is whole again
+        self.assertFalse([k for k, _, _, _ in rig.shapes((100, 300, 0.36)) if isinstance(k, tuple)])
 
     def test_a_paw_reaches_what_it_is_sent_to(self):
         rig = ob.Rig()

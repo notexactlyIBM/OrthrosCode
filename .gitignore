@@ -17,6 +17,7 @@ venv/
 *.before-fresh-*
 logs/
 .orthros-state.json
+.orthros-window.json
 orthros.json
 orthros.log
 .janus-state.json

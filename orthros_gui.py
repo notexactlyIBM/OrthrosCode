@@ -33,6 +33,8 @@ from tkinter import filedialog, messagebox
 import orthros_bear
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+LAYOUT = os.path.join(HERE, ".orthros-window.json")   # where you left the divider
+SPLIT = (0.3, 0.7)                # the divider's share of the width, however far dragged
 
 BG, PANEL, PANEL2, EDGE = "#070b13", "#0d1524", "#121c30", "#23324d"
 INK, DIM, FAINT, TRACK = "#e8f1ff", "#8a9cbb", "#55657f", "#1a2438"
@@ -478,13 +480,21 @@ class Dashboard:
     # ---- operate
 
     def build_operate(self, page):
-        # Two halves with a divider you can drag; a new window size puts it back in the
-        # middle, as it was before it could be dragged.
+        # Two halves with a divider you can drag. Where you leave it is kept, as a share
+        # of the width, through new window sizes and restarts -- held within SPLIT and
+        # the halves' least widths, so a drag or a small window never squeezes one away.
+        # (2026-10-21: for a day a new window size put it back in the middle.)
         self.split = tk.PanedWindow(page, orient="horizontal", bg=BG, bd=0, sashwidth=px(14),
                                     sashrelief="flat", showhandle=False, opaqueresize=True)
         self.split.pack(fill="both", expand=True)
-        self.split_size = None
-        self.split.bind("<Configure>", self.recenter_split)       # (a drag does not resize it)
+        self.split_share, self.split_size = 0.5, None
+        try:
+            with open(LAYOUT, encoding="utf-8") as fh:
+                self.split_share = float(json.load(fh)["split"])
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        self.split.bind("<Configure>", self.place_split)          # (a drag does not resize it)
+        self.split.bind("<ButtonRelease-1>", self.split_dragged)
 
         ops = panel(self.split)
         self.split.add(ops, minsize=px(420), stretch="always")
@@ -572,12 +582,33 @@ class Dashboard:
         self.build_gpu(side)
         self.build_chat(side)
 
-    def recenter_split(self, event):
-        """The window changed size: the divider goes back to the middle."""
+    def split_at(self, width):
+        """Where the divider goes in a split this wide: its share, kept within bounds."""
+        room = max(0, width - px(14))
+        least = min(px(420), room // 2)
+        return int(min(max(room * min(max(self.split_share, SPLIT[0]), SPLIT[1]), least), room - least))
+
+    def place_split(self, event):
+        """The window changed size: the divider keeps its share of the width."""
         if event.width == self.split_size:
             return
         self.split_size = event.width
-        self.root.after_idle(lambda: self.split.sash_place(0, max(0, event.width - px(14)) // 2, 0))
+        self.root.after_idle(lambda: self.split.sash_place(0, self.split_at(event.width), 0))
+
+    def split_dragged(self, event):
+        """You let go of the divider: held within bounds, and remembered."""
+        width = self.split.winfo_width()
+        x = self.split.sash_coord(0)[0]
+        self.split_share = x / max(1, width - px(14))
+        at = self.split_at(width)
+        if at != x:
+            self.split.sash_place(0, at, 0)
+            self.split_share = at / max(1, width - px(14))
+        try:
+            with open(LAYOUT, "w", encoding="utf-8") as fh:
+                json.dump({"split": round(self.split_share, 4)}, fh)
+        except OSError:
+            pass
 
     def build_agents(self, page):
         """A and B, side by side: on the Diagnostics tab."""

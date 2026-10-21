@@ -321,17 +321,20 @@ class Rig:
                   "legL": (J("thighL"), J("shinL"), J("footL"), TIPS["footL"]),
                   "legR": (J("thighR"), J("shinR"), J("footR"), TIPS["footR"])}
 
-        def depth(x, y, part):
+        def depth(x, y, part, front=True):
+            """How far a point stands out from its piece's middle plane; the front has the
+            muzzle and the toes, the back neither."""
             if part in ("armL", "armR"):
                 return limb((x, y), chains[part], DEPTH["arm"])
             if part in ("legL", "legR"):
-                lz = limb((x, y), chains[part], DEPTH["leg"]) + ((y - 900) * 0.9 if y > 900 else 0)
+                toes = (y - 900) * 0.9 if front and y > 900 else 0
+                lz = limb((x, y), chains[part], DEPTH["leg"]) + toes
                 t = smooth(700, 760, y)
                 return lz * t + bulge(x, y, body_span, DEPTH["body"]) * (1 - t)
             if part in ("earL", "earR"):
                 return 8
             if part == "head":
-                s = next((s for s in SNOUT if math.hypot(s[0] - x, s[1] - y) < 3), None)
+                s = front and next((s for s in SNOUT if math.hypot(s[0] - x, s[1] - y) < 3), None)
                 return bulge(x, y, head_span, DEPTH["head"]) + (DEPTH["muzzle"] * s[2] if s else 0)
             return bulge(x, y, body_span, DEPTH["body"])
 
@@ -351,7 +354,9 @@ class Rig:
                          next((p for p in parts if p.startswith("ear")), None) or
                          ("legL" if "legL" in parts else "legR" if "legR" in parts else "body"))
             mid = DEPTH["armMid"] if v["part"].startswith("arm") else 0
-            v["z"] = mid + (0 if i in rim else sum(depth(v["x"], v["y"], p) for p in parts) / len(parts))
+            out = lambda front: (0 if i in rim else
+                                 sum(depth(v["x"], v["y"], p, front) for p in parts) / len(parts))
+            v["z"], v["zback"] = mid + out(True), mid - out(False)
             v["w"] = self.weights(v)
         near = lambda c, r: [i for i, v in enumerate(verts)
                              if v["part"] == "head" and math.hypot(v["x"] - c[0], v["y"] - c[1]) < r]
@@ -368,6 +373,25 @@ class Rig:
             a = sum(verts[vs[k]]["x"] * verts[vs[(k + 1) % len(vs)]]["y"] -
                     verts[vs[(k + 1) % len(vs)]]["x"] * verts[vs[k]]["y"] for k in range(len(vs)))
             f["sign"] = 1 if a >= 0 else -1                          # its way round, facing you
+            # the face's features: their copies at the back of the head are drawn without
+            # lines, else a head bent towards you shows a second face from the inside
+            f["feature"] = f["part"] == "head" and (
+                ((c[0] - 257) / 42) ** 2 + ((c[1] - 188) / 64) ** 2 < 1 or
+                math.hypot(c[0] - 219, c[1] - 116) < 16 or math.hypot(c[0] - 280, c[1] - 117) < 16)
+        # The back: each polygon again, behind its piece's middle plane and the other way
+        # round, sharing the outline -- so a bear on all fours, or turned, is a solid and
+        # not a cut-out (2026-10-21: it had none, and could neither bend nor turn far).
+        back_of = {}
+
+        def behind(i):
+            if i in rim:
+                return i
+            if i not in back_of:
+                back_of[i] = len(verts)
+                verts.append(dict(verts[i], z=verts[i]["zback"]))
+            return back_of[i]
+        for f in list(faces):
+            faces.append(dict(f, vs=[behind(i) for i in reversed(f["vs"])], back=True))
         self.faces, self.verts = faces, verts
 
     def weights(self, v):
@@ -537,8 +561,8 @@ class Rig:
             m = len(vs)
             a = sum(screen[vs[k]][0] * screen[vs[(k + 1) % m]][1] -
                     screen[vs[(k + 1) % m]][0] * screen[vs[k]][1] for k in range(m))
-            if a * f["sign"] < -0.5:
-                continue                     # turned away from you
+            if a * f["sign"] < (0.5 if f.get("back") else -0.5):
+                continue                     # turned away from you (a back: unless it faces you)
             z = sum(self.out[i][2] for i in vs) / m + f["bias"]
             p, q, r = self.out[vs[0]], self.out[vs[1]], self.out[vs[2]]
             nrm = norm(cross(sub(q, p), sub(r, p)))
@@ -755,6 +779,19 @@ class Frame:
 DEN_QUIET = 120                    # seconds without a word before it walks off to hide
 SALMON_EVERY = (240, 540)          # a salmon now and then, while nobody is chatting
 WALK = 170                         # how fast it walks, drawing px a second
+STRIDE = 140                       # how far it goes in one cycle of its four paws
+# a bear's walk: left hind, left fore, right hind, right fore, a quarter apart
+PAWS = (("legL", 0.0), ("armL", 0.25), ("legR", 0.5), ("armR", 0.75))
+
+
+def gait(u):
+    """(how far ahead of its hip or shoulder a paw is, how high it is lifted) at u, 0..1,
+    of its cycle: planted for two thirds while the body goes over it, then swung forward."""
+    reach = STRIDE * 0.65 / 2
+    if u < 0.65:
+        return reach - 2 * reach * u / 0.65, 0.0
+    k = (u - 0.65) / 0.35
+    return -reach + 2 * reach * ease(k), math.sin(k * math.pi) * 24
 FISH = (("rise", 1.1), ("wait", 1.5), ("catch", 0.5), ("lift", 0.6), ("chew", 2.6),
         ("sink", 1.0))             # the fishing trip, phase by phase (seconds)
 
@@ -834,6 +871,7 @@ class Bear:
         self.energy, self.glow = 0.0, 0.0
         self.where, self.since = "away", self.clock()  # away coming here going up fishing down
         self.walk_x, self.lift, self.greeted = 0.0, 0.0, False
+        self.fours_want, self.gait, self.way = 0.0, 0.0, -1     # on all fours, its walk
         self.salmon, self.fish_x, self.then_fish, self.fish_side = None, 0.0, False, "L"
         now = self.clock()
         self.active_at = -1e9
@@ -912,10 +950,12 @@ class Bear:
     def set(self, where):
         now, self.since, was = self.clock(), self.clock(), self.where
         self.where = where
+        self.fours_want = 1.0 if where in ("coming", "going") else 0.0
         if where == "coming":
             if was != "going":                       # from behind the box, at its edge
                 self.home()
-                self.walk_x = self.offstage()
+                self.walk_x, self.way, self.gait = self.offstage(), -1, 0.0
+                self.val["fours"], self.vel["fours"] = 1.0, 0.0     # already on all fours
                 for f in self.feet.values():
                     f["x"], f["step"] = self.walk_x, None
         elif where == "fishing":
@@ -946,7 +986,7 @@ class Bear:
         """How far right (drawing px) it stands when hidden behind the chat box."""
         w, h = self.den.winfo_width(), self.den.winfo_height()
         scale = self.den_scale(w, h)
-        return (w / 2 + 0.32 * ART_TALL * scale + 8) / scale
+        return (w / 2 + 0.5 * ART_TALL * scale + 8) / scale     # (wider on all fours)
 
     @staticmethod
     def den_scale(w, h):
@@ -1054,24 +1094,26 @@ class Bear:
         o = self.o = self.o or self.spot(w, h)       # (none yet on a canvas it just came to)
         tall = ART_TALL * o[2]
         if self.where in ("coming", "going"):
+            # On all fours, turned towards where it is going, with a bear's four-beat walk
+            # (see gait()); down before it sets off, up again once it is there.
             goal = 0.0 if self.where == "coming" else self.offstage()
-            way = 1 if goal > self.walk_x else -1
-            self.walk_x += way * min(WALK * dt, abs(goal - self.walk_x))
-            stride = (self.walk_x / 60) * math.pi
-            fr.add("root.yaw", way * 24), fr.add("root.y", -abs(math.sin(stride)) * 6)
-            fr.add("head.yaw", -way * 10), fr.add("spine.roll", math.sin(stride) * 2)
-            for s, sign in (("L", 1), ("R", -1)):
-                fr.arms[s].append((add(self.rig.anchor("rest" + s), (0, -6, sign * 26 * math.sin(stride))),
-                                   None, 0.8, 9))
-            fr.look = ((self.walk_x + way * 600 + ART_MID, 420, 300), 0.8)   # where it is going
-            if self.walk_x == goal and not any(f["step"] for f in self.feet.values()):
-                if self.where == "coming":
-                    self.where = "here"
-                    if not self.greeted:          # its first time out this session
-                        self.greeted = True
-                        self.start("greet", "R")
-                else:
-                    self.set("away")
+            way = self.way = 1 if goal > self.walk_x else -1 if goal < self.walk_x else self.way
+            down = self.val.get("fours", 0)
+            arrived = self.walk_x == goal
+            self.fours_want = 0.0 if arrived and self.where == "coming" else 1.0
+            if not arrived and down > 0.6:
+                step = way * min(WALK * dt * ease((down - 0.6) / 0.3), abs(goal - self.walk_x))
+                self.walk_x += step
+                self.gait += abs(step) / STRIDE
+            fr.add("root.yaw", way * 70 * down)          # near side-on: it reads as a walk
+            fr.look = ((self.walk_x + way * 600 + ART_MID, 700, 400), 0.8)   # where it is going
+            if arrived and self.where == "going":
+                self.set("away")
+            elif arrived and down < 0.08:
+                self.where = "here"
+                if not self.greeted:              # its first time out this session
+                    self.greeted = True
+                    self.start("greet", "R")
         elif self.where == "up":                  # paw over paw, up out of the den's top
             k = min(1.0, t / 1.4)
             self.lift = -(h + tall * 0.1) * ease(k)
@@ -1156,6 +1198,16 @@ class Bear:
         self.scene(fr, now, dt)
         if self.where == "away":
             return
+        # posture: down on all fours, the back level and towards you, the head up and ahead
+        down = self.spring("fours", self.fours_want, dt, 2.4)
+        if down > 0.001:
+            beat = math.sin(self.gait * math.pi * 4)          # twice a cycle, a paw lands
+            fr.add("spine.pitch", 70 * down), fr.add("chest.pitch", 6 * down)
+            fr.add("root.y", (72 - 4 * abs(beat)) * down), fr.add("root.z", -30 * down)
+            fr.add("neck.pitch", -42 * down), fr.add("head.pitch", -26 * down)
+            fr.add("earL.pitch", -6 * down), fr.add("earR.pitch", -6 * down)
+            fr.add("spine.roll", math.sin(self.gait * math.pi * 2) * 3 * down)
+            fr.add("head.roll", -math.sin(self.gait * math.pi * 2) * 2 * down)
         # life: breathing at a varying rhythm, slow weight shifts with stillness between
         self.breath[0] += dt / self.breath[1]
         if self.breath[0] >= 1:
@@ -1226,26 +1278,39 @@ class Bear:
         pose["face"]["twitch"] = self.spring("twitch", fr.face["twitch"], dt, OMEGA["twitch"])
         pose["jaw"] = self.spring("jaw", fr.jaw, dt, OMEGA["jaw"])
         self.rig.set_pose(pose)              # body first: the paws reach from where it now is
-        # feet planted; when the hips move far enough over, a foot steps after them (walking,
-        # quicker and a little ahead)
-        walking = self.where in ("coming", "going")
+        # On all fours each paw is on the ground under its hip or shoulder, planted or swung
+        # forward by the gait; standing, the feet stay planted, and when the hips move far
+        # enough over a foot steps after them.
         root_x = self.val.get("root.x", 0) + self.walk_x
+        ground = {}
+        for limb, off in PAWS:
+            ahead, up = gait((self.gait + off) % 1)
+            s = limb[-1]
+            if limb.startswith("leg"):
+                hip, rest = self.rig.joint("thigh" + s), self.rig.rest("foot" + s)
+                ground[limb] = (hip[0] + self.way * ahead, rest[1] - up, hip[2] + 10)
+            else:
+                sh = self.rig.joint("upper" + s)
+                ground[limb] = (sh[0] + (-6 if s == "L" else 6) + self.way * ahead,
+                                ART_FEET - 52 - up, sh[2] + 8)
         for s in "LR":
             ft, other = self.feet[s], self.feet["R" if s == "L" else "L"]
-            if not ft["step"] and not other["step"] and abs(root_x - ft["x"]) > (14 if walking else 18):
-                lead = math.copysign(26, root_x - ft["x"]) if walking else 0
-                ft["step"] = [ft["x"], root_x + lead, 0.0]
+            if down > 0.5:
+                ft["x"], ft["step"] = root_x, None          # (no step to take on getting up)
+            if not ft["step"] and not other["step"] and abs(root_x - ft["x"]) > 18:
+                ft["step"] = [ft["x"], root_x, 0.0]
             lift = 0
             if ft["step"]:
-                ft["step"][2] += dt / (0.24 if walking else 0.32)
+                ft["step"][2] += dt / 0.32
                 k = ease(ft["step"][2])
                 ft["x"] = ft["step"][0] + (ft["step"][1] - ft["step"][0]) * k
                 lift = math.sin(min(1, ft["step"][2]) * math.pi) * 16
                 if ft["step"][2] >= 1:
                     ft["step"] = None
             rest = self.rig.rest("foot" + s)
-            pose["leg" + s] = (rest[0] + ft["x"], rest[1] - lift, rest[2])
-        # paws: hanging, or wherever a move reaches
+            pose["leg" + s] = lerp3((rest[0] + ft["x"], rest[1] - lift, rest[2]), ground["leg" + s],
+                                    ease(down))
+        # paws: hanging, or wherever a move reaches, or on the ground
         for s in "LR":
             goal, omega = self.rig.anchor("rest" + s), 9
             for g, off, w, om in fr.arms[s]:
@@ -1253,6 +1318,8 @@ class Bear:
                 goal = lerp3(goal, g, clamp(w, 0, 1))
                 if w > 0.3:
                     omega = om or omega
+            if down > 0.001:
+                goal, omega = lerp3(goal, ground["arm" + s], ease(down)), max(omega, 14)
             pose["arm" + s] = tuple(self.spring("paw%s.%s@" % (s, ax), goal[i], dt, omega)
                                     for i, ax in enumerate("xyz"))
         self.rig.set_pose(pose)
@@ -1318,6 +1385,9 @@ class Bear:
         for n, flat, lit in shapes:
             item = self.items.get(n)
             fill, line = self.colours(lit)
+            face = self.rig.faces[n]
+            if face.get("back") and face["feature"]:
+                line = fill                  # the inside of the face: no eyes drawn on it
             if item is None:
                 self.items[n] = self.c.create_polygon(flat, fill=fill, outline=line, width=1,
                                                       joinstyle="round", tags="bear")

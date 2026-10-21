@@ -1620,9 +1620,6 @@ class Dashboard:
             self.directions.pack_forget()
         else:
             self.directions.pack(side="left", after=self.ask)
-        if not self.chat_busy:
-            self.chat_hint.config(text="Wild: anything at all, thought through first, so answers "
-                                       "take longer." if self.wild else "")
 
     def send_chat(self, kind):
         text = self.chat_text.get("1.0", "end").strip()

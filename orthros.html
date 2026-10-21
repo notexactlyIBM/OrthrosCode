@@ -1157,7 +1157,6 @@ $("#modeFlip").onclick = () => {
   wild = !wild;
   try { localStorage.setItem("orthros-chat-mode", wild ? "wild" : "task"); } catch (e) { /* fine */ }
   showMode();
-  $("#chatHint").textContent = wild ? "Wild: anything at all, thought through first, so answers take longer." : "";
 };
 showMode();
 

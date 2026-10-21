@@ -83,7 +83,7 @@ def run(bear, seconds, t0=None, seen=None):
 class RigTest(unittest.TestCase):
     def test_every_face_has_a_part_and_every_vertex_its_bones(self):
         rig = ob.Rig()
-        self.assertEqual(len(rig.faces), len(ob.FACES))
+        self.assertEqual(len(rig.faces), 2 * len(ob.FACES))      # front and back
         for v in rig.verts:
             self.assertAlmostEqual(sum(k for _, k in v["w"]), 1.0, places=6)
 

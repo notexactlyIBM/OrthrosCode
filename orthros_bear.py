@@ -1,13 +1,16 @@
-"""Orthros the bear: a low-poly grizzly standing beside the GPU picture in Orthros's
-window. It watches you type, ponders while Orthros thinks, acts out the mood of
-each answer, now and then pokes at the picture's dots, and its lines glow faintly,
-more the busier the card is. (It had sparks along its lines too, for a day: they
-read as dots on the bear, and cost a redraw of it a few times a second.)
+"""Orthros the bear: a low-poly grizzly living in the left third of the chat card in
+Orthros's window. It walks out from behind the chat box when you come to talk,
+watches you type, ponders while Orthros thinks, acts out the mood of each answer,
+and walks back behind the box when the chat goes quiet. Now and then a salmon swims
+along the bottom of the GPU picture, and it climbs up to catch and eat it. Its
+lines glow faintly, more the busier the card is. (It had sparks along its lines
+too, for a day: they read as dots on the bear, and cost a redraw a few times a
+second. For another day it stood by the GPU picture and poked its dots.)
 
 Two halves. Rig is the puppet: the drawing's mesh (orthros_bear_mesh.py) on a
 skeleton, 2.5D -- every vertex has a depth from a rounded body shape, bones turn
 in 3D, polygons are drawn back to front -- with two-bone IK for the paws and feet.
-Bear is its brain and its drawing on a tkinter canvas it shares with the picture:
+Bear is its brain and its drawing on a tkinter canvas (its den, or the picture's):
 every part of the body has somewhere it would like to be, made of layers (posture,
 breathing, slow weight shifts, where it looks, what it is doing, any mood), and
 follows it on a spring, so nothing pops.
@@ -18,8 +21,8 @@ The model ends each chat answer with [mood: ...] and may cue moves with [do: ...
 Light on purpose (2026-10-21): tkinter takes about 35 ms to draw the whole bear,
 so it runs at 15 frames a second only while it moves or you chat and at 5 while it
 only stands, redraws only when it has moved enough to see or its glow has changed
-by a tenth, has no moves that turn it far round (no back faces to draw), and stops
-while its tab is hidden.
+by a tenth, has no moves that turn it far round (no back faces to draw), stops
+while its tab is hidden, and draws nothing while it hides behind the chat box.
 
 Coordinates are the drawing's pixels: x right, y down, z towards the viewer.
 Standard library only, like orthros.py.
@@ -603,33 +606,9 @@ def greet(c):
     c.add("head.roll", -o * 7 * k), c.add("earL.pitch", 10 * k), c.add("earR.pitch", 10 * k)
 
 
-def poke(c):
-    """Lean over and tap a dot of the GPU picture (c.goal, picked when it began)."""
-    s, o, k = c.side, c.out, c.env(0.9, 0.8)
-    tap = max(0, osc(c.t - 1.4, 2.2)) * c.window(1.4, 2.7, 0.15)
-    # the wrist, short of the dot by the claws' length, nudging in to tap it
-    c.arm(s, add(c.goal, (-o * (70 - 26 * tap), -10, 0)), None, k, 8)
-    c.add("root.x", o * c.lean * k), c.add("root.roll", o * 2.4 * k)
-    c.add("spine.roll", o * 2 * k), c.add("head.roll", o * 5 * k)
-    c.look(c.goal, k)
-    if c.t > 1.55 and c.once("tap"):
-        c.tapped()
-
-
-def watch(c):
-    """Turn to the GPU picture, head on one side, ears up, and sniff at it."""
-    k, o = c.env(0.7, 0.9), c.out
-    c.add("head.roll", -o * 12 * k), c.add("spine.pitch", 4 * k)
-    c.add("earL.pitch", 12 * k), c.add("earR.pitch", 12 * k)
-    burst = 1 if 1.2 < c.t < 2.6 and c.t % 1.1 < 0.5 else 0
-    c.face("twitch", max(0, osc(c.t, 7)) * burst * k)
-    if c.goal:
-        c.look(c.goal, k)
-
-
 ACTIONS = {"scratch_face": (3.6, scratch_face), "sniff": (4.0, sniff), "stretch": (5.0, stretch),
-           "ponder": (5.5, ponder), "sway": (4.4, sway), "nod": (1.4, nod), "greet": (2.8, greet),
-           "poke": (3.6, poke), "watch": (4.0, watch)}
+           "ponder": (5.5, ponder), "sway": (4.4, sway), "nod": (1.4, nod), "greet": (2.8, greet)}
+CUES = set(ACTIONS) | {"fish"}          # what [do: ...] may ask for: a move, or a salmon
 
 
 # ---- how it feels: (seconds, the sign over its head, the move)
@@ -730,22 +709,10 @@ def omega_of(key):
 class Clip:
     """One action or mood under way, and what its move may do to the frame."""
 
-    def __init__(self, name, dur, run, side, goal=None, lean=0, tapped=None):
+    def __init__(self, name, dur, run, side):
         self.name, self.dur, self.run, self.side = name, dur, run, side
         self.out = -1 if side == "L" else 1
         self.t, self.stop_at, self.frame = 0.0, dur, None
-        self.goal, self.lean = goal, lean            # where a poke or a look goes (art space)
-        self.tapped = tapped or (lambda: None)
-        self.flags = set()
-
-    def once(self, flag):
-        if flag in self.flags:
-            return False
-        self.flags.add(flag)
-        return True
-
-    def look(self, pt, k):
-        self.frame.look = (pt, k)
 
     def env(self, a, b):
         return ease(self.t / a) * (1 - ease((self.t - (self.stop_at - b)) / b))
@@ -785,21 +752,78 @@ class Frame:
         self.T[key] = self.T.get(key, 0) + v
 
 
+DEN_QUIET = 120                    # seconds without a word before it walks off to hide
+SALMON_EVERY = (240, 540)          # a salmon now and then, while nobody is chatting
+WALK = 170                         # how fast it walks, drawing px a second
+FISH = (("rise", 1.1), ("wait", 1.5), ("catch", 0.5), ("lift", 0.6), ("chew", 2.6),
+        ("sink", 1.0))             # the fishing trip, phase by phase (seconds)
+
+
+def fish_phase(t):
+    """(the phase of the fishing trip at t seconds, how far through it 0..1)."""
+    for name, dur in FISH:
+        if t < dur:
+            return name, t / dur
+        t -= dur
+    return "done", 1.0
+
+
+class Salmon:
+    """A salmon on the GPU picture: swims in from one side along the bottom (the top of
+    the graph below it), leaps to the bear's waiting paw, and is eaten in three bites."""
+
+    FILL, LINE = "#e07a5f", "#ffb4a2"
+    BODY = ((-0.5, 0), (-0.25, -0.18), (0.15, -0.2), (0.42, -0.08), (0.5, 0), (0.42, 0.08),
+            (0.15, 0.2), (-0.25, 0.18))
+    TAIL = ((-0.45, 0), (-0.72, -0.22), (-0.64, 0), (-0.72, 0.22))
+
+    def __init__(self, canvas, to_x, from_left):
+        self.c, self.to_x, self.dir = canvas, to_x, 1 if from_left else -1
+        w, h = canvas.winfo_width(), canvas.winfo_height()
+        self.size = max(24, h * 0.14)
+        self.start = -self.size if from_left else w + self.size
+        self.x, self.y, self.angle = self.start, h - self.size * 0.3, 0.0
+        self.bites = 0
+
+    def swim(self, k, t):
+        """k: 0..1 of the way to where it leaps; it wiggles as it goes."""
+        h = self.c.winfo_height()
+        self.x = self.start + (self.to_x - self.start) * k
+        self.y = h - self.size * 0.3 + math.sin(t * 9) * 1.5
+        self.angle = math.sin(t * 9) * 0.08
+
+    def draw(self):
+        self.c.delete("salmon")
+        if self.bites >= 3:
+            return
+        length = self.size * (1 - 0.28 * self.bites)
+        ca, sa = math.cos(self.angle), math.sin(self.angle)
+        pts = lambda shape: [v for x, y in shape for v in (
+            self.x + (x * self.dir * ca - y * sa) * length, self.y + (x * self.dir * sa + y * ca) * length)]
+        self.c.create_polygon(pts(self.TAIL), fill=self.FILL, outline=self.LINE, tags="salmon")
+        self.c.create_polygon(pts(self.BODY), fill=self.FILL, outline=self.LINE, tags="salmon")
+        ex, ey = pts(((0.3, -0.05),))
+        self.c.create_oval(ex - 1.5, ey - 1.5, ex + 1.5, ey + 1.5, fill="#2a1410", outline="",
+                           tags="salmon")
+
+
 class Bear:
-    """The bear on a tkinter canvas it shares with the GPU picture. The window calls
-    heard(), typing(), thinking() and answered() from the chat, and sets energy (how
-    busy the card is, 0 to 1) each frame of the picture.
+    """Orthros the bear. Its den is the left third of the chat card (a canvas of its
+    own, `den`); the GPU picture's canvas (`stream`) is where salmon swim.
 
-    spot(w, h) says where it stands: (x of its feet's middle, y of its feet, scale).
-    toy, the GPU picture, if there is one: center() -> (x, y) on the canvas or None,
-    nearest(x, y) -> (dot, x, y) or None, poke(dot)."""
+    It is away, hidden behind the chat box, until you come to the chat: then it walks
+    out (waving, the first time), stays while you talk, and walks back behind the box
+    after DEN_QUIET seconds without a word. Now and then, while nobody is chatting, a
+    salmon swims along the bottom of the GPU picture and the bear climbs up out of the
+    chat card to catch it, eats it, and goes back. While you chat it goes fishing only
+    when asked (fish(), from a [do: ...] cue or your own words).
 
-    def __init__(self, canvas, line="#e8f1ff", fill="#0d1524", spot=None, toy=None,
-                 visible=None):
-        self.c = canvas
+    The window calls summon() on any sign of you, heard(), typing(), thinking() and
+    answered(), and sets energy (how busy the card is, 0 to 1) each frame of the picture."""
+
+    def __init__(self, den, stream=None, line="#e8f1ff", fill="#0d1524", visible=None):
+        self.den, self.stream, self.c = den, stream, den
         self.line, self.fill = line, fill
-        self.spot = spot or (lambda w, h: (w / 2, h - 4, min(h * 0.8 / ART_TALL, w * 0.95 / ART_W)))
-        self.toy = toy
         self.visible = visible or (lambda: True)
         self.clock = time.monotonic                   # (the tests run it on a clock of their own)
         self.rig = Rig()
@@ -808,9 +832,13 @@ class Bear:
         self.val, self.vel = {}, {}
         self.drawn, self.order, self.o = None, [], None
         self.energy, self.glow = 0.0, 0.0
-        self.poked = None                             # the dot a poke is going for
+        self.where, self.since = "away", self.clock()  # away coming here going up fishing down
+        self.walk_x, self.lift, self.greeted = 0.0, 0.0, False
+        self.salmon, self.fish_x, self.then_fish, self.fish_side = None, 0.0, False, "L"
+        now = self.clock()
+        self.active_at = -1e9
+        self.next_salmon = now + random.uniform(*SALMON_EVERY)
         self.reset()
-        self.start("greet", "L")
         self.job = None
         self.tick()
 
@@ -827,53 +855,120 @@ class Bear:
         self.breath = [0.0, 4.2]
         self.feet = {"L": {"x": 0, "step": None}, "R": {"x": 0, "step": None}}
         self.emote = None
-        self.busy_seen = 0.0
         self.last = now
 
     # ---- what the window tells it
 
+    def summon(self):
+        """You are at the chat: it comes out, or stays a while longer."""
+        self.active_at = self.clock()
+        if self.where in ("away", "going"):
+            self.set("coming")
+
     def heard(self):
+        self.summon()
         self.heard_at = self.clock()
-        if not self.mood:
+        if not self.mood and self.where == "here":
             self.start("nod")
 
     def typing(self):
+        self.summon()
         self.typed_at = self.clock()
-        if self.action and self.action.name in ("stretch", "poke"):
+        if self.action and self.action.name == "stretch":
             self.action.stop_at = min(self.action.stop_at, self.action.t + 1.2)
 
     def thinking(self, on):
         self.thinking_on = bool(on)
         if on:
+            self.summon()
             self.next_action = min(self.next_action, self.clock() + random.uniform(1.2, 2.5))
 
     def answered(self, mood=None, acts=()):
-        """Orthros answered: a move it cued, then its mood (one of MOODS); or a nod."""
+        """Orthros answered: a move it cued, then its mood (one of MOODS); or a nod. A
+        salmon asked for comes after."""
+        self.summon()
         self.answered_at = self.clock()
         self.look["until"] = 0
+        acts = list(acts or ())
+        self.then_fish = self.then_fish or "fish" in acts
         mood = mood if mood in MOOD else None
-        act = next((a for a in acts or () if a in ACTIONS), None)
-        if act and self.start(act):
+        act = next((a for a in acts if a in ACTIONS), None)
+        if act:
+            self.start(act)
             self.then = mood
-            return
-        if not (mood and self.feel(mood)):
+        elif mood:
+            self.feel(mood)
+        elif not self.then_fish:
             self.start("nod")
+
+    def fish(self):
+        """Up out of the chat card to the GPU picture, to catch a salmon."""
+        if self.where in ("up", "fishing") or not self.stream:
+            return
+        self.set("fishing" if self.where == "away" else "up")
+
+    # ---- where it is
+
+    def set(self, where):
+        now, self.since, was = self.clock(), self.clock(), self.where
+        self.where = where
+        if where == "coming":
+            if was != "going":                       # from behind the box, at its edge
+                self.home()
+                self.walk_x = self.offstage()
+                for f in self.feet.values():
+                    f["x"], f["step"] = self.walk_x, None
+        elif where == "fishing":
+            self.home(self.stream)
+            w = self.stream.winfo_width()
+            self.fish_x = random.uniform(0.25, 0.75) * w
+            self.fish_side = random.choice("LR")      # the paw that catches, on the salmon's side
+            self.salmon = Salmon(self.stream, 0, self.fish_side == "L")
+            self.walk_x, self.lift = 0.0, 0.0
+            for f in self.feet.values():
+                f["x"], f["step"] = 0.0, None
+        elif where == "down":
+            self.home()
+            self.walk_x = 0.0
+            for f in self.feet.values():
+                f["x"], f["step"] = 0.0, None
+        elif where == "away":
+            self.home()
+            self.next_salmon = now + random.uniform(*SALMON_EVERY)
+
+    def home(self, canvas=None):
+        """Draw on the den (or `canvas`) from now on: what it drew elsewhere goes."""
+        self.c.delete("bear", "extra", "salmon")
+        self.items, self.fills, self.placed, self.order, self.drawn = {}, {}, {}, [], None
+        self.c, self.o = canvas or self.den, None
+
+    def offstage(self):
+        """How far right (drawing px) it stands when hidden behind the chat box."""
+        w, h = self.den.winfo_width(), self.den.winfo_height()
+        scale = self.den_scale(w, h)
+        return (w / 2 + 0.32 * ART_TALL * scale + 8) / scale
+
+    @staticmethod
+    def den_scale(w, h):
+        return max(0.05, min(h * 0.86 / ART_TALL, w * 0.8 / ART_W))
+
+    def spot(self, w, h):
+        """(x of its feet's middle, y of its feet, scale) on the canvas it is on now."""
+        if self.c is self.stream:
+            scale = h * 0.85 / ART_TALL
+            return self.fish_x, h + self.lift, scale
+        return w / 2, h - 3 + self.lift, self.den_scale(w, h)
+
+    def interactive(self, now):
+        return self.thinking_on or now - self.active_at < DEN_QUIET
 
     # ---- starting things
 
     def start(self, name, side=None):
-        """Begin a move. A poke needs a dot in reach; without one it watches instead."""
         dur, run = ACTIONS[name]
-        goal, lean = None, 0
-        if name in ("poke", "watch"):
-            side = self.toy_side()
-            goal, lean = self.toy_goal(name, side)
-            if name == "poke" and goal is None:
-                return self.start("watch") if self.toy and self.o else False
         if self.action:
             self.action.stop_at = min(self.action.stop_at, self.action.t + 0.35)
-        self.action = Clip(name, dur, run, side or random.choice("LR"), goal, lean,
-                           tapped=lambda: self.tap(goal))
+        self.action = Clip(name, dur, run, side or random.choice("LR"))
         self.cool[name] = self.clock()
         return True
 
@@ -881,7 +976,7 @@ class Bear:
         dur, glyph, run = MOOD[name]
         if self.action:
             self.action.stop_at = min(self.action.stop_at, self.action.t + 0.4)
-        self.mood = Clip(name, dur, run, self.toy_side() or "L")
+        self.mood = Clip(name, dur, run, "R")       # the chat is to its right
         self.mood.t = -0.25
         if glyph:
             self.emote = {"glyph": glyph, "at": self.clock() + 0.15}
@@ -889,24 +984,24 @@ class Bear:
 
     def decide(self, now):
         """Pick what to do next, now and then, from what's going on."""
-        if self.action or self.mood:
+        if self.where != "here" or self.action or self.mood:
             return
-        # the card got busy all at once: it turns to look
-        if self.energy - self.busy_seen > 0.25 and now - self.cool.get("watch", -1e9) > 40:
-            return self.start("watch")
+        if self.then_fish:
+            self.then_fish = False
+            return self.fish()
+        if not self.interactive(now):
+            return self.set("going")
         if now < self.next_action:
             return
         self.next_action = now + random.uniform(12, 25)     # a calm bear is a cheap one
         if now - self.typed_at < 5 or now - self.heard_at < 2.5 or now - self.answered_at < 4:
             return
         ok = lambda name, secs: now - self.cool.get(name, -1e9) > secs
-        toy = 1 if self.toy and self.o else 0
         weights = ({"ponder": 2 * ok("ponder", 45), "sway": 3 * ok("sway", 12),
-                    "sniff": 2 * ok("sniff", 20), "watch": toy * ok("watch", 30)}
+                    "sniff": 2 * ok("sniff", 20)}
                    if self.thinking_on else
                    {"scratch_face": 0.8 * ok("scratch_face", 180), "sniff": 2 * ok("sniff", 30),
-                    "stretch": 1 * ok("stretch", 200), "sway": 1 * ok("sway", 25),
-                    "poke": 2 * toy * ok("poke", 45), "watch": 2 * toy * ok("watch", 30)})
+                    "stretch": 1 * ok("stretch", 200), "sway": 1 * ok("sway", 25)})
         pick = [(k, w) for k, w in weights.items() if w > 0]
         if pick:
             r = random.uniform(0, sum(w for _, w in pick))
@@ -915,43 +1010,6 @@ class Bear:
                 if r <= 0:
                     return self.start(k)
             self.start(pick[-1][0])
-
-    # ---- the GPU picture
-
-    def to_art(self, x, y, z=0.0):
-        ox, feet, scale = self.o
-        return (ART_MID + (x - ox) / scale, ART_FEET + (y - feet) / scale, z)
-
-    def toy_side(self):
-        """Which paw is nearer the picture: 'L' or 'R' (None without one)."""
-        c = self.toy and self.o and self.toy.center()
-        return ("R" if c[0] > self.o[0] else "L") if c else None
-
-    def toy_goal(self, name, side):
-        """(art point, lean) for a poke at the dot nearest its paw, or for a look at the
-        picture's middle; (None, 0) when there is no picture, or no dot in reach."""
-        c = self.toy and self.o and self.toy.center()
-        if not c:
-            return None, 0
-        if name == "watch":
-            return self.to_art(c[0], c[1], 200), 0
-        shoulder = self.rig.joint("upper" + side)
-        sx = self.o[0] + (shoulder[0] - ART_MID) * self.o[2]
-        sy = self.o[1] + (shoulder[1] - ART_FEET) * self.o[2]
-        out = 1 if side == "R" else -1
-        dot = self.toy.nearest(sx + out * 260 * self.o[2], sy + 60 * self.o[2])
-        if not dot:
-            return None, 0
-        goal = self.to_art(dot[1], dot[2], 60)
-        far = math.dist(goal, shoulder) - 330          # an arm and a paw reach about that far
-        if far > 110:                                  # leaning and a step help only so much
-            return None, 0
-        self.poked = dot[0]
-        return goal, clamp(far + 20, 0, 110)
-
-    def tap(self, goal):
-        if self.toy and goal is not None and self.poked is not None:
-            self.toy.poke(self.poked)
 
     # ---- one frame
 
@@ -967,29 +1025,137 @@ class Bear:
 
     def lively(self, now):
         """Is it doing something, or is the chat going? Else it only stands and breathes."""
-        return bool(self.action or self.mood or self.emote or self.thinking_on or
-                    now - max(self.typed_at, self.heard_at, self.answered_at) < 6)
+        return bool(self.where != "here" or self.action or self.mood or self.emote or
+                    self.thinking_on or now - max(self.typed_at, self.heard_at, self.answered_at) < 6)
 
     def tick(self):
         now = self.clock()
-        self.job = self.c.after(1000 // (FPS if self.lively(now) else IDLE_FPS), self.tick)
+        rate = 1 if self.where == "away" else FPS if self.lively(now) else IDLE_FPS
+        self.job = self.c.after(1000 // rate, self.tick)
         if not self.visible():
             self.last = now
+            return
+        if self.where == "away":                 # behind the chat box: nothing to draw
+            self.last = now
+            if self.stream and now > self.next_salmon and not self.interactive(now):
+                self.fish()
             return
         try:
             self.step(now)
         except Exception:                # a bear must never take the window down
             self.c.after_cancel(self.job)
-            self.c.delete("bear", "extra")
+            self.c.delete("bear", "extra", "salmon")
+
+    def scene(self, fr, now, dt):
+        """Where it is going, laid over everything else: walking in or out, climbing up
+        out of the den or back down into it, or the fishing trip."""
+        t = now - self.since
+        w, h = self.c.winfo_width(), self.c.winfo_height()
+        o = self.o = self.o or self.spot(w, h)       # (none yet on a canvas it just came to)
+        tall = ART_TALL * o[2]
+        if self.where in ("coming", "going"):
+            goal = 0.0 if self.where == "coming" else self.offstage()
+            way = 1 if goal > self.walk_x else -1
+            self.walk_x += way * min(WALK * dt, abs(goal - self.walk_x))
+            stride = (self.walk_x / 60) * math.pi
+            fr.add("root.yaw", way * 24), fr.add("root.y", -abs(math.sin(stride)) * 6)
+            fr.add("head.yaw", -way * 10), fr.add("spine.roll", math.sin(stride) * 2)
+            for s, sign in (("L", 1), ("R", -1)):
+                fr.arms[s].append((add(self.rig.anchor("rest" + s), (0, -6, sign * 26 * math.sin(stride))),
+                                   None, 0.8, 9))
+            fr.look = ((self.walk_x + way * 600 + ART_MID, 420, 300), 0.8)   # where it is going
+            if self.walk_x == goal and not any(f["step"] for f in self.feet.values()):
+                if self.where == "coming":
+                    self.where = "here"
+                    if not self.greeted:          # its first time out this session
+                        self.greeted = True
+                        self.start("greet", "R")
+                else:
+                    self.set("away")
+        elif self.where == "up":                  # paw over paw, up out of the den's top
+            k = min(1.0, t / 1.4)
+            self.lift = -(h + tall * 0.1) * ease(k)
+            self.climb(fr, t)
+            if k >= 1:
+                self.set("fishing")
+        elif self.where == "down":                # back into the den from its top
+            k = min(1.0, t / 1.2)
+            self.lift = -(h + tall * 0.1) * (1 - ease(k))
+            self.climb(fr, t, 1 - k)
+            if k >= 1:
+                self.lift, self.where = 0.0, "here"
+        elif self.where == "fishing":
+            self.fishing(fr, t, tall)
+
+    def climb(self, fr, t, k=1.0):
+        """Reaching up paw over paw."""
+        for s, ph in (("L", 0), ("R", 0.5)):
+            reach = 0.5 + 0.5 * math.sin((t * 2.2 + ph) * math.pi * 2)
+            fr.arms[s].append((add(self.rig.anchor("up" + s), (0, -60 * reach - 40, 10)), None, k, 12))
+        fr.add("head.pitch", -14 * k), fr.add("spine.pitch", -4 * k)
+        fr.add("root.roll", math.sin(t * 2.2 * math.pi * 2) * 3 * k)
+
+    def fishing(self, fr, t, tall):
+        """Up from below the GPU picture's bottom edge: wait, catch the leaping salmon,
+        eat it in three bites, and sink back down."""
+        fish, h = self.salmon, self.stream.winfo_height()
+        phase, k = fish_phase(t)
+        s = self.fish_side
+        o = self.o or self.spot(self.stream.winfo_width(), h)
+        paw = self.rig.project(self.rig.joint("paw" + s), o)
+        out = -1 if s == "L" else 1
+        self.lift = tall * (1.05 - 0.6 * ease(k) if phase == "rise" else 0.45 + 0.6 * ease(k)
+                            if phase == "sink" else 1.05 if phase == "done" else 0.45)
+        ready = add(self.rig.anchor("up" + s), (out * 40, 60, 40))
+        if phase in ("rise", "wait"):
+            fish.to_x = paw[0] + out * fish.size
+            fish.swim(min(1.0, t / (FISH[0][1] + FISH[1][1])), t)
+            fr.arms[s].append((ready, None, ease(min(1.0, t / 1.4)), 8))
+            fr.look = (self.to_art(fish.x, fish.y, 200), 0.9)
+            fr.add("earL.pitch", 12), fr.add("earR.pitch", 12)
+        elif phase == "catch":                    # it leaps, and the paw comes down on it
+            arc = math.sin(k * math.pi) * h * 0.18
+            fish.x = fish.to_x + (paw[0] - fish.to_x) * k
+            fish.y = h - fish.size * 0.3 + (paw[1] - h) * k - arc
+            fish.angle = -out * (0.8 - 1.6 * k)
+            grab = self.to_art(fish.x, fish.y, 60)
+            fr.arms[s].append((lerp3(ready, grab, ease(k)), None, 1, 16))
+            fr.look = (grab, 1)
+        else:
+            if phase in ("lift", "chew"):        # paw to muzzle, and eat
+                mouth = self.rig.anchor("muzzle" + s)
+                fr.arms[s].append((add(mouth, (out * 30, 10, 30)), None,
+                                   ease(k) if phase == "lift" else 1, 10))
+                fish.x, fish.y = paw
+                fish.angle = math.pi / 2 * out
+                if phase == "chew":
+                    fr.jaw = max(fr.jaw, 0.25 + 0.45 * max(0, math.sin(t * 7)))
+                    fr.face["blink"] = max(fr.face["blink"], 0.5)
+                    fish.bites = min(3, int(k * 3.4))
+                    fr.add("head.pitch", 6)
+            if phase in ("sink", "done"):
+                fish.bites = 3
+            if phase == "chew" and k > 0.9 and not self.emote:
+                self.emote = {"glyph": "♥", "at": self.clock()}
+        if phase == "done":
+            self.salmon = None
+            self.c.delete("salmon")
+            self.set("down" if self.interactive(self.clock()) else "away")
+
+    def to_art(self, x, y, z=0.0):
+        ox, feet, scale = self.o
+        return (ART_MID + (x - ox) / scale, ART_FEET + (y - feet) / scale, z)
 
     def step(self, now):
         dt = clamp(now - self.last, 0, 0.25)
         self.last = now
         t = now
         self.glow += (self.energy - self.glow) * min(1, dt / 1.5)
-        self.busy_seen += (self.energy - self.busy_seen) * min(1, dt / 4)   # lags: a jump shows
         self.decide(now)
         fr = Frame()
+        self.scene(fr, now, dt)
+        if self.where == "away":
+            return
         # life: breathing at a varying rhythm, slow weight shifts with stillness between
         self.breath[0] += dt / self.breath[1]
         if self.breath[0] >= 1:
@@ -1033,7 +1199,7 @@ class Bear:
                     if self.then:                    # the mood that came with a cued move
                         self.feel(self.then)
                         self.then = None
-        # where it looks: the picture, you, the chat below, or off somewhere
+        # where it looks: the chat beside it, you, or off somewhere
         head = self.rig.joint("head")
         look = self.look_target(now, head)
         if fr.look:
@@ -1055,19 +1221,23 @@ class Bear:
                 continue
             part, axis = key.split(".")
             pose.setdefault(part, {})[axis] = v
+        pose.setdefault("root", {})["x"] = pose.get("root", {}).get("x", 0) + self.walk_x
         pose["face"]["blink"] = self.spring("blink", fr.face["blink"], dt, OMEGA["blink"])
         pose["face"]["twitch"] = self.spring("twitch", fr.face["twitch"], dt, OMEGA["twitch"])
         pose["jaw"] = self.spring("jaw", fr.jaw, dt, OMEGA["jaw"])
         self.rig.set_pose(pose)              # body first: the paws reach from where it now is
-        # feet planted; when the hips move far enough over, a foot steps after them
-        root_x = self.val.get("root.x", 0)
+        # feet planted; when the hips move far enough over, a foot steps after them (walking,
+        # quicker and a little ahead)
+        walking = self.where in ("coming", "going")
+        root_x = self.val.get("root.x", 0) + self.walk_x
         for s in "LR":
             ft, other = self.feet[s], self.feet["R" if s == "L" else "L"]
-            if not ft["step"] and not other["step"] and abs(root_x - ft["x"]) > 18:
-                ft["step"] = [ft["x"], root_x, 0.0]
+            if not ft["step"] and not other["step"] and abs(root_x - ft["x"]) > (14 if walking else 18):
+                lead = math.copysign(26, root_x - ft["x"]) if walking else 0
+                ft["step"] = [ft["x"], root_x + lead, 0.0]
             lift = 0
             if ft["step"]:
-                ft["step"][2] += dt / 0.32
+                ft["step"][2] += dt / (0.24 if walking else 0.32)
                 k = ease(ft["step"][2])
                 ft["x"] = ft["step"][0] + (ft["step"][1] - ft["step"][0]) * k
                 lift = math.sin(min(1, ft["step"][2]) * math.pi) * 16
@@ -1087,16 +1257,16 @@ class Bear:
                                     for i, ax in enumerate("xyz"))
         self.rig.set_pose(pose)
         self.draw(now)
+        if self.salmon:
+            self.salmon.draw()
 
     def look_target(self, now, head):
         w, h = self.c.winfo_width(), self.c.winfo_height()
-        below = self.to_art(w * 0.55, h * 1.6, 380) if self.o else (ART_MID, 1500, 380)
+        chat = self.to_art(w * 1.8, h * 0.5, 380) if self.o else (ART_MID + 900, 500, 380)
         if now - self.typed_at < 3.5:
-            return below                                      # the box you type in, below
+            return self.to_art(w * 1.6, h * 1.05, 380) if self.o else chat   # the box you type in
         if now > self.look["until"]:
-            toy = 3 if self.toy and self.o and self.toy.center() else 0
-            weights = {"chat": 8 if now - self.answered_at < 8 else 1.5, "toy": toy,
-                       "viewer": 2.5, "away": 1}
+            weights = {"chat": 8 if now - self.answered_at < 8 else 3, "viewer": 2.5, "away": 1}
             r, what = random.uniform(0, sum(weights.values())), "viewer"
             for what, wt in weights.items():
                 r -= wt
@@ -1106,11 +1276,7 @@ class Bear:
                          "pt": (random.uniform(-300, 300), random.uniform(-260, 40), 900)}
         what = self.look["what"]
         if what == "chat":
-            return below
-        if what == "toy":
-            c = self.toy.center() if self.toy and self.o else None
-            if c:
-                return self.to_art(c[0], c[1], 200)
+            return chat
         if what == "away":
             return add(head, self.look["pt"])
         return (head[0], head[1] + 40, VIEWER)
@@ -1140,8 +1306,10 @@ class Bear:
             # a drifting head -- is drawn now and then, and movement at full rate.
             moved = max(max(abs(p[0] - q[0]), abs(p[1] - q[1]))
                         for p, q in zip(self.rig.out, self.drawn[3])) * o[2]
-            calm = 0.4 if self.lively(now) else 1.0
-            if moved < calm or (moved < 1.5 and now - self.drawn[2] < calm):
+            # (2026-10-21: while it moved, small moves were drawn only every 0.4 s, so a
+            # slow turn of the head played at two or three frames a second and looked jerky)
+            if self.lively(now) and moved < 0.4 or not self.lively(now) and (
+                    moved < 1.0 or moved < 1.5 and now - self.drawn[2] < 1.0):
                 return False
         shapes = self.rig.shapes(o)
         flats = {n: flat for n, flat, _ in shapes}

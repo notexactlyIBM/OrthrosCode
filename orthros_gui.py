@@ -18,6 +18,7 @@ import json
 import math
 import os
 import queue
+import re
 import sys
 import threading
 import time
@@ -27,7 +28,6 @@ import urllib.request
 
 import tkinter as tk
 import tkinter.font as tkfont
-import types
 from tkinter import filedialog, messagebox
 
 import orthros_bear
@@ -478,12 +478,16 @@ class Dashboard:
     # ---- operate
 
     def build_operate(self, page):
-        page.columnconfigure(0, weight=1, uniform="half")
-        page.columnconfigure(1, weight=1, uniform="half")
-        page.rowconfigure(0, weight=1)
+        # Two halves with a divider you can drag; a new window size puts it back in the
+        # middle, as it was before it could be dragged.
+        self.split = tk.PanedWindow(page, orient="horizontal", bg=BG, bd=0, sashwidth=px(14),
+                                    sashrelief="flat", showhandle=False, opaqueresize=True)
+        self.split.pack(fill="both", expand=True)
+        self.split_size = None
+        self.split.bind("<Configure>", self.recenter_split)       # (a drag does not resize it)
 
-        ops = panel(page)
-        ops.grid(row=0, column=0, sticky="nsew", padx=(0, 7))
+        ops = panel(self.split)
+        self.split.add(ops, minsize=px(420), stretch="always")
         self.ops = ops
         modes = tk.Frame(ops, bg=PANEL)
         modes.pack(fill="x")
@@ -563,13 +567,21 @@ class Dashboard:
         self.build_turn_feed(ops)
         self.pane_shown = None
 
-        side = tk.Frame(page, bg=BG)
-        side.grid(row=0, column=1, sticky="nsew", padx=(7, 0))
+        side = tk.Frame(self.split, bg=BG)
+        self.split.add(side, minsize=px(420), stretch="always")
         self.build_gpu(side)
         self.build_chat(side)
 
+    def recenter_split(self, event):
+        """The window changed size: the divider goes back to the middle."""
+        if event.width == self.split_size:
+            return
+        self.split_size = event.width
+        self.root.after_idle(lambda: self.split.sash_place(0, max(0, event.width - px(14)) // 2, 0))
+
+    def build_agents(self, page):
+        """A and B, side by side: on the Diagnostics tab."""
         agents = tk.Frame(page, bg=BG)
-        agents.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(14, 0))
         heading(agents, "The agents").pack(anchor="w", pady=(0, 8))
         row = tk.Frame(agents, bg=BG)
         row.pack(fill="x")
@@ -582,6 +594,7 @@ class Dashboard:
             self.cards[name] = card
         self.swap = label(row, "⇆", FAINT, (BODY, 18), bg=BG)
         self.swap.grid(row=0, column=1, padx=10)
+        return agents
 
     def build_self_pane(self, pane):
         row = tk.Frame(pane, bg=PANEL)
@@ -745,17 +758,11 @@ class Dashboard:
         self.gpu_stat.pack(fill="x", pady=(6, 0))
         self.gpu_state = {}
         self.lattice_setup()
-        # Orthros the bear stands left of the picture and plays with it (orthros_bear.py).
-        self.bear = orthros_bear.Bear(
-            self.gpu, line=orthros_bear.mix(INK, PANEL, 0.2), fill=PANEL, spot=self.bear_spot,
-            toy=types.SimpleNamespace(center=self.lattice_center, nearest=self.lattice_nearest,
-                                      poke=self.lattice_poke),
-            visible=lambda: self.tab == "operate" and self.gpu.winfo_ismapped())
 
     def build_chat(self, side):
-        box = panel(side)
-        box.pack(fill="both", expand=True, pady=(14, 0))
-        head = tk.Frame(box, bg=PANEL)
+        outer = panel(side)
+        outer.pack(fill="both", expand=True, pady=(14, 0))
+        head = tk.Frame(outer, bg=PANEL)
         head.pack(fill="x")
         heading(head, "Talk to Orthros",
                 "TASK, Ask: an answer from Orthros's own records, put into words by the model.\n\n"
@@ -764,6 +771,20 @@ class Dashboard:
                 "WILD, Ask: anything at all. The same model thinks it through first, so answers "
                 "take longer, and may look one thing up on the web.").pack(side="left")
         button(head, "Clear", self.clear_chat, font=(DISPLAY, 8, "bold")).pack(side="right")
+        # A third for Orthros the bear's den (empty while it hides behind the chat box),
+        # two thirds for the chat (orthros_bear.py).
+        body = tk.Frame(outer, bg=PANEL)
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(0, weight=1, uniform="third")
+        body.columnconfigure(1, weight=2, uniform="third")
+        body.rowconfigure(0, weight=1)
+        den = tk.Canvas(body, width=1, height=1, bg=PANEL, highlightthickness=0)
+        den.grid(row=0, column=0, sticky="nsew", pady=(8, 0))
+        box = tk.Frame(body, bg=PANEL)
+        box.grid(row=0, column=1, sticky="nsew")
+        self.bear = orthros_bear.Bear(
+            den, stream=self.gpu, line=orthros_bear.mix(INK, PANEL, 0.2), fill=PANEL,
+            visible=lambda: self.tab == "operate" and den.winfo_ismapped())
         # The box to type in and its buttons keep their place; the conversation takes the rest.
         self.chat_hint = label(box, "", SERVE, (BODY, 9), anchor="w")
         self.chat_hint.pack(side="bottom", fill="x", pady=(6, 0))
@@ -806,15 +827,22 @@ class Dashboard:
         self.target_menu.pack(side="left")
         self.has_task_target = False
 
+        def on_enter(widget):               # the pointer anywhere on the card brings the bear
+            widget.bind("<Enter>", lambda e: self.bear.summon(), add="+")
+            for child in widget.winfo_children():
+                on_enter(child)
+        on_enter(outer)
+
     # ---- diagnostics
 
     def build_diag(self, page):
         page.columnconfigure(0, weight=1, uniform="d")
         page.columnconfigure(1, weight=1, uniform="d")
-        page.rowconfigure(1, weight=1)
+        page.rowconfigure(2, weight=1)
+        self.build_agents(page).grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 14))
 
         hk = panel(page)
-        hk.grid(row=0, column=0, sticky="nsew", padx=(0, 7))
+        hk.grid(row=1, column=0, sticky="nsew", padx=(0, 7))
         head = tk.Frame(hk, bg=PANEL)
         head.pack(fill="x")
         heading(head, "Housekeeping", "What interrupted work and stray clicks leave behind. "
@@ -832,7 +860,7 @@ class Dashboard:
             self.hk.tag_config(name, foreground=color, font=(DISPLAY, 8, "bold"))
 
         tools = panel(page)
-        tools.grid(row=0, column=1, sticky="nsew", padx=(7, 0))
+        tools.grid(row=1, column=1, sticky="nsew", padx=(7, 0))
         heading(tools, "Tools").pack(anchor="w")
         self.catalog = tk.Text(tools, height=12, bg=PANEL, fg=INK, relief="flat", wrap="word",
                                font=(BODY, 9), highlightthickness=0, spacing3=3)
@@ -842,7 +870,7 @@ class Dashboard:
         self.catalog.tag_config("what", foreground=DIM)
 
         events = panel(page)
-        events.grid(row=1, column=0, sticky="nsew", padx=(0, 7), pady=(14, 0))
+        events.grid(row=2, column=0, sticky="nsew", padx=(0, 7), pady=(14, 0))
         heading(events, "Recent").pack(anchor="w")
         self.events = tk.Text(events, bg=PANEL, fg=INK, relief="flat", wrap="word",
                               font=(BODY, 9), highlightthickness=0, spacing3=4)
@@ -852,7 +880,7 @@ class Dashboard:
             self.events.tag_config(kind, foreground=color)
 
         right = tk.Frame(page, bg=BG)
-        right.grid(row=1, column=1, sticky="nsew", padx=(7, 0), pady=(14, 0))
+        right.grid(row=2, column=1, sticky="nsew", padx=(7, 0), pady=(14, 0))
         bal = panel(right)
         bal.pack(fill="x")
         heading(bal, "Balance", "Each turn's length leans towards evening out the time and "
@@ -886,7 +914,7 @@ class Dashboard:
         self.scores.pack(anchor="w", pady=(8, 0))
 
         raw = panel(page)
-        raw.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(14, 0))
+        raw.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=(14, 0))
         head = tk.Frame(raw, bg=PANEL)
         head.pack(fill="x")
         self.raw_toggle = button(head, "▸  RAW OUTPUT", self.toggle_raw,
@@ -934,33 +962,10 @@ class Dashboard:
         self.full = None
         self.gpu.bind("<Double-Button-1>", lambda e: self.toggle_full())
         self.angle, self.lit_shown, self.last_draw = 0.6, 0.0, time.time()
-        self.spin, self.poked, self.dot_xy = 0.0, {}, []      # the bear's pokes, and the dots
 
     def dots_on(self, canvas):
         """Dots only: no cube edges, no outline."""
         return [canvas.create_oval(0, 0, 0, 0, fill=FAINT, outline="") for _ in self.pts]
-
-    def bear_spot(self, w, h):
-        """Where the bear stands on the picture's canvas: left of the cube, as tall as
-        the room there allows. (x of its feet's middle, y of its feet, scale)."""
-        room = w / 2 - 0.5 * min(w, h)            # from the canvas's left edge to the cube's
-        tall = max(min(h * 0.86, room / 0.6), h * 0.45)
-        return max(tall * 0.3, room / 2), h - 3, tall / orthros_bear.ART_TALL
-
-    def lattice_center(self):
-        w, h = self.gpu.winfo_width(), self.gpu.winfo_height()
-        return (w / 2, h / 2) if w >= 10 else None
-
-    def lattice_nearest(self, x, y):
-        """(dot, x, y) of the front dot nearest a point on the panel's canvas."""
-        front = [(math.hypot(px_ - x, py_ - y), i, px_, py_)
-                 for i, (px_, py_, z) in enumerate(self.dot_xy) if z < 0.2]
-        return min(front)[1:] if front else None
-
-    def lattice_poke(self, dot):
-        """The bear tapped a dot: it flares, and the cube turns faster for a moment."""
-        self.poked[dot] = time.time()
-        self.spin += 0.9
 
     def toggle_full(self):
         """Double-click: the lattice full screen, on the monitor it is on. Double-click
@@ -999,31 +1004,24 @@ class Dashboard:
         now_t = time.time()
         dt, self.last_draw = min(0.2, now_t - self.last_draw), now_t
         g = self.gpu_state or {}
-        self.angle += dt * (0.06 + self.spin)
-        self.spin *= math.exp(-dt / 1.5)
+        self.angle += dt * 0.06
         util = max(0.0, min(100.0, float(g.get("util") or 0)))
         self.lit_shown += (util / 100 * len(self.pts) - self.lit_shown) * min(1, dt / 0.6)
         self.bear.energy = self.lit_shown / len(self.pts)     # its glow follows the same
         ca, sa, ct, st = math.cos(self.angle), math.sin(self.angle), math.cos(.42), math.sin(.42)
         lit = set(self.lit_order[:int(round(self.lit_shown))])
-        flared = {i for i, at in self.poked.items() if now_t - at < 0.7}
-        self.poked = {i: self.poked[i] for i in flared}
         for c, dots in shown:
             w, h = c.winfo_width(), c.winfo_height()
             scale, cx, cy = min(w, h) * 0.36, w / 2, h / 2
             grow = max(1.0, min(w, h) / px(150))
-            if c is self.gpu:
-                self.dot_xy = []
             for i, (item, (x, y, z)) in enumerate(zip(dots, self.pts)):
                 x1, z1 = x * ca + z * sa, -x * sa + z * ca
                 y1, z2 = y * ct - z1 * st, y * st + z1 * ct
                 k = 6 / (6 + z2)
                 px_, py_ = cx + x1 * scale * k, cy - y1 * scale * k
-                r = (4.2 if i in flared else 2.6 if i in lit else 1.3) * k * grow
+                r = (2.6 if i in lit else 1.3) * k * grow
                 c.coords(item, px_ - r, py_ - r, px_ + r, py_ + r)
-                c.itemconfig(item, fill=SERVE if i in flared else A_C if i in lit else "#34405a")
-                if c is self.gpu:
-                    self.dot_xy.append((px_, py_, z2))
+                c.itemconfig(item, fill=A_C if i in lit else "#34405a")
             if c is not self.gpu:
                 c.coords("busy", w - px(40), px(30))
                 c.itemconfig("busy", text="%d%%" % round(util))
@@ -1647,7 +1645,10 @@ class Dashboard:
             enable(self.direct, True)
             self.chat_hint.config(text="Could not send: %s" % r["error"] if r.get("error") else "")
             self.bear.thinking(False)
-            self.bear.answered("confused" if r.get("error") else r.get("mood"), r.get("acts"))
+            acts = list(r.get("acts") or [])
+            if re.search(r"salmon|\bfish", text, re.IGNORECASE):     # asked in your own words
+                acts.append("fish")
+            self.bear.answered("confused" if r.get("error") else r.get("mood"), acts)
             if not r.get("error"):
                 self.chat_text.delete("1.0", "end")
                 self.render_chat(r.get("chat") or [], 0)

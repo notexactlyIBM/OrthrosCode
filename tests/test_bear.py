@@ -67,35 +67,16 @@ class Canvas:
             del self.items[n]
 
 
-class Picture:
-    """The GPU picture as the bear sees it: a column of dots right of it."""
-
-    def __init__(self):
-        self.dots = [(300, 80 + 30 * i) for i in range(10)]
-        self.poked = []
-
-    def center(self):
-        return (450, 200)
-
-    def nearest(self, x, y):
-        return min((ob.math.hypot(dx - x, dy - y), i, dx, dy)
-                   for i, (dx, dy) in enumerate(self.dots))[1:]
-
-    def poke(self, dot):
-        self.poked.append(dot)
-
-
-def spot(w, h):
-    return 130, h - 3, h * 0.86 / ob.ART_TALL
-
-
-def run(bear, seconds, t0=None):
-    """Step the bear `seconds` at 15 frames a second, on its own clock."""
+def run(bear, seconds, t0=None, seen=None):
+    """Step the bear `seconds` at 15 frames a second, on its own clock (noting where it
+    was each frame in `seen`, if given)."""
     t = bear.clock() if t0 is None else t0
     for _ in range(int(seconds * ob.FPS)):
         t += 1 / ob.FPS
         bear.clock = lambda t=t: t
         bear.step(t)
+        if seen is not None and (not seen or seen[-1] != bear.where):
+            seen.append(bear.where)
     return t
 
 
@@ -126,18 +107,48 @@ class RigTest(unittest.TestCase):
 
 class BearTest(unittest.TestCase):
     def setUp(self):
-        self.canvas, self.picture = Canvas(), Picture()
-        self.bear = ob.Bear(self.canvas, spot=spot, toy=self.picture)
-        self.t = run(self.bear, 1)
+        self.den, self.stream = Canvas(300, 320), Canvas(900, 300)
+        self.bear = ob.Bear(self.den, stream=self.stream)
+        self.t = self.bear.clock()
 
-    def polygons(self):
-        return [kw for kind, _, kw in self.canvas.items.values() if kind == "polygon"]
+    def come(self):
+        self.bear.summon()
+        self.t = run(self.bear, 8, self.t)
+        self.assertEqual(self.bear.where, "here")
 
-    def test_it_stands_where_the_window_puts_it(self):
+    def polygons(self, canvas=None):
+        return [kw for kind, _, kw in (canvas or self.den).items.values() if kind == "polygon"]
+
+    def test_it_hides_until_you_come_then_walks_out_from_behind_the_chat(self):
+        self.assertEqual(self.bear.where, "away")
+        self.t = run(self.bear, 2, self.t)
+        self.assertFalse(self.polygons())
+        self.bear.summon()
+        self.assertEqual(self.bear.where, "coming")
+        self.assertGreater(self.bear.walk_x, 0)          # off to the right, behind the box
+        self.t = run(self.bear, 8, self.t)
+        self.assertEqual((self.bear.where, self.bear.walk_x), ("here", 0.0))
         self.assertTrue(self.polygons())
-        self.assertEqual(self.bear.o[0], 130)
+
+    def test_it_waves_only_the_first_time_out(self):
+        self.come()
+        self.assertEqual(self.bear.cool.keys() & {"greet"}, {"greet"})
+        self.bear.active_at -= ob.DEN_QUIET + 1
+        self.t = run(self.bear, 10, self.t)
+        self.bear.cool.clear()
+        self.come()
+        self.assertNotIn("greet", self.bear.cool)
+
+    def test_a_quiet_chat_sends_it_back_behind_the_box(self):
+        self.come()
+        self.bear.active_at -= ob.DEN_QUIET + 1
+        seen = []
+        self.t = run(self.bear, 10, self.t, seen)
+        self.assertEqual(seen, ["here", "going", "away"])
+        self.assertFalse(self.polygons())
 
     def test_every_mood_plays_through(self):
+        self.come()
         for mood in ob.MOODS:
             self.bear.answered(mood)
             self.assertEqual(self.bear.mood.name, mood)
@@ -145,49 +156,69 @@ class BearTest(unittest.TestCase):
             self.assertIsNone(self.bear.mood, mood)
 
     def test_no_mood_or_an_unknown_one_is_a_nod(self):
+        self.come()
         self.bear.answered("")
         self.assertEqual(self.bear.action.name, "nod")
         self.bear.answered("furious")
         self.assertIsNone(self.bear.mood)
 
     def test_a_cued_move_comes_first_then_the_mood(self):
+        self.come()
         self.bear.answered("happy", ["sniff"])
         self.assertEqual(self.bear.action.name, "sniff")
         self.assertIsNone(self.bear.mood)
         run(self.bear, ob.ACTIONS["sniff"][0] + 0.2, self.t)
         self.assertEqual(self.bear.mood.name, "happy")
 
-    def test_it_pokes_a_dot_of_the_picture(self):
-        self.assertTrue(self.bear.start("poke"))
-        self.assertEqual(self.bear.action.name, "poke")
-        self.assertEqual(self.bear.action.side, "R")
-        run(self.bear, ob.ACTIONS["poke"][0], self.t)
-        self.assertEqual(len(self.picture.poked), 1)
+    def test_asked_for_a_salmon_it_climbs_up_eats_it_and_comes_back(self):
+        self.come()
+        self.bear.answered("happy", ["fish"])
+        seen = []
+        self.t = run(self.bear, 20, self.t, seen)
+        self.assertEqual(seen, ["here", "up", "fishing", "down", "here"])
+        self.assertIsNone(self.bear.salmon)
+        self.assertFalse(self.polygons(self.stream))      # nothing left behind up there
+        self.assertTrue(self.polygons())
 
-    def test_with_no_dot_in_reach_it_watches_instead(self):
-        self.picture.dots = [(880, 200)]
-        self.bear.start("poke")
-        self.assertEqual(self.bear.action.name, "watch")
+    def test_while_you_chat_no_salmon_comes_unasked(self):
+        self.come()
+        self.bear.next_salmon = 0
+        seen = []
+        run(self.bear, 30, self.t, seen)
+        self.assertNotIn("fishing", seen)
 
-    def test_a_busy_card_lights_its_lines_and_nothing_else(self):
+    def test_left_alone_it_goes_fishing_now_and_then_and_hides_again(self):
+        self.bear.next_salmon = self.t - 1
+        self.bear.tick()
+        self.assertEqual(self.bear.where, "fishing")
+        self.assertIs(self.bear.c, self.stream)
+        seen = []
+        run(self.bear, 10, self.t, seen)
+        self.assertEqual(seen[-1], "away")
+        self.assertFalse(self.polygons(self.stream))
+        self.assertGreater(self.bear.next_salmon, self.t + ob.SALMON_EVERY[0] - 1)
+
+    def test_a_busy_card_lights_its_lines(self):
+        self.come()
         lines = lambda: {kw["outline"] for kw in self.polygons()}
-        quiet, items = lines(), len(self.canvas.items)
+        quiet = lines()
         self.bear.energy = 1.0
         run(self.bear, 8, self.t)
         self.assertGreater(self.bear.glow, 0.9)
         self.assertNotEqual(lines(), quiet)
-        self.assertLessEqual(len(self.canvas.items), items + 3)   # no dots: a mouth, a sign
 
     def test_it_goes_its_own_way_while_thinking_and_after(self):
+        self.come()
         self.bear.thinking(True)
         t = run(self.bear, 60, self.t)
-        self.assertTrue(set(self.bear.cool) & {"ponder", "sway", "sniff", "watch"})
+        self.assertTrue(set(self.bear.cool) & {"ponder", "sway", "sniff"})
         self.bear.thinking(False)
+        self.bear.summon()
         run(self.bear, 90, t)
-        self.assertTrue(set(self.bear.cool) & {"scratch_face", "stretch", "poke", "watch", "sway",
-                                               "sniff"})
+        self.assertTrue(set(self.bear.cool) & {"scratch_face", "stretch", "sway", "sniff"})
 
     def test_a_hidden_tab_stops_it(self):
+        self.come()
         self.bear.visible = lambda: False
         with mock.patch.object(self.bear, "step") as step:
             self.bear.tick()
@@ -203,9 +234,9 @@ class CueTest(unittest.TestCase):
 
     def test_moves_come_from_cues_and_stage_directions(self):
         text, mood, acts = orthros.bear_cues(
-            "*waves* Hello there, I *really* mean it.\n[do: poke the dots]\n[mood: happy]")
+            "*waves* Hello there, I *really* mean it.\n[do: catch a salmon]\n[mood: happy]")
         self.assertEqual(text, "Hello there, I *really* mean it.")
-        self.assertEqual((mood, acts), ("happy", ["poke", "greet"]))
+        self.assertEqual((mood, acts), ("happy", ["fish", "greet"]))
 
     def test_a_stage_direction_can_carry_the_mood(self):
         self.assertEqual(orthros.bear_cues("*chuckles* Fair point."), ("Fair point.", "laugh", []))
@@ -215,7 +246,7 @@ class CueTest(unittest.TestCase):
         for mood in ob.MOODS:
             self.assertIn(mood, orthros.MOOD_RULE)
         for _, kind, name in orthros.GESTURES:
-            self.assertIn(name, ob.ACTIONS if kind == "act" else ob.MOOD)
+            self.assertIn(name, ob.CUES if kind == "act" else ob.MOOD)
 
 
 class WildTest(Sandbox):

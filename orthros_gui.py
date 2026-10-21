@@ -28,6 +28,8 @@ import urllib.request
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
+import orthros_bear
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 BG, PANEL, PANEL2, EDGE = "#070b13", "#0d1524", "#121c30", "#23324d"
@@ -668,10 +670,16 @@ class Dashboard:
                                  relief="flat", font=(BODY, 10), wrap="word")
         self.chat_text.pack(side="bottom", fill="x")
         self.chat_text.bind("<Return>", self.chat_enter)
+        self.chat_text.bind("<Key>", lambda e: self.bear.typing(), add="+")
         self.chat = tk.Text(box, height=4, bg=PANEL, fg=INK, relief="flat", wrap="word",
                             font=(BODY, 10), padx=2, pady=4, spacing1=2, spacing3=10,
                             highlightthickness=0)
         self.chat.pack(fill="both", expand=True, pady=(8, 8))
+        # The bear stands down the card's right side while there is a conversation, and
+        # leaves when it goes quiet (orthros_bear.py); its canvas is packed only then.
+        self.bear_box = tk.Canvas(box, width=px(150), height=1, bg=PANEL, highlightthickness=0)
+        self.bear = orthros_bear.Bear(self.bear_box, line=orthros_bear.mix(INK, PANEL, 0.2),
+                                      fill=PANEL, shown=self.show_bear)
         self.chat.tag_config("you", foreground="#bff6ff", lmargin1=px(110), lmargin2=px(110),
                              justify="right")
         self.chat.tag_config("orthros", foreground=INK, rmargin=px(60))
@@ -1472,18 +1480,30 @@ class Dashboard:
         enable(self.direct, False)
         self.chat_hint.config(text="Thinking... If the model has to load first, that takes a "
                                    "minute." if kind == "ask" else "")
+        self.bear.heard()
+        self.bear.thinking(kind == "ask")
 
         def done(r):
             self.chat_busy = False
             enable(self.ask, True)
             enable(self.direct, True)
             self.chat_hint.config(text="Could not send: %s" % r["error"] if r.get("error") else "")
+            self.bear.thinking(False)
+            self.bear.answered("confused" if r.get("error") else r.get("mood"))
             if not r.get("error"):
                 self.chat_text.delete("1.0", "end")
                 self.render_chat(r.get("chat") or [], 0)
         self.post("/api/chat", {"text": text, "kind": kind, "target": self.target.get()}, done)
 
+    def show_bear(self, on):
+        if on:
+            # before the box and buttons, so it takes the card's whole height below the heading
+            self.bear_box.pack(side="right", fill="y", padx=(8, 0), before=self.chat_hint)
+        else:
+            self.bear_box.pack_forget()
+
     def clear_chat(self):
+        self.bear.leave()
         self.post("/api/chat/clear", None, lambda r: self.chat_hint.config(
             text="" if r.get("result") == "ok" else "Restart Orthros once to use Clear."))
 

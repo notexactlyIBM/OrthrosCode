@@ -14,6 +14,7 @@ rule below. Most bugs here so far came from breaking one without noticing.
 | `orthros_tune.py` | Fits context and timeouts to the machine (`hardware.json`). |
 | `orthros_setup.py` | Used by `SETUP.bat`: the venv, and the agents built from `agent\`. |
 | `orthros_gui.py` | The dashboard window (tkinter), opened by `orthros.py`. A client of the same local API as the page, run as its own process; change the two together. |
+| `orthros_bear.py` | The bear beside the window's chat: a rigged low-poly mesh (`orthros_bear_mesh.py`) and its moves, drawn on a tkinter canvas. It plays the `[mood: ...]` that `orthros.py` takes off each chat answer. Window only. |
 | `orthros.html` | The dashboard as a web page: one file, no build, re-read on every page load. |
 | `agent\` | The **template** for an agent (`supervisor.py`, `ralph_*.py`). This is not the code that runs. |
 | `OrthrosCode A\`, `B\` | The **running** agents. Each is its own git repo, rewritten by the other, and gitignored here. |

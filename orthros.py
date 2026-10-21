@@ -45,6 +45,7 @@ import urllib.parse
 import urllib.request
 import webbrowser
 
+import orthros_bear as bear
 import orthros_service as service
 import orthros_tune as tune
 import orthros_work as work
@@ -248,7 +249,18 @@ Explain what the records show and what it means, not only numbers. Give a cause 
 where the records state it -- quote their reason rather than supply a likelier one.
 When the records do not say, say so and where to look (the page, orthros.log, logs\\,
 an agent's FIELD_REPORT.md). You cannot act from here: the page's buttons do that,
-and "Suggest direction" puts an item at the top of an agent's task list."""
+and "Suggest direction" puts an item at the top of an agent's task list.
+
+A bear stands beside the chat box and acts out how your answer feels. End every
+answer with one last line, [mood: <word>], the word one of: %s.""" % ", ".join(bear.MOODS)
+# The tag is taken off before the answer is shown or kept; the window's bear plays it.
+MOOD_TAG = re.compile(r"\[\s*mood\s*:\s*([a-z]+)\s*\]", re.IGNORECASE)
+
+
+def split_mood(reply):
+    """(the reply without its [mood: ...] tags, the last mood it named, or '')."""
+    moods = [m.lower() for m in MOOD_TAG.findall(reply or "")]
+    return re.sub(r"\n{3,}", "\n\n", MOOD_TAG.sub("", reply or "")).strip(), (moods or [""])[-1]
 
 
 def notes_file(folder):
@@ -2378,6 +2390,7 @@ class Orthros:
         agent rewrites it between rounds, and a rollback could lose it.
         """
         text = " ".join(str(text or "").split())[:600]
+        self.mood = ""
         if not text:
             return "Say something first."
         if kind == "direct":
@@ -2397,7 +2410,7 @@ class Orthros:
                          "so it goes in, at the top, as soon as that turn ends." % where)
             self.event("operator direction for %s: %s" % (where, text[:80]), "start")
         else:
-            reply = self.answer(text)
+            reply, self.mood = split_mood(self.answer(text))
         with self.lock:
             self.state["chat"] = (self.state["chat"] + [[now(), "you", text],
                                                         [now(), "orthros", reply]])[-40:]
@@ -2817,7 +2830,8 @@ def serve(orthros, port):
                 elif url.path == "/api/chat":
                     reply = orthros.chat(body.get("text"), body.get("kind") or "ask",
                                          body.get("target") or "both")
-                    self.send(200, {"reply": reply, "chat": orthros.state["chat"][-20:]})
+                    self.send(200, {"reply": reply, "mood": orthros.mood,
+                                    "chat": orthros.state["chat"][-20:]})
                 elif url.path == "/api/settings":
                     if "session_minutes" in body:
                         orthros.settings["session_minutes"] = max(5, min(480, int(

@@ -1,0 +1,1074 @@
+"""The bear beside the chat in Orthros's window: a low-poly grizzly that stands up
+when you talk to Orthros, ponders while it thinks, shows the mood of its answer,
+and leaves once the chat has gone quiet for a while.
+
+Two halves. Rig is the puppet: the drawing's mesh (orthros_bear_mesh.py) on a
+skeleton, 2.5D -- every vertex has a depth from a rounded body shape, bones turn
+in 3D, polygons are drawn back to front -- with two-bone IK for the paws and feet.
+Bear is its brain and its tkinter canvas: every part of the body has somewhere it
+would like to be, made of layers (posture, breathing, slow weight shifts, where it
+looks, what it is doing, any mood), and follows it on a spring, so nothing pops.
+
+The model ends each chat answer with [mood: ...] (orthros.py strips it) and the
+bear plays that mood, with a small sign over its head.
+
+Light on purpose (2026-10-21): tkinter takes about 35 ms to draw the whole bear,
+so it runs at most 15 frames a second, draws only when something moved, has no
+moves that turn it far round (no back faces to draw), and is gone between chats.
+
+Coordinates are the drawing's pixels: x right, y down, z towards the viewer.
+Standard library only, like orthros.py.
+"""
+
+import math
+import random
+import time
+
+from orthros_bear_mesh import FACES, VERTS
+
+MOODS = ("happy", "laugh", "excited", "curious", "thinking", "surprised", "sad", "shy",
+         "proud", "sleepy", "confused", "encouraging", "calm")
+
+ART_W, ART_MID, ART_FEET, ART_TALL = 493, 248, 950, 925
+SNAP = 11                          # a joint this close to a line intersection sits on it
+# how far each piece stands out from its middle plane: a deep-chested bear with a round
+# head and a long muzzle; the arms' middle plane is a little in front of the body's
+DEPTH = {"body": 0.8, "head": 0.85, "muzzle": 72, "arm": 34, "leg": 40, "armMid": 22}
+F = 2600                           # the camera's distance (far: a gentle perspective)
+CAM = (ART_MID, 560)               # what the camera looks at
+VIEWER = 2200                      # where the person at the screen is, in front of the bear
+FPS = 15
+LINGER = 180                       # seconds of a quiet chat before the bear leaves
+
+
+# ---- small 3D maths: 3x3 matrices row-major, vectors as tuples
+
+def norm(v):
+    n = math.hypot(*v) or 1
+    return (v[0] / n, v[1] / n, v[2] / n)
+
+
+def add(a, b):
+    return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
+
+
+def sub(a, b):
+    return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+
+def mulv(a, k):
+    return (a[0] * k, a[1] * k, a[2] * k)
+
+
+def dot(a, b):
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def cross(a, b):
+    return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
+
+
+def lerp3(a, b, t):
+    return (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t)
+
+
+I3 = (1, 0, 0, 0, 1, 0, 0, 0, 1)
+
+
+def mm(A, B):
+    return tuple(A[r * 3] * B[c] + A[r * 3 + 1] * B[3 + c] + A[r * 3 + 2] * B[6 + c]
+                 for r in range(3) for c in range(3))
+
+
+def mv(M, v):
+    return (M[0] * v[0] + M[1] * v[1] + M[2] * v[2], M[3] * v[0] + M[4] * v[1] + M[5] * v[2],
+            M[6] * v[0] + M[7] * v[1] + M[8] * v[2])
+
+
+# pitch: + brings the top towards you (a nod); yaw: + turns the front to screen right;
+# roll: + tips the top to screen right
+def rot_x(d):
+    c, s = math.cos(math.radians(d)), math.sin(math.radians(d))
+    return (1, 0, 0, 0, c, s, 0, -s, c)
+
+
+def rot_y(d):
+    c, s = math.cos(math.radians(d)), math.sin(math.radians(d))
+    return (c, 0, s, 0, 1, 0, -s, 0, c)
+
+
+def rot_z(d):
+    c, s = math.cos(math.radians(d)), math.sin(math.radians(d))
+    return (c, -s, 0, s, c, 0, 0, 0, 1)
+
+
+def euler(yaw=0, pitch=0, roll=0):
+    return mm(rot_y(yaw or 0), mm(rot_x(pitch or 0), rot_z(roll or 0)))
+
+
+def swing(a, b):
+    """The rotation that turns direction a into direction b (both unit)."""
+    c = max(-1.0, min(1.0, dot(a, b)))
+    k = cross(a, b)
+    s = math.hypot(*k)
+    if s < 1e-6:
+        return I3 if c > 0 else rot_z(180)
+    k = mulv(k, 1 / s)
+    K = (0, -k[2], k[1], k[2], 0, -k[0], -k[1], k[0], 0)
+    K2 = mm(K, K)
+    return tuple(I3[i] + s * K[i] + (1 - c) * K2[i] for i in range(9))
+
+
+def smooth(a, b, x):
+    t = max(0.0, min(1.0, (x - a) / (b - a)))
+    return t * t * (3 - 2 * t)
+
+
+def ease(x):
+    return smooth(0, 1, x)
+
+
+def osc(t, hz, ph=0.0):
+    return math.sin((t * hz + ph) * math.pi * 2)
+
+
+def clamp(v, lo, hi):
+    return max(lo, min(hi, v))
+
+
+def mix(c1, c2, k):
+    """Colour c1 moved k of the way to c2 ('#rrggbb')."""
+    a = [int(c1[i:i + 2], 16) for i in (1, 3, 5)]
+    b = [int(c2[i:i + 2], 16) for i in (1, 3, 5)]
+    return "#%02x%02x%02x" % tuple(round(x + (y - x) * k) for x, y in zip(a, b))
+
+
+# ---- the skeleton: (name, parent, joint in the drawing, snap to the nearest intersection?)
+BONES = (
+    ("root", None, (250, 650), False),
+    ("spine", "root", (250, 650), False),
+    ("chest", "spine", (262, 440), True),
+    ("neck", "chest", (265, 322), True),
+    ("head", "neck", (258, 262), False),
+    ("jaw", "head", (256, 214), False),
+    ("earL", "head", (168, 92), True), ("earR", "head", (334, 91), True),
+    ("upperL", "chest", (128, 352), False), ("foreL", "upperL", (72, 482), True),
+    ("pawL", "foreL", (92, 610), True),
+    ("upperR", "chest", (372, 352), True), ("foreR", "upperR", (427, 484), True),
+    ("pawR", "foreR", (406, 610), True),
+    ("thighL", "root", (195, 660), False), ("shinL", "thighL", (132, 782), True),
+    ("footL", "shinL", (120, 891), True),
+    ("thighR", "root", (310, 660), False), ("shinR", "thighR", (343, 785), True),
+    ("footR", "shinR", (370, 889), True),
+)
+TIPS = {"pawL": (80, 690), "pawR": (418, 690), "footL": (100, 950), "footR": (400, 950)}
+# which part each polygon belongs to (by its middle), drawn round the art; the arms' inner
+# edges follow the drawing's own long lines from the shoulder down to the paw
+AREAS = {
+    "earL": ((136, 24), (205, 24), (200, 84), (168, 104), (140, 110)),
+    "earR": ((300, 24), (362, 24), (365, 110), (336, 104), (306, 84)),
+    "armL": ((60, 286), (100, 290), (133, 326), (150, 422), (126, 489), (114, 532), (123, 618),
+             (112, 640), (108, 668), (106, 680), (96, 712), (14, 712), (16, 470), (44, 392)),
+    "armR": ((440, 286), (393, 296), (389, 344), (401, 405), (385, 475), (400, 561), (401, 605),
+             (400, 636), (384, 646), (392, 684), (413, 690), (440, 692), (485, 692), (485, 470),
+             (462, 380)),
+}
+# The snout is a faceted block: how far each of its points stands out from the face, as a
+# share of DEPTH["muzzle"]. Found by position (within 3 px); any other point is 0.
+SNOUT = (
+    (232, 165, 1), (241, 158, 1), (270, 162, 1), (241, 171, 1), (236, 178, 1), (269, 177, 1),
+    (270, 184, 1), (237, 187, 1), (264, 190, 1), (244, 191, 1), (254, 191, 1),
+    (247, 169, 1.12), (259, 169, 1.12), (248, 181, 1.12), (258, 180, 1.12),
+    (250, 203, 0.97), (260, 204, 0.97), (232, 208, 0.9), (270, 206, 0.9),
+    (234, 215, 0.75), (273, 215, 0.75), (242, 221, 0.7), (266, 220, 0.7), (226, 208, 0.35),
+    (277, 208, 0.35), (252, 247, 0.3), (258, 248, 0.3),
+)
+# points on the body a paw can reach for: (bone, x, y, z)
+ANCHORS = {
+    "muzzleL": ("head", 226, 196, 92), "muzzleR": ("head", 288, 196, 92),
+    "cheekL": ("head", 178, 170, 44), "cheekR": ("head", 338, 170, 44),
+    "crownL": ("head", 200, 60, 30), "crownR": ("head", 312, 60, 30),
+    "chinL": ("head", 238, 252, 70), "chinR": ("head", 276, 252, 70),
+    "bellyL": ("spine", 215, 560, 104), "bellyR": ("spine", 298, 560, 104),
+    "chestL": ("chest", 225, 400, 110), "chestR": ("chest", 300, 400, 110),
+    "hipL": ("spine", 168, 586, 58), "hipR": ("spine", 330, 586, 58),
+    "upL": ("chest", 96, 210, 70), "upR": ("chest", 404, 210, 70),
+    "top": ("head", 258, 10, 0), "nose": ("head", 256, 176, 90),
+}
+LIGHT = norm((-0.45, -0.55, 0.7))
+
+
+def inside(p, poly):
+    c = False
+    j = len(poly) - 1
+    for i in range(len(poly)):
+        (xi, yi), (xj, yj) = poly[i], poly[j]
+        if (yi > p[1]) != (yj > p[1]) and p[0] < (xj - xi) * (p[1] - yi) / (yj - yi) + xi:
+            c = not c
+        j = i
+    return c
+
+
+def middle(ids):
+    return (sum(VERTS[i][0] for i in ids) / len(ids), sum(VERTS[i][1] for i in ids) / len(ids))
+
+
+def part_of(ids):
+    c = middle(ids)
+    for part, poly in AREAS.items():
+        if inside(c, poly):
+            return part
+    if c[1] < 252:
+        return "head"
+    if c[1] > 700:
+        return "legL" if c[0] < 250 else "legR"
+    return "body"
+
+
+class Rig:
+    """The puppet: build once, then set_pose() and shapes() each frame."""
+
+    def __init__(self):
+        self.bones = []
+        for name, parent, at, snap in BONES:
+            p = at
+            if snap:
+                best = SNAP
+                for v in VERTS:
+                    d = math.hypot(v[0] - at[0], v[1] - at[1])
+                    if d < best:
+                        best, p = d, v
+            self.bones.append({"name": name, "parent": parent, "rest": (p[0], p[1], 0)})
+        self.B = {b["name"]: i for i, b in enumerate(self.bones)}
+        for b in self.bones:
+            b["p"] = -1 if b["parent"] is None else self.B[b["parent"]]
+        self.build_skin()
+        self.world = [(I3, (0, 0, 0))] * len(self.bones)
+        self.out = [(0, 0, 0)] * len(self.verts)
+        bend = lambda a, b, c, back: self.bend_of(a, b, c, back)
+        self.bend = {"L": (bend("upperL", "foreL", "pawL", -0.35), bend("thighL", "shinL", "footL", 0.45)),
+                     "R": (bend("upperR", "foreR", "pawR", -0.35), bend("thighR", "shinR", "footR", 0.45))}
+        self.set_pose({})
+
+    def rest(self, name):
+        return self.bones[self.B[name]]["rest"]
+
+    def build_skin(self):
+        """The vertex copies each part draws with (arms get their own, so an arm swings clear
+        of the body), their depths and bone weights, and the face's moving features."""
+        faces = [{"ids": f, "part": part_of(f)} for f in FACES]
+        verts, index = [], {}
+        for f in faces:
+            vs = []
+            for i in f["ids"]:
+                key = "%s:%d" % (f["part"], i) if f["part"] in ("armL", "armR") else str(i)
+                if key not in index:
+                    index[key] = len(verts)
+                    verts.append({"x": VERTS[i][0], "y": VERTS[i][1], "parts": set()})
+                verts[index[key]]["parts"].add(f["part"])
+                vs.append(index[key])
+            f["vs"] = vs
+
+        def span(part):
+            rows = {}
+            for f in faces:
+                if f["part"] == part:
+                    for i in f["ids"]:
+                        band = math.floor(VERTS[i][1] / 20 + 0.5)
+                        lo, hi = rows.get(band, (math.inf, -math.inf))
+                        rows[band] = (min(lo, VERTS[i][0]), max(hi, VERTS[i][0]))
+
+            def at(y):
+                b = y / 20
+                lo = rows.get(math.floor(b)) or rows.get(math.ceil(b))
+                hi = rows.get(math.ceil(b)) or lo
+                if not lo:
+                    return None
+                t = b - math.floor(b)
+                return (lo[0] + (hi[0] - lo[0]) * t, lo[1] + (hi[1] - lo[1]) * t)
+            return at
+
+        body_span, head_span = span("body"), span("head")
+
+        def bulge(x, y, s, k):
+            r = s(y)
+            if not r:
+                return 0
+            cx, hw = (r[0] + r[1]) / 2, max(20, (r[1] - r[0]) / 2)
+            u = (x - cx) / hw
+            return k * hw * math.sqrt(max(0, 1 - u * u))
+
+        def off_line(p, a, b):
+            ab = (b[0] - a[0], b[1] - a[1])
+            t = max(0, min(1, ((p[0] - a[0]) * ab[0] + (p[1] - a[1]) * ab[1]) / (ab[0] ** 2 + ab[1] ** 2)))
+            return math.hypot(p[0] - a[0] - ab[0] * t, p[1] - a[1] - ab[1] * t)
+
+        def limb(p, chain, r):           # a rounded limb round a chain of joints
+            best = min(off_line(p, chain[i], chain[i + 1]) for i in range(len(chain) - 1))
+            return r * math.sqrt(max(0, 1 - (best / (r * 1.5)) ** 2))
+
+        J = self.rest
+        chains = {"armL": (J("upperL"), J("foreL"), J("pawL"), TIPS["pawL"]),
+                  "armR": (J("upperR"), J("foreR"), J("pawR"), TIPS["pawR"]),
+                  "legL": (J("thighL"), J("shinL"), J("footL"), TIPS["footL"]),
+                  "legR": (J("thighR"), J("shinR"), J("footR"), TIPS["footR"])}
+
+        def depth(x, y, part):
+            if part in ("armL", "armR"):
+                return limb((x, y), chains[part], DEPTH["arm"])
+            if part in ("legL", "legR"):
+                lz = limb((x, y), chains[part], DEPTH["leg"]) + ((y - 900) * 0.9 if y > 900 else 0)
+                t = smooth(700, 760, y)
+                return lz * t + bulge(x, y, body_span, DEPTH["body"]) * (1 - t)
+            if part in ("earL", "earR"):
+                return 8
+            if part == "head":
+                s = next((s for s in SNOUT if math.hypot(s[0] - x, s[1] - y) < 3), None)
+                return bulge(x, y, head_span, DEPTH["head"]) + (DEPTH["muzzle"] * s[2] if s else 0)
+            return bulge(x, y, body_span, DEPTH["body"])
+
+        # the outline (edges with a polygon on one side only) lies on the middle plane
+        uses = {}
+        for f in faces:
+            vs = f["vs"]
+            for k in range(len(vs)):
+                a, b = vs[k], vs[(k + 1) % len(vs)]
+                key = (min(a, b), max(a, b))
+                uses[key] = uses.get(key, 0) + 1
+        rim = {i for key, n in uses.items() if n == 1 for i in key}
+        for i, v in enumerate(verts):
+            parts = v["parts"]
+            v["part"] = ("armL" if "armL" in parts else "armR" if "armR" in parts else
+                         "head" if "head" in parts else
+                         next((p for p in parts if p.startswith("ear")), None) or
+                         ("legL" if "legL" in parts else "legR" if "legR" in parts else "body"))
+            mid = DEPTH["armMid"] if v["part"].startswith("arm") else 0
+            v["z"] = mid + (0 if i in rim else sum(depth(v["x"], v["y"], p) for p in parts) / len(parts))
+            v["w"] = self.weights(v)
+        near = lambda c, r: [i for i, v in enumerate(verts)
+                             if v["part"] == "head" and math.hypot(v["x"] - c[0], v["y"] - c[1]) < r]
+        self.eyes = [near((219, 116), 13), near((280, 117), 13)]
+        self.nose = near((256, 176), 16)
+        for f in faces:
+            c = middle(f["ids"])
+            f["bias"] = 38 if f["part"].startswith("arm") else 0      # arms in front of the body
+            if f["part"] == "head" and (math.hypot(c[0] - 219, c[1] - 116) < 11 or
+                                        math.hypot(c[0] - 280, c[1] - 117) < 11 or
+                                        math.hypot(c[0] - 256, c[1] - 176) < 14):
+                f["bias"] = 6                                        # eyes and nose on the face
+            vs = f["vs"]
+            a = sum(verts[vs[k]]["x"] * verts[vs[(k + 1) % len(vs)]]["y"] -
+                    verts[vs[(k + 1) % len(vs)]]["x"] * verts[vs[k]]["y"] for k in range(len(vs)))
+            f["sign"] = 1 if a >= 0 else -1                          # its way round, facing you
+        self.faces, self.verts = faces, verts
+
+    def weights(self, v):
+        """Which bones move a vertex, and how much: blended across each joint."""
+        w = {}
+        B, J = self.B, self.rest
+
+        def put(name, k):
+            if k > 0.001:
+                w[B[name]] = w.get(B[name], 0) + k
+        x, y, part = v["x"], v["y"], v["part"]
+
+        def t(a, b):
+            ab = (b[0] - a[0], b[1] - a[1])
+            return ((x - a[0]) * ab[0] + (y - a[1]) * ab[1]) / (ab[0] ** 2 + ab[1] ** 2)
+        if part in ("armL", "armR"):
+            s = part[-1]
+            sh, el, wr = J("upper" + s), J("fore" + s), J("paw" + s)
+            top = smooth(sh[1] - 50, sh[1] + 20, y)          # the top of the shoulder stays on the chest
+            a, b = t(sh, el), t(el, wr)
+            fore = smooth(0.78, 1.08, a) * (1 - smooth(0.82, 1.1, b))
+            paw = smooth(0.82, 1.1, b)
+            put("chest", 1 - top)
+            put("upper" + s, top * (1 - fore - paw))
+            put("fore" + s, top * fore)
+            put("paw" + s, top * paw)
+        elif part in ("earL", "earR"):
+            put(part, 1)
+        elif part == "head":
+            jaw = ((x - 256) / 34) ** 2 + ((y - 236) / 22) ** 2 < 1 and y > 214   # under the mouth
+            neckish = smooth(232, 262, y)
+            put("jaw" if jaw else "head", 1 - neckish)
+            put("neck", neckish)
+        elif part in ("legL", "legR") or (part == "body" and y > 640):
+            s = "R" if part == "legR" or (part == "body" and x >= 250) else "L"
+            hip, kn, an = J("thigh" + s), J("shin" + s), J("foot" + s)
+            on_leg = smooth(645, 735, y) * (smooth(40, 95, abs(x - 250)) if part == "body" else 1)
+            a, b = t(hip, kn), t(kn, an)
+            shin = smooth(0.82, 1.12, a) * (1 - smooth(0.78, 1.0, b))
+            foot = smooth(0.78, 1.0, b)
+            put("spine", 1 - on_leg)
+            put("thigh" + s, on_leg * (1 - shin - foot))
+            put("shin" + s, on_leg * shin)
+            put("foot" + s, on_leg * foot)
+        else:                            # the body: belly on the spine, chest above, neck on top
+            chest = smooth(610, 450, y)
+            neck = smooth(345, 285, y) * (1 - smooth(55, 110, abs(x - 262)))
+            put("spine", 1 - chest)
+            put("chest", chest * (1 - neck))
+            put("neck", chest * neck)
+        total = sum(w.values())
+        return [(b, k / total) for b, k in w.items()]
+
+    def bend_of(self, a, b, c, back):
+        """Which way a limb's middle joint bends as drawn, plus back or forward."""
+        A, E, C = self.rest(a), self.rest(b), self.rest(c)
+        u, ae = norm(sub(C, A)), sub(E, A)
+        return norm(add(norm(sub(ae, mulv(u, dot(ae, u)))), (0, 0, back)))
+
+    def fk(self, name, local):
+        i = self.B[name]
+        b = self.bones[i]
+        R, p = self.world[b["p"]]
+        self.world[i] = (mm(R, local), add(p, mv(R, sub(b["rest"], self.bones[b["p"]]["rest"]))))
+
+    def joint(self, name):
+        return self.world[self.B[name]][1]
+
+    def anchor(self, name):
+        if name in ("restL", "restR"):              # the paw hanging as drawn
+            R, p = self.world[self.B["chest"]]
+            return add(p, mv(R, sub(self.rest("paw" + name[-1]), self.rest("chest"))))
+        bone, x, y, z = ANCHORS[name]
+        R, p = self.world[self.B[bone]]
+        return add(p, mv(R, sub((x, y, z), self.rest(bone))))
+
+    def ik(self, a, b, c, target, pole, parent_r, end_local, shrug=0):
+        """Two-bone IK: from the joint at a towards target, the middle joint bending to pole."""
+        A = self.joint(a)
+        L1 = math.hypot(*sub(self.rest(b), self.rest(a)))
+        L2 = math.hypot(*sub(self.rest(c), self.rest(b)))
+        d = sub(target, A)
+        dist = math.hypot(*d)
+        if shrug and dist > (L1 + L2) * 0.92:      # a far reach lifts the shoulder a little
+            A = add(A, mulv(d, min(shrug, dist - (L1 + L2) * 0.92) / dist))
+            d = sub(target, A)
+            dist = math.hypot(*d)
+        reach = max(abs(L1 - L2) + 1, min(L1 + L2 - 0.5, dist))
+        u = mulv(d, 1 / (dist or 1))
+        cos_a = clamp((L1 * L1 + reach * reach - L2 * L2) / (2 * L1 * reach), -1, 1)
+        pp = sub(pole, mulv(u, dot(pole, u)))
+        if math.hypot(*pp) < 1e-4:
+            pp = cross(u, (0, 0, 1))
+        pp = norm(pp)
+        E = add(A, add(mulv(u, L1 * cos_a), mulv(pp, L1 * math.sqrt(1 - cos_a * cos_a))))
+        T = add(A, mulv(u, reach))
+        rest_dir = lambda p, q: norm(sub(self.rest(q), self.rest(p)))
+        Ru = mm(swing(mv(parent_r, rest_dir(a, b)), norm(sub(E, A))), parent_r)
+        Rf = mm(swing(mv(Ru, rest_dir(b, c)), norm(sub(T, E))), Ru)
+        self.world[self.B[a]] = (Ru, A)
+        self.world[self.B[b]] = (Rf, E)
+        self.world[self.B[c]] = (mm(Rf, end_local), T)
+
+    def set_pose(self, pose):
+        """pose: per bone {x, y, z (root only), yaw, pitch, roll}; armL/R, legL/R: targets for
+        the wrists and ankles; breathe; jaw; face: {blink, twitch}."""
+        r = pose.get("root", {})
+        root = self.bones[0]["rest"]
+        self.world[0] = (euler(r.get("yaw"), r.get("pitch"), r.get("roll")),
+                         add(root, (r.get("x", 0), r.get("y", 0), r.get("z", 0))))
+        loc = lambda n: euler(*(pose.get(n, {}).get(k) for k in ("yaw", "pitch", "roll")))
+        self.fk("spine", loc("spine"))
+        self.fk("chest", mm(loc("chest"), rot_x(pose.get("breathe", 0))))
+        self.fk("neck", loc("neck"))
+        self.fk("head", loc("head"))
+        self.fk("jaw", rot_x(pose.get("jaw", 0) * 16))
+        self.fk("earL", loc("earL"))
+        self.fk("earR", loc("earR"))
+        chest_r, chest_p = self.world[self.B["chest"]]
+        root_r, root_p = self.world[0]
+        for s in "LR":
+            up = self.B["upper" + s]
+            self.world[up] = (chest_r, add(chest_p, mv(chest_r, sub(self.rest("upper" + s), self.rest("chest")))))
+            arm = pose.get("arm" + s) or self.anchor("rest" + s)
+            self.ik("upper" + s, "fore" + s, "paw" + s, arm, mv(chest_r, self.bend[s][0]), chest_r,
+                    loc("paw" + s), 30)
+            th = self.B["thigh" + s]
+            self.world[th] = (root_r, add(root_p, mv(root_r, sub(self.rest("thigh" + s), root))))
+            foot = pose.get("leg" + s) or self.rest("foot" + s)
+            self.ik("thigh" + s, "shin" + s, "foot" + s, foot, mv(root_r, self.bend[s][1]), root_r,
+                    loc("foot" + s))
+        out = self.out = []
+        for v in self.verts:                 # skin: each vertex follows its bones
+            x = y = z = 0
+            for b, k in v["w"]:
+                R, p = self.world[b]
+                rest = self.bones[b]["rest"]
+                q = mv(R, (v["x"] - rest[0], v["y"] - rest[1], v["z"] - rest[2]))
+                x += (q[0] + p[0]) * k
+                y += (q[1] + p[1]) * k
+                z += (q[2] + p[2]) * k
+            out.append([x, y, z])
+        face = pose.get("face", {})
+        shut = clamp(face.get("blink", 0), -0.25, 1)
+        if shut:                            # a blink squashes each eye towards its middle line
+            for ids in self.eyes:
+                cy = sum(out[i][1] for i in ids) / len(ids)
+                for i in ids:
+                    out[i][1] = cy + (out[i][1] - cy) * (1 - shut * 0.85)
+        if face.get("twitch"):
+            for i in self.nose:
+                out[i][1] -= face["twitch"] * 4 * (1 - abs(self.verts[i]["x"] - 256) / 20)
+
+    @staticmethod
+    def project(p, o):
+        """Where a point lands on the canvas: o = (x, feet, scale), where the feet's middle goes."""
+        k = F / max(200, F - p[2])
+        return (o[0] + (CAM[0] + (p[0] - CAM[0]) * k - ART_MID) * o[2],
+                o[1] + (CAM[1] + (p[1] - CAM[1]) * k - ART_FEET) * o[2])
+
+    def shapes(self, o):
+        """The polygons facing you, back to front: (face number, flat screen points, light)."""
+        screen = [self.project(p, o) for p in self.out]
+        order = []
+        for n, f in enumerate(self.faces):
+            vs = f["vs"]
+            m = len(vs)
+            a = sum(screen[vs[k]][0] * screen[vs[(k + 1) % m]][1] -
+                    screen[vs[(k + 1) % m]][0] * screen[vs[k]][1] for k in range(m))
+            if a * f["sign"] < -0.5:
+                continue                     # turned away from you
+            z = sum(self.out[i][2] for i in vs) / m + f["bias"]
+            p, q, r = self.out[vs[0]], self.out[vs[1]], self.out[vs[2]]
+            nrm = norm(cross(sub(q, p), sub(r, p)))
+            lit = max(0, dot(nrm if nrm[2] >= 0 else mulv(nrm, -1), LIGHT))
+            order.append((z, n, [c for i in vs for c in screen[i]], lit))
+        order.sort(key=lambda e: e[0])
+        return [(n, flat, lit) for _, n, flat, lit in order]
+
+
+# ---- what it does: each runs for dur seconds with c (see Clip)
+
+def scratch_face(c):
+    k, s, o = c.env(0.7, 0.8), c.side, c.out
+    # the wrist high on the side of the head, raking down the cheek
+    c.arm(s, "cheek" + s, (o * 8 + osc(c.t, 3.2, 0.25) * 4, -18 + osc(c.t, 3.2) * 13, 2), k, 12)
+    c.add("head.roll", -o * 11 * k), c.add("head.yaw", o * 6 * k), c.add("head.pitch", 5 * k)
+    c.add("spine.roll", -o * 2 * k)
+    c.face("blink", 0.55 * k), c.mute("look", k)
+
+
+def sniff(c):
+    k = c.env(0.8, 0.8)
+    c.add("head.pitch", -17 * k), c.add("neck.pitch", -8 * k)
+    c.add("head.yaw", osc(c.t, 0.3) * 14 * k)
+    c.add("earL.pitch", 10 * k), c.add("earR.pitch", 10 * k)
+    burst = 1 if c.t % 1.3 < 0.55 else 0
+    c.face("twitch", max(0, osc(c.t, 7)) * burst * k)
+    c.add("breathe", max(0, osc(c.t, 3.5)) * burst * 1.4 * k)
+    c.mute("look", k)
+
+
+def stretch(c):
+    k, up = c.env(1.0, 1.2), c.window(0.6, 3.6, 0.6)
+    c.arm("L", "upL", (-10, -30, -10), up, 4), c.arm("R", "upR", (10, -30, -10), up, 4)
+    c.add("spine.pitch", -7 * k), c.add("chest.pitch", -5 * k)
+    c.add("head.pitch", -20 * c.window(1.0, 3.4, 0.5))
+    c.jaw(0.9 * c.window(1.1, 3.2, 0.5)), c.face("blink", 0.9 * c.window(1.0, 3.6, 0.4))
+    c.add("root.y", -6 * up)
+    c.mute("look", k)
+
+
+def ponder(c):
+    k, s, o = c.env(1.1, 1.1), c.side, c.out
+    c.arm(s, "chin" + s, (-o * 4, 12, 8), k, 5)
+    c.add("head.pitch", -9 * k), c.add("head.yaw", -o * 12 * k), c.add("head.roll", o * 7 * k)
+    c.mute("look", k)
+    if c.t > 2.2:
+        c.face("blink", 0.15)
+
+
+def sway(c):
+    k = c.env(0.8, 1.2)
+    c.add("root.roll", osc(c.t, 0.42) * 2.2 * k), c.add("head.roll", -osc(c.t, 0.42) * 1.6 * k)
+
+
+def nod(c):
+    k = c.env(0.2, 0.4)
+    c.add("head.pitch", max(0, osc(c.t, 1.6)) * 9 * k)
+    c.add("earL.pitch", 8 * k), c.add("earR.pitch", 8 * k)
+
+
+def greet(c):
+    s, o, k = c.side, c.out, c.env(0.6, 0.7)
+    c.arm(s, "up" + s, (o * osc(c.t, 2.4) * 18, 30, 30), k, 9)
+    c.add("head.roll", -o * 7 * k), c.add("earL.pitch", 10 * k), c.add("earR.pitch", 10 * k)
+
+
+ACTIONS = {"scratch_face": (3.6, scratch_face), "sniff": (4.0, sniff), "stretch": (5.0, stretch),
+           "ponder": (5.5, ponder), "sway": (4.4, sway), "nod": (1.4, nod), "greet": (2.8, greet)}
+
+
+# ---- how it feels: (seconds, the sign over its head, the move)
+
+def happy(c):
+    k = c.env(0.3, 0.6)
+    c.add("root.y", -max(0, osc(c.t, 2.3)) * 12 * c.window(0.2, 1.6, 0.2))
+    c.add("head.roll", 10 * k), c.add("earL.pitch", 14 * k), c.add("earR.pitch", 14 * k)
+    c.face("blink", 0.35 * k)
+
+
+def laugh(c):
+    k, s = c.env(0.3, 0.7), c.side
+    c.add("head.pitch", -13 * k), c.add("neck.pitch", -4 * k)
+    c.add("chest.roll", osc(c.t, 6.5) * 2.4 * k), c.add("root.y", -abs(osc(c.t, 3.2)) * 4 * k)
+    c.jaw((0.45 + 0.4 * max(0, osc(c.t, 5))) * k)
+    c.arm(s, "belly" + s, (0, 0, 6), k, 8)
+    c.face("blink", 0.6 * k)
+
+
+def excited(c):
+    k, hop = c.env(0.25, 0.7), c.window(0.2, 0.9, 0.2)
+    c.add("root.y", -26 * math.sin(clamp((c.t - 0.2) / 0.7, 0, 1) * math.pi))
+    c.arm("L", "upL", (10, -40, 30), k * 0.9, 10), c.arm("R", "upR", (-10, -40, 30), k * 0.9, 10)
+    c.add("earL.pitch", 16 * k), c.add("earR.pitch", 16 * k), c.add("head.pitch", -6 * k)
+    c.face("blink", -0.2 * hop)
+
+
+def curious(c):
+    k, o = c.env(0.6, 0.8), c.out
+    c.add("head.roll", o * 17 * k), c.add("spine.pitch", 6 * k), c.add("head.yaw", o * 6 * k)
+    c.add("earL.pitch", 12 * k), c.add("earR.pitch", 12 * k)
+
+
+def surprised(c):
+    k = c.env(0.12, 0.9)
+    c.add("spine.pitch", -8 * k), c.add("root.y", -9 * k), c.add("head.pitch", -5 * k)
+    c.arm("L", "chestL", (-20, -20, 30), k * 0.7, 16), c.arm("R", "chestR", (20, -20, 30), k * 0.7, 16)
+    c.add("earL.pitch", 18 * k), c.add("earR.pitch", 18 * k), c.face("blink", -0.25 * k)
+
+
+def sad(c):
+    k = c.env(1.2, 1.2)
+    c.add("head.pitch", 18 * k), c.add("neck.pitch", 6 * k), c.add("chest.pitch", 7 * k)
+    c.add("root.y", 5 * k)
+    c.add("earL.roll", -22 * k), c.add("earR.roll", 22 * k)
+    c.add("earL.pitch", -10 * k), c.add("earR.pitch", -10 * k)
+    c.face("blink", 0.45 * k), c.mute("look", k)
+
+
+def shy(c):
+    k, s, o = c.env(0.6, 0.8), c.side, c.out
+    c.arm(s, "muzzle" + s, (-o * 6, 4, 16), k, 9)
+    c.add("head.yaw", -o * 18 * k), c.add("head.pitch", 9 * k), c.add("head.roll", -o * 5 * k)
+    c.face("blink", 0.7 * k), c.mute("look", k)
+
+
+def proud(c):
+    k = c.env(0.6, 0.8)
+    c.add("chest.pitch", -7 * k), c.add("head.pitch", -10 * k), c.add("root.y", -4 * k)
+    c.arm("L", "hipL", (0, 0, 0), k, 7), c.arm("R", "hipR", (0, 0, 0), k, 7)
+    c.add("root.y", -3 * max(0, osc(c.t, 0.8)) * k)          # a little rise on its toes
+
+
+def confused(c):
+    k, s, o = c.env(0.6, 0.8), c.side, c.out
+    c.arm(s, "crown" + s, (osc(c.t, 3.5) * 8, osc(c.t, 3.5, 0.25) * 5, 10), k, 10)
+    c.add("head.roll", -o * (10 + 6 * osc(c.t, 0.6)) * k), c.add("head.pitch", 4 * k)
+    c.mute("look", k)
+
+
+def encouraging(c):
+    k, s, o = c.env(0.4, 0.7), c.side, c.out
+    c.add("head.pitch", max(0, osc(c.t, 1.6)) * 8 * c.window(0.1, 1.5, 0.2))
+    c.arm(s, "chest" + s, (o * 30, -40, 50), k, 8)
+    c.add("earL.pitch", 10 * k), c.add("earR.pitch", 10 * k), c.add("head.roll", -o * 5 * k)
+
+
+def calm(c):
+    nod(c)
+    c.face("blink", 0.4 * c.env(0.4, 0.6))
+
+
+MOOD = {"happy": (2.8, "♥", happy), "laugh": (3.2, "ha!", laugh), "excited": (2.8, "!", excited),
+        "curious": (3.2, "?", curious), "thinking": (3.6, "…", ponder),
+        "surprised": (2.4, "!", surprised), "sad": (4.2, "…", sad), "shy": (3.4, "♡", shy),
+        "proud": (3.2, "★", proud), "sleepy": (4.8, "z", stretch), "confused": (3.4, "?", confused),
+        "encouraging": (3.0, "✓", encouraging), "calm": (1.8, "", calm)}
+SLOW = ("sad",)
+OMEGA = {"root": 5, "spine": 4.5, "chest": 5, "neck": 6, "head": 7, "ear": 15, "jaw": 12,
+         "blink": 32, "twitch": 30, "breathe": 5}
+
+
+def omega_of(key):
+    return OMEGA.get("ear" if key.startswith("ear") else key.split(".")[0], 6)
+
+
+class Clip:
+    """One action or mood under way, and what its move may do to the frame."""
+
+    def __init__(self, name, dur, run, side):
+        self.name, self.dur, self.run, self.side = name, dur, run, side
+        self.out = -1 if side == "L" else 1
+        self.t, self.stop_at, self.frame = 0.0, dur, None
+
+    def env(self, a, b):
+        return ease(self.t / a) * (1 - ease((self.t - (self.stop_at - b)) / b))
+
+    def window(self, a, b, edge=0.3):
+        return (ease((self.t - a) / edge) * (1 - ease((self.t - b) / edge)) *
+                (1 if self.t < self.stop_at else 0))
+
+    def add(self, key, v):
+        self.frame.add(key, v)
+
+    def arm(self, s, goal, off, w, omega):
+        self.frame.arms[s].append((goal, off, w, omega))
+
+    def mute(self, what, k):
+        self.frame.mutes[what] = max(self.frame.mutes.get(what, 0), k)
+
+    def face(self, k, v):
+        f = self.frame.face
+        f[k] = min(f[k], v) if v < 0 else max(f[k], v)
+
+    def jaw(self, v):
+        self.frame.jaw = max(self.frame.jaw, v)
+
+
+class Frame:
+    """What every layer wants of the body this frame."""
+
+    def __init__(self):
+        self.T, self.mutes, self.omegas = {}, {}, {}
+        self.arms = {"L": [], "R": []}
+        self.face = {"blink": 0, "twitch": 0}
+        self.jaw = 0
+
+    def add(self, key, v):
+        self.T[key] = self.T.get(key, 0) + v
+
+
+class Bear:
+    """The bear on its own tkinter canvas. The window calls heard(), typing(), thinking()
+    and answered(); the bear shows itself on the first and leaves by itself."""
+
+    def __init__(self, canvas, line="#e8f1ff", fill="#0d1524", shown=None):
+        self.c = canvas
+        self.line, self.fill = line, fill
+        self.shown = shown or (lambda on: None)      # the window puts the canvas up or away
+        self.clock = time.monotonic                   # (the tests run it on a clock of their own)
+        self.rig = Rig()
+        self.items = {}                  # face number -> canvas polygon
+        self.val, self.vel = {}, {}
+        self.drawn, self.order, self.fills = None, [], {}
+        self.job = None
+        self.on = False
+        self.reset()
+
+    def reset(self):
+        now = self.clock()
+        self.thinking_on, self.typed_at, self.heard_at, self.answered_at = False, -1e9, -1e9, -1e9
+        self.action = self.mood = self.then = None
+        self.next_action = now + random.uniform(5, 9)
+        self.cool = {}
+        self.look = {"what": "chat", "until": 0, "pt": None}
+        self.blink_at, self.blink_until = now + random.uniform(1.5, 4), 0
+        self.flick, self.flick_at = None, now + random.uniform(4, 9)
+        self.shift = {"roll": 0, "x": 0, "sroll": 0, "at": now + random.uniform(3, 6)}
+        self.breath = [0.0, 4.2]
+        self.feet = {"L": {"x": 0, "step": None}, "R": {"x": 0, "step": None}}
+        self.emote = None
+        self.last = now
+        self.active_at = now
+
+    # ---- what the window tells it
+
+    def wake(self):
+        """Stand up beside the chat (if not there yet), and stay a while longer."""
+        self.active_at = self.clock()
+        if not self.on:
+            self.on = True
+            self.shown(True)
+            self.reset()
+            self.start("greet", "L")
+            self.tick()
+
+    def heard(self):
+        self.wake()
+        self.heard_at = self.clock()
+        if not self.mood:
+            self.start("nod")
+
+    def typing(self):
+        if not self.on:
+            return
+        self.active_at = self.typed_at = self.clock()
+        if self.action and self.action.name == "stretch":
+            self.action.stop_at = min(self.action.stop_at, self.action.t + 1.2)
+
+    def thinking(self, on):
+        self.thinking_on = bool(on)
+        if on:
+            self.next_action = min(self.next_action, self.clock() + random.uniform(1.2, 2.5))
+
+    def answered(self, mood=None):
+        """Orthros answered: its mood (one of MOODS), or a small nod."""
+        self.wake()
+        self.answered_at = self.clock()
+        self.look["until"] = 0
+        if not (mood in MOOD and self.feel(mood)):
+            self.start("nod")
+
+    def leave(self):
+        self.on = False
+        if self.job:
+            self.c.after_cancel(self.job)
+            self.job = None
+        self.c.delete("all")
+        self.items, self.drawn, self.order, self.fills = {}, None, [], {}
+        self.shown(False)
+
+    # ---- starting things
+
+    def start(self, name, side=None):
+        dur, run = ACTIONS[name]
+        if self.action:
+            self.action.stop_at = min(self.action.stop_at, self.action.t + 0.35)
+        self.action = Clip(name, dur, run, side or random.choice("LR"))
+        self.cool[name] = self.clock()
+
+    def feel(self, name):
+        dur, glyph, run = MOOD[name]
+        if self.action:
+            self.action.stop_at = min(self.action.stop_at, self.action.t + 0.4)
+        self.mood = Clip(name, dur, run, "L")       # the chat is to its left
+        self.mood.t = -0.25
+        if glyph:
+            self.emote = {"glyph": glyph, "at": self.clock() + 0.15}
+        return True
+
+    def decide(self, now):
+        """Pick what to do next, now and then, from what's going on."""
+        if self.action or self.mood or now < self.next_action:
+            return
+        self.next_action = now + random.uniform(7, 15)
+        if now - self.typed_at < 5 or now - self.heard_at < 2.5 or now - self.answered_at < 4:
+            return
+        ok = lambda name, secs: now - self.cool.get(name, -1e9) > secs
+        weights = ({"ponder": 2 * ok("ponder", 45), "sway": 3 * ok("sway", 12), "sniff": 2 * ok("sniff", 20)}
+                   if self.thinking_on else
+                   {"scratch_face": 0.8 * ok("scratch_face", 180), "sniff": 3 * ok("sniff", 30),
+                    "stretch": 1 * ok("stretch", 200), "sway": 1 * ok("sway", 25)})
+        pick = [(k, w) for k, w in weights.items() if w > 0]
+        if pick:
+            r = random.uniform(0, sum(w for _, w in pick))
+            for k, w in pick:
+                r -= w
+                if r <= 0:
+                    return self.start(k)
+            self.start(pick[-1][0])
+
+    # ---- one frame
+
+    def spring(self, key, target, dt, omega):
+        x, v = self.val.get(key, target), self.vel.get(key, 0)
+        steps = math.ceil(dt * omega / 0.5) or 1
+        h = dt / steps                   # small steps keep quick springs stable
+        for _ in range(steps):
+            v += (omega * omega * (target - x) - 2 * 0.86 * omega * v) * h
+            x += v * h
+        self.val[key], self.vel[key] = x, v
+        return x
+
+    def tick(self):
+        if not self.on:
+            return
+        self.job = self.c.after(1000 // FPS, self.tick)
+        now = self.clock()
+        if now - self.active_at > LINGER and not self.thinking_on:
+            return self.leave()
+        try:
+            self.step(now)
+        except Exception:                # a bear must never take the window down
+            self.leave()
+
+    def step(self, now):
+        dt = clamp(now - self.last, 0, 0.1)
+        self.last = now
+        t = now
+        self.decide(now)
+        fr = Frame()
+        # life: breathing at a varying rhythm, slow weight shifts with stillness between
+        self.breath[0] += dt / self.breath[1]
+        if self.breath[0] >= 1:
+            self.breath = [self.breath[0] - 1, random.uniform(3.6, 4.8)]
+        breath = math.sin(self.breath[0] * math.pi * 2)
+        fr.add("breathe", breath * (1.1 if self.thinking_on else 0.8))
+        fr.add("root.y", -breath * 1.2)
+        if now > self.shift["at"]:
+            still = random.random() < 0.4
+            self.shift = {"roll": 0 if still else random.uniform(-2, 2), "x": 0 if still else random.uniform(-6, 6),
+                          "sroll": 0 if still else random.uniform(-1.2, 1.2), "at": now + random.uniform(5, 12)}
+        fr.add("root.roll", self.shift["roll"]), fr.add("root.x", self.shift["x"])
+        fr.add("spine.roll", self.shift["sroll"])
+        fr.omegas.update({"root.roll": 1.5, "root.x": 1.5, "spine.roll": 1.5})
+        fr.add("spine.pitch", 2.5), fr.add("earL.pitch", 6), fr.add("earR.pitch", 6)   # attentive
+        fr.add("head.yaw", (osc(t, 0.071) + osc(t, 0.113, 0.3)) * 1.4)
+        fr.add("head.pitch", osc(t, 0.093, 0.6) * 1.2)
+        # blinks (now and then a double), ear flicks
+        if now > self.blink_at:
+            self.blink_until = now + 0.11
+            self.blink_at = now + (0.24 if random.random() < 0.15 else random.uniform(2.5, 6.5))
+        if now < self.blink_until:
+            fr.face["blink"] = 1
+        if now > self.flick_at:
+            self.flick = (random.choice(("earL", "earR")), now + 0.2)
+            self.flick_at = now + random.uniform(6, 15)
+        if self.flick and now < self.flick[1]:
+            fr.add(self.flick[0] + ".pitch", -26)
+        for which in ("action", "mood"):
+            clip = getattr(self, which)
+            if not clip:
+                continue
+            clip.t += dt
+            if clip.t >= 0:
+                clip.frame = fr
+                clip.run(clip)
+            if clip.t >= clip.stop_at:
+                setattr(self, which, None)
+                if which == "action":
+                    self.next_action = max(self.next_action, now + random.uniform(4, 9))
+        # where it looks: the chat to its left (mostly), you, or off somewhere; typing: the box
+        head = self.rig.joint("head")
+        look = self.look_target(now, head)
+        lk = 1 - fr.mutes.get("look", 0)
+        d = sub(look, head)
+        yaw = clamp(math.degrees(math.atan2(d[0], d[2])), -36, 36) - self.val.get("root.yaw", 0)
+        pitch = clamp(math.degrees(math.atan2(d[1], math.hypot(d[0], d[2]))), -22, 28)
+        fr.add("neck.yaw", yaw * 0.35 * lk), fr.add("head.yaw", yaw * 0.65 * lk)
+        fr.add("head.pitch", pitch * 0.7 * lk)
+        # springs for every part
+        pose = {"face": {}}
+        keys = set(fr.T) | {k for k in self.val if "." in k and not k.endswith("@")} | {"breathe"}
+        for key in keys:
+            omega = fr.omegas.get(key) or omega_of(key) * (0.6 if self.mood and self.mood.name in SLOW else 1)
+            v = self.spring(key, fr.T.get(key, 0), dt, omega)
+            if key == "breathe":
+                pose["breathe"] = v
+                continue
+            part, axis = key.split(".")
+            pose.setdefault(part, {})[axis] = v
+        pose["face"]["blink"] = self.spring("blink", fr.face["blink"], dt, OMEGA["blink"])
+        pose["face"]["twitch"] = self.spring("twitch", fr.face["twitch"], dt, OMEGA["twitch"])
+        pose["jaw"] = self.spring("jaw", fr.jaw, dt, OMEGA["jaw"])
+        self.rig.set_pose(pose)              # body first: the paws reach from where it now is
+        # feet planted; when the hips move far enough over, a foot steps after them
+        root_x = self.val.get("root.x", 0)
+        for s in "LR":
+            ft, other = self.feet[s], self.feet["R" if s == "L" else "L"]
+            if not ft["step"] and not other["step"] and abs(root_x - ft["x"]) > 18:
+                ft["step"] = [ft["x"], root_x, 0.0]
+            lift = 0
+            if ft["step"]:
+                ft["step"][2] += dt / 0.32
+                k = ease(ft["step"][2])
+                ft["x"] = ft["step"][0] + (ft["step"][1] - ft["step"][0]) * k
+                lift = math.sin(min(1, ft["step"][2]) * math.pi) * 16
+                if ft["step"][2] >= 1:
+                    ft["step"] = None
+            rest = self.rig.rest("foot" + s)
+            pose["leg" + s] = (rest[0] + ft["x"], rest[1] - lift, rest[2])
+        # paws: hanging, or wherever a move reaches
+        for s in "LR":
+            goal, omega = self.rig.anchor("rest" + s), 9
+            for g, off, w, om in fr.arms[s]:
+                g = add(self.rig.anchor(g), off or (0, 0, 0)) if isinstance(g, str) else g
+                goal = lerp3(goal, g, clamp(w, 0, 1))
+                if w > 0.3:
+                    omega = om or omega
+            pose["arm" + s] = tuple(self.spring("paw%s.%s@" % (s, ax), goal[i], dt, omega)
+                                    for i, ax in enumerate("xyz"))
+        self.rig.set_pose(pose)
+        self.draw(now)
+
+    def look_target(self, now, head):
+        if now - self.typed_at < 3.5:
+            return (ART_MID - 500, 1150, 380)                 # the box you type in: down to the left
+        if now > self.look["until"]:
+            weights = {"chat": 8 if now - self.answered_at < 8 else 4.5, "viewer": 2.5, "away": 1}
+            r, what = random.uniform(0, sum(weights.values())), "chat"
+            for what, w in weights.items():
+                r -= w
+                if r <= 0:
+                    break
+            self.look = {"what": what, "until": now + random.uniform(2.5, 7.5),
+                         "pt": (random.uniform(-300, 300), random.uniform(-260, 40), 900)}
+        if self.look["what"] == "chat":
+            return (ART_MID - 700, 420, 380)
+        if self.look["what"] == "away":
+            return add(head, self.look["pt"])
+        return (head[0], head[1] + 40, VIEWER)
+
+    # ---- drawing
+
+    def draw(self, now):
+        w, h = self.c.winfo_width(), self.c.winfo_height()
+        if w < 20 or h < 40:
+            return
+        scale = min(h * 0.8 / ART_TALL, w * 0.95 / ART_W)
+        o = (w / 2, h - 4, scale)
+        shapes = self.rig.shapes(o)
+        emote = self.emote_at(now, o)
+        flats = {n: flat for n, flat, _ in shapes}
+        if self.drawn and emote == self.drawn[1] and set(flats) == set(self.drawn[0]):
+            # Drawing is the expensive part (tkinter), so slow movement -- breathing,
+            # a drifting head -- is drawn a few times a second, and movement at full rate.
+            moved = max(max(abs(a - b) for a, b in zip(flat, self.drawn[0][n]))
+                        for n, flat in flats.items())
+            if moved < 0.4 or (moved < 1.5 and now - self.drawn[2] < 0.3):
+                return
+        self.drawn = (flats, emote, now)
+        order = [n for n, _, _ in shapes]
+        for n, flat, lit in shapes:
+            item = self.items.get(n)
+            fill = mix(self.fill, self.line, 0.03 + 0.09 * round(lit, 1))
+            if item is None:
+                self.items[n] = self.c.create_polygon(flat, fill=fill, outline=self.line,
+                                                      width=1, joinstyle="round", tags="bear")
+                self.fills[n] = fill
+                continue
+            self.c.coords(item, flat)
+            if self.fills.get(n) != fill:
+                self.c.itemconfigure(item, fill=fill)
+                self.fills[n] = fill
+            if n not in self.order:
+                self.c.itemconfigure(item, state="normal")
+        if order != self.order:              # restacked only when the order changes
+            for n in order:
+                self.c.tag_raise(self.items[n])
+            for n in set(self.items) - set(order):
+                self.c.itemconfigure(self.items[n], state="hidden")
+            self.order = order
+        self.c.delete("extra")
+        mouth = self.val.get("jaw", 0)
+        if mouth > 0.05:                     # an open mouth: a dark gap under the nose
+            m = self.rig.project(lerp3(self.rig.anchor("chinL"), self.rig.anchor("chinR"), 0.5), o)
+            nz = self.rig.project(self.rig.anchor("nose"), o)
+            cx, cy = (m[0] + nz[0]) / 2, nz[1] + (m[1] - nz[1]) * 0.62
+            rx, ry = 11 * scale, 14 * mouth * scale
+            self.c.create_oval(cx - rx, cy - ry, cx + rx, cy + ry, fill=self.line, outline="", tags="extra")
+        if emote:                            # a small sign over its head for a mood
+            x, y, glyph = emote
+            r = 13
+            self.c.create_oval(x - r, y - r, x + r, y + r, fill=self.fill, outline=self.line,
+                               width=1.5, tags="extra")
+            self.c.create_text(x, y + 1, text=glyph, fill="#ff6b9a" if glyph in "♥♡" else self.line,
+                               font=("Segoe UI", 9 if len(glyph) > 1 else 12, "bold"), tags="extra")
+
+    def emote_at(self, now, o):
+        e = self.emote
+        if not e:
+            return None
+        age = now - e["at"]
+        if age < 0:
+            return None
+        if age > 2.4:
+            self.emote = None
+            return None
+        top = self.rig.project(self.rig.anchor("top"), o)
+        w = self.c.winfo_width()
+        return (round(min(w - 15, top[0] + 30)), round(max(15, top[1] - 14 - age * 8)), e["glyph"])

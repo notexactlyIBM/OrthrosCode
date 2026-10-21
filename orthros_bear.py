@@ -13,16 +13,16 @@ outline is a wall round each piece from its front to its back, bones turn in 3D,
 polygons are drawn back to front -- with two-bone IK for the paws and feet.
 Bear is its brain and its drawing on a tkinter canvas (its den, or the picture's):
 every part of the body has somewhere it would like to be, made of layers (posture,
-breathing, slow weight shifts, where it looks, what it is doing, any mood), and
-follows it on a spring, so nothing pops.
+where it looks, what it is doing, any mood), and follows it on a spring, so nothing
+pops.
 
 The model ends each chat answer with [mood: ...] and may cue moves with [do: ...]
 (orthros.py takes both off); the bear plays them.
 
 Light on purpose (2026-10-21): tkinter takes about 35 ms to draw the whole bear,
 so it runs at 15 frames a second only while it moves or you chat and at 5 while it
-only stands, redraws only when it has moved enough to see or its glow has changed
-by a tenth, turns far round only while it walks (the only time its back and sides
+stands, stands still (no breathing or sway: drawn without anti-aliasing, slow small
+movement stutters), redraws only when it has moved or its glow has changed by a tenth, turns far round only while it walks (the only time its back and sides
 are drawn), stops while its tab is hidden, and draws nothing while it hides behind
 the chat box.
 
@@ -994,7 +994,7 @@ class Bear:
         self.items, self.fills = {}, {}               # face number -> polygon, and its colours
         self.palette, self.placed = {}, {}            # colours worked out; where each face is
         self.val, self.vel = {}, {}
-        self.drawn, self.order, self.o = None, [], None
+        self.drawn, self.order, self.o, self.moving = None, [], None, False
         self.energy, self.glow = 0.0, 0.0
         self.where, self.since = "away", self.clock()  # away coming here going up fishing down
         self.walk_x, self.lift, self.greeted = 0.0, 0.0, False
@@ -1016,8 +1016,6 @@ class Bear:
         self.look = {"what": "viewer", "until": 0, "pt": None}
         self.blink_at, self.blink_until = now + random.uniform(1.5, 4), 0
         self.flick, self.flick_at = None, now + random.uniform(4, 9)
-        self.shift = {"roll": 0, "x": 0, "sroll": 0, "at": now + random.uniform(3, 6)}
-        self.breath = [0.0, 4.2]
         self.feet = {"L": {"x": 0, "step": None}, "R": {"x": 0, "step": None}}
         self.emote = None
         self.last = now
@@ -1197,7 +1195,7 @@ class Bear:
 
     def tick(self):
         now = self.clock()
-        rate = 1 if self.where == "away" else FPS if self.lively(now) else IDLE_FPS
+        rate = 1 if self.where == "away" else FPS if self.moving or self.lively(now) else IDLE_FPS
         self.job = self.c.after(1000 // rate, self.tick)
         if not self.visible():
             self.last = now
@@ -1318,7 +1316,6 @@ class Bear:
     def step(self, now):
         dt = clamp(now - self.last, 0, 0.25)
         self.last = now
-        t = now
         self.glow += (self.energy - self.glow) * min(1, dt / 1.5)
         self.decide(now)
         fr = Frame()
@@ -1335,23 +1332,11 @@ class Bear:
             fr.add("earL.pitch", -6 * down), fr.add("earR.pitch", -6 * down)
             fr.add("spine.roll", math.sin(self.gait * math.pi * 2) * 3 * down)
             fr.add("head.roll", -math.sin(self.gait * math.pi * 2) * 2 * down)
-        # life: breathing at a varying rhythm, slow weight shifts with stillness between
-        self.breath[0] += dt / self.breath[1]
-        if self.breath[0] >= 1:
-            self.breath = [self.breath[0] - 1, random.uniform(3.6, 4.8)]
-        breath = math.sin(self.breath[0] * math.pi * 2)
-        fr.add("breathe", breath * (1.1 if self.thinking_on else 0.8))
-        fr.add("root.y", -breath * 1.2)
-        if now > self.shift["at"]:
-            still = random.random() < 0.4
-            self.shift = {"roll": 0 if still else random.uniform(-2, 2), "x": 0 if still else random.uniform(-6, 6),
-                          "sroll": 0 if still else random.uniform(-1.2, 1.2), "at": now + random.uniform(5, 12)}
-        fr.add("root.roll", self.shift["roll"]), fr.add("root.x", self.shift["x"])
-        fr.add("spine.roll", self.shift["sroll"])
-        fr.omegas.update({"root.roll": 1.5, "root.x": 1.5, "spine.roll": 1.5})
+        # Standing, it stands still: no breathing, swaying or drifting head. Without
+        # anti-aliasing a move of a pixel or two is a jump, and tkinter cannot draw fast
+        # enough to hide it, so slow small movement read as a stutter (2026-10-21). It
+        # moves only when it means to, and every frame of that is drawn.
         fr.add("spine.pitch", 2.5), fr.add("earL.pitch", 6), fr.add("earR.pitch", 6)   # attentive
-        fr.add("head.yaw", (osc(t, 0.071) + osc(t, 0.113, 0.3)) * 1.4)
-        fr.add("head.pitch", osc(t, 0.093, 0.6) * 1.2)
         # blinks (now and then a double), ear flicks
         if now > self.blink_at:
             self.blink_until = now + 0.11
@@ -1496,14 +1481,13 @@ class Bear:
         emote = self.emote_at(now, o)
         glow = round(self.glow * 10)
         if self.drawn and (emote, glow, o) == self.drawn[0]:
-            # Drawing is the expensive part (tkinter), so slow movement -- breathing,
-            # a drifting head -- is drawn now and then, and movement at full rate.
+            # Drawing is the expensive part (tkinter): what has not moved a visible part
+            # of a pixel is not drawn again, and anything that has is drawn at once, never
+            # held back (2026-10-21: held-back small moves played as jerks).
             moved = max(max(abs(p[0] - q[0]), abs(p[1] - q[1]))
                         for p, q in zip(self.rig.out, self.drawn[2])) * o[2]
-            # (2026-10-21: while it moved, small moves were drawn only every 0.4 s, so a
-            # slow turn of the head played at two or three frames a second and looked jerky)
-            if self.lively(now) and moved < 0.4 or not self.lively(now) and (
-                    moved < 1.0 or moved < 1.5 and now - self.drawn[1] < 1.0):
+            self.moving = moved >= 0.4
+            if not self.moving:
                 return False
         shapes = self.rig.shapes(o)
         self.drawn = ((emote, glow, o), now, [p[:] for p in self.rig.out])

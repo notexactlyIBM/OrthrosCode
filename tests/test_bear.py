@@ -31,6 +31,12 @@ class Canvas:
     def winfo_height(self):
         return self.h
 
+    def winfo_toplevel(self):         # (a window just big enough to show it all)
+        return self
+
+    def winfo_rooty(self):
+        return 0
+
     def after(self, ms, fn):
         self.jobs += 1
         return self.jobs
@@ -115,12 +121,18 @@ class RigTest(unittest.TestCase):
         rig = ob.Rig()
         rig.set_pose({"head": {"yaw": 50}})
         pieces = [(key, flat) for key, _, flat, _ in rig.shapes((100, 300, 0.36)) if isinstance(key, tuple)]
-        self.assertTrue(pieces)
+        self.assertTrue([key for key, _ in pieces if not rig.faces[key[0]].get("back")])
         for key, flat in pieces:
             self.assertGreaterEqual(len(flat), 6, key)
-            self.assertNotIn("back", rig.faces[key[0]])
         rig.set_pose({})                          # facing you, every polygon is whole again
         self.assertFalse([k for k, _, _, _ in rig.shapes((100, 300, 0.36)) if isinstance(k, tuple)])
+
+    def test_a_paw_takes_only_itself_when_it_lifts(self):
+        # 2026-10-21: the right paw took two bits of the thigh showing between its claws
+        between = [f for f in ob.FACES if set(f) in ({301, 302, 303}, {303, 305, 306, 307})]
+        self.assertEqual(len(between), 2)
+        for f in between:
+            self.assertNotIn(ob.part_of(f), ("armL", "armR"))
 
     def test_a_paw_reaches_what_it_is_sent_to(self):
         rig = ob.Rig()
@@ -217,10 +229,30 @@ class BearTest(unittest.TestCase):
         self.assertEqual(self.bear.where, "fishing")
         self.assertIs(self.bear.c, self.stream)
         seen = []
-        run(self.bear, 10, self.t, seen)
+        self.t = run(self.bear, 10, self.t, seen)
         self.assertEqual(seen[-1], "away")
         self.assertFalse(self.polygons(self.stream))
         self.assertGreater(self.bear.next_salmon, self.t + ob.SALMON_EVERY[0] - 1)
+        # 2026-10-21: it kept its height under the picture, and walked out half out of sight
+        self.come()
+        self.assertEqual(self.bear.spot(300, 320)[1], 320 - 3)
+
+    def test_a_salmon_is_held_across_both_paws_and_eaten_in_bites(self):
+        fish = ob.Salmon(self.stream, 0, True)
+        counts = []
+        for fish.bites in range(ob.BITES + 1):
+            counts.append(len(fish.left()))
+        self.assertEqual(counts[0], len(ob.SALMON))
+        self.assertEqual(counts[-1], 0)
+        self.assertEqual(counts, sorted(counts, reverse=True))
+        self.assertEqual(len(set(counts)), len(counts))        # every bite takes some
+        self.bear.fish()
+        self.t = run(self.bear, sum(d for _, d in ob.FISH[:4]) + 0.5, self.t)
+        self.assertEqual(ob.fish_phase(self.t - self.bear.since)[0], "chew")
+        fish = self.bear.salmon
+        self.assertEqual(fish.angle, 0)                        # level
+        paws = sorted(self.bear.rig.project(self.bear.rig.joint("paw" + s), self.bear.o)[0] for s in "LR")
+        self.assertGreater(paws[1] - paws[0], fish.size * 0.25)   # apart, along it
 
     def test_a_busy_card_lights_its_lines(self):
         self.come()

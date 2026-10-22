@@ -43,7 +43,8 @@ ART_W, ART_MID, ART_FEET, ART_TALL = 493, 248, 950, 925
 SNAP = 11                          # a joint this close to a line intersection sits on it
 # how far each piece stands out from its middle plane: a deep-chested bear with a round
 # head and a long muzzle; the arms' middle plane is a little in front of the body's
-DEPTH = {"body": 0.55, "head": 0.6, "muzzle": 72, "arm": 30, "leg": 34, "armMid": 22}
+DEPTH = {"body": 0.55, "head": 0.6, "muzzle": 72, "arm": 30, "leg": 34, "armMid": 22,
+         "back": 0.25}
 # how thick each piece is at its outline, either side of its middle plane: its side
 # walls (2026-10-21: the outline lay on the middle plane, so side-on, or on all fours,
 # the bear was a paper cut-out -- the drawing has too few points inside its outline
@@ -240,9 +241,11 @@ AREAS = {
     "armL": ((60, 286), (100, 290), (133, 326), (150, 422), (126, 489), (114, 532), (123, 618),
              (112, 640), (108, 668), (106, 680), (96, 712), (14, 712), (16, 470), (44, 392)),
     "armR": ((440, 286), (393, 296), (389, 344), (401, 405), (385, 475), (400, 561), (401, 605),
-             (400, 636), (384, 646), (392, 684), (413, 690), (440, 692), (485, 692), (485, 470),
-             (462, 380)),
+             (400, 636), (384, 646), (395, 664), (403, 664), (410, 676), (412, 690), (440, 692),
+             (485, 692), (485, 470), (462, 380)),
 }
+# (2026-10-21: the right paw's edge ran below its claw tips, so it took two bits of the
+# thigh showing between them, and lifted it left a hole in the leg)
 # The snout is a faceted block: how far each of its points stands out from the face, as a
 # share of DEPTH["muzzle"]. Found by position (within 3 px); any other point is 0.
 SNOUT = (
@@ -266,6 +269,14 @@ ANCHORS = {
     "top": ("head", 258, 10, 0), "nose": ("head", 256, 176, 121),
 }
 LIGHT = norm((-0.45, -0.55, 0.7))
+
+
+def seen_height(canvas):
+    """How much of a canvas is in its window, from its top: a short window can leave its
+    bottom out of sight, and the bear's feet stand on the edge you can see."""
+    top = canvas.winfo_toplevel()
+    return max(1, min(canvas.winfo_height(),
+                      top.winfo_rooty() + top.winfo_height() - canvas.winfo_rooty()))
 
 
 def inside(p, poly):
@@ -401,17 +412,21 @@ class Rig:
             muzzle and the toes, the back neither."""
             if part in ("armL", "armR"):
                 return limb((x, y), chains[part], DEPTH["arm"])
+            # The back bulges only a little: the drawing has few points inside its outline,
+            # so a full bulge jumps from point to point, and side-on those jumps were spikes
+            # along the bear's back (2026-10-21). Its walls give it its thickness.
+            k = 1 if front else DEPTH["back"]
             if part in ("legL", "legR"):
                 toes = (y - 900) * 0.9 if front and y > 900 else 0
                 lz = limb((x, y), chains[part], DEPTH["leg"]) + toes
                 t = smooth(700, 760, y)
-                return lz * t + bulge(x, y, body_span, DEPTH["body"]) * (1 - t)
+                return lz * t + bulge(x, y, body_span, DEPTH["body"]) * k * (1 - t)
             if part in ("earL", "earR"):
                 return 8
             if part == "head":
                 s = front and next((s for s in SNOUT if math.hypot(s[0] - x, s[1] - y) < 3), None)
-                return bulge(x, y, head_span, DEPTH["head"]) + (DEPTH["muzzle"] * s[2] if s else 0)
-            return bulge(x, y, body_span, DEPTH["body"])
+                return bulge(x, y, head_span, DEPTH["head"]) * k + (DEPTH["muzzle"] * s[2] if s else 0)
+            return bulge(x, y, body_span, DEPTH["body"]) * k
 
         # the outline (edges with a polygon on one side only) is the top of the side walls
         uses = {}
@@ -481,11 +496,13 @@ class Rig:
         for f in list(faces):
             faces.append(dict(f, vs=[behind(i) for i in reversed(f["vs"])], back=True))
         faces += walls
-        # The front in triangles: a long polygon that is not flat (the snout's sides, from
-        # the brow to the mouth) turns away a part at a time, its fold drawn where it turns,
-        # and not all at once, which leaves a hole: the snout side-on looked hollow.
+        # The front and the back in triangles: a long polygon that is not flat (the snout's
+        # sides, from the brow to the mouth) turns away a part at a time, its fold drawn
+        # where it turns, and not all at once, which leaves a hole: the snout side-on looked
+        # hollow. (2026-10-21: the back was drawn all or nothing, and side-on its half-turned
+        # polygons stuck out of the bear as spikes.)
         for f in faces:
-            if f.get("back") or f.get("wall"):
+            if f.get("wall"):
                 continue
             pts = [(verts[i]["x"], verts[i]["y"]) for i in f["vs"]]
             f["tris"] = triangulate(pts)
@@ -666,9 +683,11 @@ class Rig:
             a = sum(screen[vs[k]][0] * screen[vs[(k + 1) % m]][1] -
                     screen[vs[(k + 1) % m]][0] * screen[vs[k]][1] for k in range(m)) * f["sign"]
             pieces = [vs]
-            if "tris" not in f:              # a back or a wall: all of it, if it faces you
+            if "tris" not in f:              # a wall: all of it, if it faces you
                 if a < 0.5:
                     continue
+            elif a < -0.6 * f["whole2"] * s2:
+                continue                     # clearly turned away (the back, mostly)
             else:
                 # A big polygon is split into its triangles only while it is clearly turning
                 # (shrunk under a third of its size, until back over two fifths), and then a
@@ -686,8 +705,8 @@ class Rig:
                     if not all(vis):
                         pieces = [[vs[c] for c in loop]
                                   for loop in outline([t for t, on in zip(tris, vis) if on])]
-                elif a < -0.5:
-                    continue                 # turned away from you
+                elif a < (0.5 if f.get("back") else -0.5):
+                    continue                 # turned away from you (a back: unless it faces you)
             z = sum(self.out[i][2] for i in vs) / m + f["bias"]
             p, q, r = self.out[vs[0]], self.out[vs[1]], self.out[vs[2]]
             nrm = norm(cross(sub(q, p), sub(r, p)))
@@ -919,7 +938,7 @@ def gait(u):
         return reach - 2 * reach * u / 0.65, 0.0
     k = (u - 0.65) / 0.35
     return -reach + 2 * reach * ease(k), math.sin(k * math.pi) * 24
-FISH = (("rise", 1.1), ("wait", 1.5), ("catch", 0.5), ("lift", 0.6), ("chew", 2.6),
+FISH = (("rise", 1.1), ("wait", 1.5), ("catch", 0.5), ("lift", 0.7), ("chew", 3.4),
         ("sink", 1.0))             # the fishing trip, phase by phase (seconds)
 
 
@@ -932,22 +951,58 @@ def fish_phase(t):
     return "done", 1.0
 
 
+# The salmon, low-poly, head to the right: its points in a drawing of one 364 px long,
+# and its polygons, made from them as shares of its length from its middle.
+SALMON_AT = dict(
+    nt=(10, 62), gp=(40, 74), lj=(12, 80), ch=(69, 96), gt=(80, 44), ht=(122, 32),
+    m0=(96, 67), bl0=(100, 105), m1=(150, 67), dfb=(172, 31), dft=(199, 6), dfr=(224, 35),
+    m2=(226, 68), bl1=(182, 108), pv1=(188, 110), pvt=(220, 132), pv2=(216, 107),
+    bk1=(266, 51), m3=(278, 72), afb=(246, 101), aft=(275, 114), afr=(296, 89),
+    adb=(272, 52), adt=(292, 44), adr=(296, 58), pt=(318, 63), ut=(374, 31), fk=(352, 75),
+    lt=(362, 120), pb=(326, 84), pc1=(98, 91), pc2=(136, 100), pct=(118, 118), eye=(48, 62))
+SALMON_UV = {k: ((192 - x) / 364, (y - 69) / 364) for k, (x, y) in SALMON_AT.items()}
+SALMON = tuple(tuple(SALMON_UV[k] for k in f) for f in (
+    ("nt", "gt", "m0", "gp"), ("gp", "m0", "ch", "lj"),
+    ("gt", "ht", "m0"), ("ht", "m1", "m0"), ("m0", "m1", "bl1", "bl0", "ch"),
+    ("ht", "dfb", "m1"), ("dfb", "m2", "m1"), ("m1", "m2", "bl1"),
+    ("dfb", "dft", "dfr"), ("dfb", "dfr", "m2"), ("dfr", "bk1", "m2"),
+    ("m2", "pv2", "bl1"), ("bl1", "pv2", "pvt", "pv1"),
+    ("m2", "afb", "pv2"), ("m2", "bk1", "m3", "afb"), ("bk1", "adb", "adr", "pt", "m3"),
+    ("adb", "adt", "adr"), ("m3", "pt", "fk", "pb", "afr", "afb"), ("afb", "afr", "aft"),
+    ("pt", "ut", "fk"), ("fk", "lt", "pb"), ("pc1", "pc2", "pct")))
+BITES = 4                          # the head, the front, the back, the tail
+
+
 class Salmon:
     """A salmon on the GPU picture: swims in from one side along the bottom (the top of
-    the graph below it), leaps to the bear's waiting paw, and is eaten in three bites."""
+    the graph below it), leaps to the bear's waiting paw, and is held across both paws
+    and eaten in bites from the head, each bite taking the polygons it reaches.
+    (2026-10-21: it was held up in one paw and shrank as it was eaten.)"""
 
     FILL, LINE = "#e07a5f", "#ffb4a2"
-    BODY = ((-0.5, 0), (-0.25, -0.18), (0.15, -0.2), (0.42, -0.08), (0.5, 0), (0.42, 0.08),
-            (0.15, 0.2), (-0.25, 0.18))
-    TAIL = ((-0.45, 0), (-0.72, -0.22), (-0.64, 0), (-0.72, 0.22))
 
     def __init__(self, canvas, to_x, from_left):
         self.c, self.to_x, self.dir = canvas, to_x, 1 if from_left else -1
         w, h = canvas.winfo_width(), canvas.winfo_height()
-        self.size = max(24, h * 0.14)
+        self.size = max(30, h * 0.2)                  # its length
         self.start = -self.size if from_left else w + self.size
         self.x, self.y, self.angle = self.start, h - self.size * 0.3, 0.0
         self.bites = 0
+
+    def left(self):
+        """Its polygons not yet eaten: each bite reaches a quarter further from the head."""
+        reach = 0.5 - self.bites / BITES
+        return [f for f in SALMON if sum(p[0] for p in f) / len(f) < reach]
+
+    def front(self):
+        """How far towards its head (a share of its length) what is left of it reaches."""
+        return max((p[0] for f in self.left() for p in f), default=-0.5)
+
+    def at(self, u, v=0.0):
+        """Where a point of it is on the canvas."""
+        ca, sa = math.cos(self.angle), math.sin(self.angle)
+        return (self.x + (u * self.dir * ca - v * sa) * self.size,
+                self.y + (u * self.dir * sa + v * ca) * self.size)
 
     def swim(self, k, t):
         """k: 0..1 of the way to where it leaps; it wiggles as it goes."""
@@ -958,17 +1013,14 @@ class Salmon:
 
     def draw(self):
         self.c.delete("salmon")
-        if self.bites >= 3:
-            return
-        length = self.size * (1 - 0.28 * self.bites)
-        ca, sa = math.cos(self.angle), math.sin(self.angle)
-        pts = lambda shape: [v for x, y in shape for v in (
-            self.x + (x * self.dir * ca - y * sa) * length, self.y + (x * self.dir * sa + y * ca) * length)]
-        self.c.create_polygon(pts(self.TAIL), fill=self.FILL, outline=self.LINE, tags="salmon")
-        self.c.create_polygon(pts(self.BODY), fill=self.FILL, outline=self.LINE, tags="salmon")
-        ex, ey = pts(((0.3, -0.05),))
-        self.c.create_oval(ex - 1.5, ey - 1.5, ex + 1.5, ey + 1.5, fill="#2a1410", outline="",
-                           tags="salmon")
+        for f in self.left():
+            self.c.create_polygon([c for u, v in f for c in self.at(u, v)], fill=self.FILL,
+                                  outline=self.LINE, joinstyle="round", tags="salmon")
+        if not self.bites:
+            ex, ey = self.at(*SALMON_UV["eye"])
+            r = max(1.5, self.size * 0.016)
+            self.c.create_oval(ex - r, ey - r, ex + r, ey + r, fill="#2a1410", outline="",
+                               tags="salmon")
 
 
 class Bear:
@@ -1106,6 +1158,9 @@ class Bear:
         self.c.delete("bear", "extra", "salmon")
         self.items, self.fills, self.placed, self.order, self.drawn = {}, {}, {}, [], None
         self.c, self.o = canvas or self.den, None
+        # (2026-10-21: a fishing trip that ended with it going away kept its height under
+        # the GPU picture, and it next walked out of its den half out of sight below it)
+        self.lift = 0.0
 
     def offstage(self):
         """How far right (drawing px) it stands when hidden behind the chat box."""
@@ -1122,6 +1177,7 @@ class Bear:
         if self.c is self.stream:
             scale = h * 0.85 / ART_TALL
             return self.fish_x, h + self.lift, scale
+        h = seen_height(self.den)              # its feet on the den's bottom edge, in sight
         return w / 2, h - 3 + self.lift, self.den_scale(w, h)
 
     def interactive(self, now):
@@ -1289,25 +1345,39 @@ class Bear:
             fr.arms[s].append((lerp3(ready, grab, ease(k)), None, 1, 16))
             fr.look = (grab, 1)
         else:
-            if phase in ("lift", "chew"):        # paw to muzzle, and eat
-                mouth = self.rig.anchor("muzzle" + s)
-                fr.arms[s].append((add(mouth, (out * 30, 10, 30)), None,
-                                   ease(k) if phase == "lift" else 1, 10))
-                fish.x, fish.y = paw
-                fish.angle = math.pi / 2 * out
+            if phase in ("lift", "chew"):        # both paws hold it across, and it is eaten
+                self.hold(fr, fish, o, s, k if phase == "lift" else 1.0)
                 if phase == "chew":
-                    fr.jaw = max(fr.jaw, 0.25 + 0.45 * max(0, math.sin(t * 7)))
+                    n = k * (BITES + 0.6)
+                    fish.bites = min(BITES, int(n))
+                    bite = max(0, math.sin((n % 1) * math.pi))          # open, then snap shut
+                    fr.jaw = max(fr.jaw, 0.6 * bite)
+                    fr.add("head.pitch", 6 + 6 * bite)
                     fr.face["blink"] = max(fr.face["blink"], 0.5)
-                    fish.bites = min(3, int(k * 3.4))
-                    fr.add("head.pitch", 6)
             if phase in ("sink", "done"):
-                fish.bites = 3
+                fish.bites = BITES
             if phase == "chew" and k > 0.9 and not self.emote:
-                self.emote = {"glyph": "♥", "at": self.clock()}
+                self.emote = {"glyph": "\u2665", "at": self.clock()}
         if phase == "done":
             self.salmon = None
             self.c.delete("salmon")
             self.set("down" if self.interactive(self.clock()) else "away")
+
+    def hold(self, fr, fish, o, s, k):
+        """The salmon across its two paws under its mouth, what is left of its head end at
+        the mouth: k of the way there from the paw that caught it."""
+        nose, chin = self.rig.anchor("nose"), lerp3(self.rig.anchor("chinL"), self.rig.anchor("chinR"), 0.5)
+        mouth = self.rig.project(lerp3(nose, chin, 0.6), o)
+        front = fish.front()
+        x, y = mouth[0] - front * fish.dir * fish.size, mouth[1] + 0.1 * fish.size
+        paw = self.rig.project(self.rig.joint("paw" + s), o)
+        fish.x, fish.y = paw[0] + (x - paw[0]) * ease(k), paw[1] + (y - paw[1]) * ease(k)
+        fish.angle *= 1 - ease(k)
+        span = front + 0.5                        # its paws on what is left, a little in from each end
+        grips = sorted(fish.at(-0.5 + span * share) for share in (0.22, 0.78))
+        for side, (gx, gy) in zip("LR", grips):
+            fr.arms[side].append((self.to_art(gx, gy + 0.08 * fish.size, 110), None, ease(k), 10))
+        fr.look = (self.to_art(mouth[0], mouth[1], 200), 0.5)
 
     def to_art(self, x, y, z=0.0):
         ox, feet, scale = self.o

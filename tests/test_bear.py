@@ -91,7 +91,7 @@ class RigTest(unittest.TestCase):
         rig = ob.Rig()
         walls = sum(1 for f in rig.faces if f.get("wall"))
         self.assertGreater(walls, 50)
-        self.assertEqual(len(rig.faces), 2 * len(ob.FACES) + walls)      # front, back, sides
+        self.assertEqual(len(rig.faces), 2 * (len(ob.FACES) + len(ob.UNDER)) + walls)   # front, back, sides
         for v in rig.verts:
             self.assertAlmostEqual(sum(k for _, k in v["w"]), 1.0, places=6)
 

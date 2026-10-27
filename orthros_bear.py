@@ -279,6 +279,14 @@ def seen_height(canvas):
                       top.winfo_rooty() + top.winfo_height() - canvas.winfo_rooty()))
 
 
+# the leg under a paw's claws, found by position (art px) so a regenerated mesh still fits
+UNDER = (
+    ("legR", ((383, 641), (391, 640), (400, 646), (408, 650), (407, 673), (389, 667))),
+    ("legR", ((400, 646), (403, 624), (408, 650))),
+    ("legR", ((407, 673), (408, 690), (404, 695))),
+)
+
+
 def inside(p, poly):
     c = False
     j = len(poly) - 1
@@ -338,6 +346,13 @@ class Rig:
         """The vertex copies each part draws with (arms get their own, so an arm swings clear
         of the body), their depths and bone weights, and the face's moving features."""
         faces = [{"ids": f, "part": part_of(f)} for f in FACES]
+        # under the right paw (the bear's left): the thigh its claws hang over, as one plain patch
+        # on the leg (no claw lines), hidden while the paw hangs there
+        for part, pts in UNDER:
+            ids = [next((i for i, v in enumerate(VERTS) if math.hypot(v[0] - x, v[1] - y) < 2), -1)
+                   for x, y in pts]
+            if min(ids) >= 0:
+                faces.append({"ids": tuple(ids), "part": part})
         verts, index = [], {}
         for f in faces:
             vs = []

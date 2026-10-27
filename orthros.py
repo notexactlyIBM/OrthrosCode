@@ -273,10 +273,10 @@ words]. You will get the results and then answer. Keep private names out of sear
 BODY_RULE = """You have a body: in your window you are a low-poly grizzly standing on your hind
 legs in the left third of the chat box, your lines glowing faintly, more the busier
 the graphics card is. You walk out from behind the chat when the operator comes to
-talk, and back behind it to hide when the talk has been quiet for two minutes. You
-breathe and blink, watch the operator type, ponder while you think, and now and
-then sniff the air, scratch your face or stretch with a yawn. Salmon swim along the
-GPU graph above the chat now and then, and you climb up, catch one and eat it. It is
+talk, and back behind it to hide when the talk has been quiet for ten minutes. You
+breathe and blink, watch the operator type, ponder while you think, and once in a
+while sniff the air, scratch your face or stretch with a yawn. About once a day a
+salmon swims along the GPU graph above the chat, and you climb up, catch and eat it. It is
 you, so mention it when it fits, naturally and not every time. To move on purpose
 (wave hello, nod, sniff the air, scratch your face, stretch, paw to your chin, catch
 a salmon), add a line [do: what] before your mood line.
@@ -511,15 +511,70 @@ def pid_alive(pid):
 
 
 GPU_QUERY = "name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw"
+_nvml = None                         # NVIDIA's library once loaded; False when it cannot be
+
+
+class NVML_UTIL(ctypes.Structure):
+    _fields_ = [("gpu", ctypes.c_uint), ("memory", ctypes.c_uint)]
+
+
+class NVML_MEMORY(ctypes.Structure):
+    _fields_ = [("total", ctypes.c_ulonglong), ("free", ctypes.c_ulonglong),
+                ("used", ctypes.c_ulonglong)]
+
+
+def nvml_reading():
+    """gpu_reading's answer from NVML in this process, or None.
+
+    nvidia-smi is NVML with a parser in front, and the driver installs the
+    library (nvml.dll) itself. 2026-10-27: the page's GPU view was starting a
+    process every two seconds for as long as Orthros ran. One call that fails
+    leaves that number out, as nvidia-smi does; a library that will not load
+    or answer is not tried again, and nvidia-smi takes over.
+    """
+    global _nvml
+    if _nvml is False or os.name != "nt":
+        return None
+    try:
+        if _nvml is None:
+            lib = ctypes.WinDLL("nvml")
+            if lib.nvmlInit_v2():
+                raise OSError("NVML would not initialise")
+            _nvml = lib
+        handle = ctypes.c_void_p()
+        if _nvml.nvmlDeviceGetHandleByIndex_v2(0, ctypes.byref(handle)):
+            return None
+        name = ctypes.create_string_buffer(96)
+        util, mem, temp, power = NVML_UTIL(), NVML_MEMORY(), ctypes.c_uint(), ctypes.c_uint()
+        reading = {"name": "", "util": None, "mem_used": None, "mem_total": None,
+                   "temp": None, "power": None}
+        if not _nvml.nvmlDeviceGetName(handle, name, 96):
+            reading["name"] = name.value.decode("utf-8", "replace")
+        if not _nvml.nvmlDeviceGetUtilizationRates(handle, ctypes.byref(util)):
+            reading["util"] = float(util.gpu)
+        if not _nvml.nvmlDeviceGetMemoryInfo(handle, ctypes.byref(mem)):
+            reading["mem_used"], reading["mem_total"] = mem.used / 1048576.0, mem.total / 1048576.0
+        if not _nvml.nvmlDeviceGetTemperature(handle, 0, ctypes.byref(temp)):
+            reading["temp"] = float(temp.value)
+        if not _nvml.nvmlDeviceGetPowerUsage(handle, ctypes.byref(power)):
+            reading["power"] = power.value / 1000.0
+        return reading
+    except (OSError, AttributeError):
+        _nvml = False
+        return None
 
 
 def gpu_reading():
-    """The first card's state from nvidia-smi, or None. Only numbers it reports.
+    """The first card's state -- NVML, else nvidia-smi -- or None. Only numbers
+    it reports.
 
     utilization.gpu is the share of the last sample period in which a kernel
     was running -- how busy the card is, not a count of cores in use; no
     tool reports that per core.
     """
+    reading = nvml_reading()
+    if reading:
+        return reading
     try:
         proc = subprocess.run(["nvidia-smi", "--query-gpu=" + GPU_QUERY,
                                "--format=csv,noheader,nounits"],
@@ -1357,12 +1412,18 @@ class Orthros:
                                            result["sent_back"],
                                            "{:,}".format(result["tokens"]),
                                            result["reason"] or "?")]
-        loop = loop_text(result.get("folder") or "", result["started"]) or text
+        # The loop's own words only: never the turn's whole output, where the model
+        # quotes the phrases as it reads its list (2026-10-27: a missing loop log
+        # fell back to it, and the counts were the model's again).
+        loop = loop_text(result.get("folder") or "", result["started"])
         counts = []
         for where, label, phrase in FIELD_SIGNS:
             n = (loop if where == "loop" else text).count(phrase)
             if n:
                 counts.append("%s: %d" % (label, n))
+        if not loop:
+            lines.append("The loop wrote no log for this turn (%s), so what went wrong inside "
+                         "its rounds was not counted." % LOOP_LOG)
         if result.get("lowest_free_mb") is not None:
             lines.append("Least memory free during the turn: %d MB." % result["lowest_free_mb"])
         if counts:
@@ -2832,6 +2893,24 @@ class Orthros:
 
     # ---------------------------------------------------------------- the page's view
 
+    def version(self, name):
+        """HEAD of an agent's folder, for the page. Git is asked only when HEAD has
+        moved: the window and the page each ask every two seconds, and every ask
+        was two git processes (2026-10-27)."""
+        folder = self.folders[name]
+        try:
+            key = tuple(os.path.getmtime(os.path.join(folder, ".git", p))
+                        for p in ("HEAD", os.path.join("logs", "HEAD")))
+        except OSError:
+            key = None
+        cache = getattr(self, "_heads", {})
+        at, sha = cache.get(name, (None, ""))
+        if key is None or at != key:
+            sha = head(folder)
+            cache[name] = (key, sha)
+            self._heads = cache
+        return sha
+
     def view(self):
         with self.lock:
             st = json.loads(json.dumps(self.state))
@@ -2859,7 +2938,7 @@ class Orthros:
                                                "launch_failures", "rollbacks", "carried_in",
                                                "last", "since_practice")}
             agents[n]["practice"] = (a.get("practice") or [])[-6:]
-            agents[n]["version"] = short(head(self.folders[n]))
+            agents[n]["version"] = short(self.version(n))
             agents[n]["proven"] = short((a.get("goods") or [a.get("good")])[-1])
             agents[n]["proven_count"] = len(a.get("goods") or [])
             agents[n]["unproven"] = len(a.get("pending") or [])

@@ -192,6 +192,14 @@ class TestJudging(Sandbox):
         self.assertIn("Trouble: items parked: 1.", report)
         self.assertIn("Replies: 1, and 83% of what the model wrote was thinking; 1 ran out", report)
 
+    def test_field_report_says_when_the_loop_wrote_no_log(self):
+        # No loop log: the counts are not taken from the turn's output instead.
+        text = "  - *Parked by Orthros*: stuck\n" * 40
+        self.o.field_report(self.result("A", folder=self.o.folders["B"], log_text=text))
+        report = orthros.read_text(os.path.join(self.o.folders["A"], "FIELD_REPORT.md"))
+        self.assertNotIn("items parked", report)
+        self.assertIn("The loop wrote no log for this turn", report)
+
 
 class TestRollbackNote(Sandbox):
     def test_rollback_writes_the_undone_diff_where_a_round_can_read_it(self):

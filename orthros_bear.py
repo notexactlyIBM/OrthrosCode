@@ -937,8 +937,10 @@ class Frame:
         self.T[key] = self.T.get(key, 0) + v
 
 
-DEN_QUIET = 120                    # seconds without a word before it walks off to hide
-SALMON_EVERY = (240, 540)          # a salmon now and then, while nobody is chatting
+# 2026-10-27: at two minutes, and a salmon every few minutes, it was walking in and
+# out and climbing up to eat all day -- a distraction that started everything itself.
+DEN_QUIET = 600                    # seconds without a word before it walks off to hide
+SALMON_EVERY = (8 * 3600, 24 * 3600)   # a salmon about once a day, while nobody is chatting
 WALK = 170                         # how fast it walks, drawing px a second
 STRIDE = 140                       # how far it goes in one cycle of its four paws
 # a bear's walk: left hind, left fore, right hind, right fore, a quarter apart
@@ -1229,7 +1231,7 @@ class Bear:
             return self.set("going")
         if now < self.next_action:
             return
-        self.next_action = now + random.uniform(12, 25)     # a calm bear is a cheap one
+        self.next_action = now + random.uniform(45, 120)    # a calm bear is a cheap one
         if now - self.typed_at < 5 or now - self.heard_at < 2.5 or now - self.answered_at < 4:
             return
         ok = lambda name, secs: now - self.cool.get(name, -1e9) > secs

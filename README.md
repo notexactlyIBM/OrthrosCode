@@ -112,9 +112,9 @@ the chat box:
 In the window, Orthros the bear lives in the left third of the chat card. It
 walks out from behind the chat box when you come to talk, watches you type,
 ponders while Orthros thinks, acts out the mood of each answer, and walks back
-behind the box after two quiet minutes. Now and then a salmon swims along the
-GPU graph and it climbs up to catch and eat it; while you chat, only when you
-ask. Its lines glow more the busier the card is. Double-click the GPU picture
+behind the box after ten quiet minutes. About once a day a salmon swims along
+the GPU graph and it climbs up to catch and eat it; while you chat, only when
+you ask. Its lines glow more the busier the card is. Double-click the GPU picture
 for it full screen, on the monitor the window is on. The divider between the
 window's two halves can be dragged, and stays where you leave it, as a share of
 the width, through new window sizes and restarts; neither half can be dragged

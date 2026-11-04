@@ -141,6 +141,44 @@ class RigTest(unittest.TestCase):
         self.assertLess(ob.math.dist(rig.joint("pawL"), goal), 2)
 
 
+class MusicTest(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.dir = tempfile.mkdtemp()
+        for name in ("one.mp3", "two.MP3", "cover.jpg"):
+            open(os.path.join(self.dir, name), "w").close()
+        self.said = []
+
+    def mci(self, command, ok=True):
+        self.said.append(command)
+        return ok
+
+    def test_it_plays_a_song_from_the_folder_from_its_start_and_fades_it(self):
+        music = ob.Music(self.dir, mci=self.mci)
+        self.assertTrue(music.play().wait(5))
+        opened = [c for c in self.said if c.startswith("open")]
+        self.assertEqual(len(opened), 1)
+        self.assertRegex(opened[0], r"(one\.mp3|two\.MP3)\" type mpegvideo")
+        self.assertIn("play orthros_dance from 0", self.said)
+        self.said.clear()
+        with mock.patch.object(ob.time, "sleep"):
+            music.stop()
+            music.play().wait(5)                       # (after the stop, in order)
+        self.assertTrue(self.said[0].startswith("setaudio orthros_dance volume"))
+        self.assertIn("close orthros_dance", self.said)
+
+    def test_no_folder_or_no_songs_still_lets_the_dance_start(self):
+        for folder in ("", os.path.join(self.dir, "missing")):
+            music = ob.Music(folder, mci=self.mci)
+            self.assertTrue(music.play().wait(5))
+        self.assertFalse([c for c in self.said if c.startswith("open")])
+
+    def test_a_song_that_will_not_open_is_passed_over(self):
+        music = ob.Music(self.dir, mci=lambda c: self.mci(c, not c.startswith("open") or "one" in c))
+        self.assertTrue(music.play().wait(5))
+        self.assertIn("play orthros_dance from 0", self.said)
+
+
 class BearTest(unittest.TestCase):
     def setUp(self):
         self.den, self.stream = Canvas(300, 320), Canvas(900, 300)
@@ -220,6 +258,35 @@ class BearTest(unittest.TestCase):
             self.assertAlmostEqual(self.t - t0, ob.DANCE, delta=0.2, msg=name)
             self.t = run(self.bear, ob.MOOD["happy"][0] + 0.5, self.t)
             self.assertIsNone(self.bear.mood, name)
+
+    def test_a_dance_waits_for_its_song_then_fades_it_at_the_end(self):
+        class Player:
+            def __init__(self):
+                self.song, self.stops = ob.threading.Event(), 0
+
+            def play(self):
+                return self.song
+
+            def stop(self):
+                self.stops += 1
+        player = self.bear.music = Player()
+        self.come()
+        self.bear.answered("happy", ["twist"])
+        self.t = run(self.bear, 1, self.t)
+        self.assertEqual(self.bear.action.t, 0)               # standing ready
+        player.song.set()
+        self.t = run(self.bear, 1, self.t)
+        self.assertGreater(self.bear.action.t, 0.9)
+        self.bear.answered("happy", ["nod"])                  # cut short: the song goes too
+        self.assertEqual(player.stops, 1)
+        self.t = run(self.bear, 2, self.t)
+        self.assertEqual(player.stops, 1)
+        player.song.clear()
+        self.bear.answered("happy", ["gritty"])               # a song that never starts:
+        self.t = run(self.bear, ob.SONG_WAIT + 0.5, self.t)  # it dances anyway
+        self.assertGreater(self.bear.action.t, 0.3)
+        self.bear.answered("happy", ["backflip"])             # not a dance: no song
+        self.assertFalse(getattr(self.bear.action, "song", None))
 
     def test_any_dance_is_one_of_them(self):
         self.come()

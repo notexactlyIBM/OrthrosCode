@@ -116,7 +116,8 @@ behind the box after ten quiet minutes. About once a day a salmon swims along
 the GPU graph and it climbs up to catch and eat it; while you chat, only when
 you ask. Ask it in wild chat and it dances for ten seconds (twerk, the gritty, the
 default dance, the scuba, the twist, the sprinkler, the coffee grinder, the
-thriller) or does a backflip. Its lines glow more the busier the card is.
+thriller) or does a backflip; with `dance_music` set, each dance starts on
+the first beat of a random song from that folder. Its lines glow more the busier the card is.
 Double-click the GPU picture for it full screen, on the monitor the window is
 on. The divider between the
 window's two halves can be dragged, and stays where you leave it, as a share of
@@ -230,6 +231,7 @@ Settings: `serve_port`, `tool_turns` (turns before a tool is given up) and
 | `serve_model` | "" | the model that answers the network's plain requests; empty = the agents' own |
 | `lift_model` | "" | the model a task switches to while **AGARIC LIFT** (the task pane's switch) is on |
 | `model_contexts` | {} | context for a model other than the agents', which the tuner does not fit (else 32,768) |
+| `dance_music` | "" | a folder of mp3s; when the bear dances, a random one plays from its start |
 
 One model does each job, and the card holds one at a time. The agents' own
 model -- `LC_MODEL_KEY` in their `config.cmd` -- always evolves them and always

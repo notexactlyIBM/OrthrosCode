@@ -19,7 +19,8 @@ pops.
 The model ends each chat answer with [mood: ...] and may cue moves with [do: ...]
 (orthros.py takes both off); the bear plays them. Among the moves are nine party
 pieces asked for by name (2026-11-03): eight dances of ten seconds each and a
-backflip.
+backflip. A dance starts with a song from the folder in the "dance_music" setting,
+if there is one (Music).
 
 Light on purpose (2026-10-21): tkinter takes about 35 ms to draw the whole bear,
 so it runs at 15 frames a second only while it moves or you chat and at 5 while it
@@ -32,8 +33,12 @@ Coordinates are the drawing's pixels: x right, y down, z towards the viewer.
 Standard library only, like orthros.py.
 """
 
+import ctypes
 import math
+import os
+import queue
 import random
+import threading
 import time
 
 from orthros_bear_mesh import FACES, VERTS
@@ -801,6 +806,7 @@ def greet(c):
 # keep up (c.quick), or a beat would blur into a wobble.
 
 DANCE = 10.0
+SONG_WAIT = 3.0                    # the longest a dance waits for its song to start
 TAU = 2 * math.pi
 
 
@@ -1185,6 +1191,81 @@ class Salmon:
                                tags="salmon")
 
 
+class Music:
+    """A random song from a folder, played from its start while the bear dances
+    (2026-11-03). Windows' own MCI player, through ctypes: mp3s with no window and
+    nothing to install. Everything happens on one thread of its own, because opening
+    a song on a network drive can take a second and the window must not wait for it.
+    play() gives an Event set once the song is playing, or once there is none to play,
+    so the dance can start on the song's first beat."""
+
+    KINDS = (".mp3", ".wav", ".wma")
+    ALIAS = "orthros_dance"
+
+    def __init__(self, folder, mci=None):
+        self.folder = folder if callable(folder) else (lambda: folder)
+        self.mci = mci or self.windows_mci()
+        self.jobs = queue.Queue()
+        threading.Thread(target=self.work, name="dance music", daemon=True).start()
+
+    @staticmethod
+    def windows_mci():
+        try:
+            send = ctypes.windll.winmm.mciSendStringW
+        except (AttributeError, OSError):          # (not Windows: no music)
+            return None
+        return lambda command: send(command, None, 0, None) == 0
+
+    def play(self):
+        ready = threading.Event()
+        self.jobs.put(("play", ready))
+        return ready
+
+    def stop(self):
+        self.jobs.put(("stop", None))
+
+    def songs(self):
+        folder = self.folder() or ""
+        try:
+            names = os.listdir(folder) if folder else []
+        except OSError:
+            return []
+        return [os.path.join(folder, n) for n in names if n.lower().endswith(self.KINDS)]
+
+    def work(self):
+        while True:
+            job, ready = self.jobs.get()
+            try:
+                if job == "stop":
+                    self.fade()
+                elif self.mci:
+                    self.fade(0)
+                    songs = self.songs()
+                    random.shuffle(songs)
+                    for song in songs[:3]:                  # one that will not open: the next
+                        if self.mci('open "%s" type mpegvideo alias %s' % (song, self.ALIAS)):
+                            if self.mci("play %s from 0" % self.ALIAS):
+                                break
+                            self.mci("close " + self.ALIAS)
+            except Exception:              # music must never take the bear down
+                pass
+            finally:
+                if ready:
+                    ready.set()
+
+    def fade(self, seconds=1.0):
+        """Down to nothing over `seconds`, then closed (nothing open: nothing done)."""
+        if not self.mci:
+            return
+        steps = int(seconds * 10)
+        for k in range(steps, 0, -1):
+            if not self.mci("setaudio %s volume to %d" % (self.ALIAS, 1000 * k // (steps + 1))):
+                break
+            time.sleep(0.1)
+        self.mci("stop " + self.ALIAS)
+        self.mci("close " + self.ALIAS)
+
+
 class Bear:
     """Orthros the bear. Its den is the left third of the chat card (a canvas of its
     own, `den`); the GPU picture's canvas (`stream`) is where salmon swim.
@@ -1195,13 +1276,15 @@ class Bear:
     salmon swims along the bottom of the GPU picture and the bear climbs up out of the
     chat card to catch it, eats it, and goes back. While you chat it goes fishing only
     when asked (fish(), from a [do: ...] cue or your own words). Asked by name, it does
-    one of DANCES for DANCE seconds, or a backflip.
+    one of DANCES for DANCE seconds, or a backflip. With `music` (a Music), a dance
+    waits up to SONG_WAIT seconds for its song to start, so the two start together.
 
     The window calls summon() on any sign of you, heard(), typing(), thinking() and
     answered(), and sets energy (how busy the card is, 0 to 1) each frame of the picture."""
 
-    def __init__(self, den, stream=None, line="#e8f1ff", fill="#0d1524", visible=None):
-        self.den, self.stream, self.c = den, stream, den
+    def __init__(self, den, stream=None, line="#e8f1ff", fill="#0d1524", visible=None,
+                 music=None):
+        self.den, self.stream, self.c, self.music = den, stream, den, music
         self.line, self.fill = line, fill
         self.visible = visible or (lambda: True)
         self.clock = time.monotonic                   # (the tests run it on a clock of their own)
@@ -1225,6 +1308,7 @@ class Bear:
     def reset(self):
         now = self.clock()
         self.thinking_on, self.typed_at, self.heard_at, self.answered_at = False, -1e9, -1e9, -1e9
+        self.quiet(getattr(self, "action", None))
         self.action = self.mood = self.then = None
         self.next_action = now + random.uniform(5, 9)
         self.cool = {}
@@ -1352,9 +1436,18 @@ class Bear:
         dur, run = ACTIONS[name]
         if self.action:
             self.action.stop_at = min(self.action.stop_at, self.action.t + 0.35)
+            self.quiet(self.action)
         self.action = Clip(name, dur, run, side or random.choice("LR"))
+        if name in DANCES and self.music:
+            self.action.song, self.action.waited = self.music.play(), 0.0
         self.cool[name] = self.clock()
         return True
+
+    def quiet(self, clip):
+        """The song of a dance that is ending, faded out (once)."""
+        if clip is not None and getattr(clip, "song", None):
+            clip.song = None
+            self.music.stop()
 
     def feel(self, name):
         dur, glyph, run = MOOD[name]
@@ -1585,11 +1678,16 @@ class Bear:
             clip = getattr(self, which)
             if not clip:
                 continue
+            song = getattr(clip, "song", None)
+            if song and clip.t == 0 and not song.is_set() and clip.waited < SONG_WAIT:
+                clip.waited += dt                    # standing ready for the first beat
+                continue
             clip.t += dt
             if clip.t >= 0:
                 clip.frame = fr
                 clip.run(clip)
             if clip.t >= clip.stop_at:
+                self.quiet(clip)
                 setattr(self, which, None)
                 if which == "action":
                     self.next_action = max(self.next_action, now + random.uniform(8, 15))

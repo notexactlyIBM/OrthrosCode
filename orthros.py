@@ -126,6 +126,9 @@ DEFAULTS = {
     "evolve_lift_model": "",
     "agaric_lift_evolve": False,
     "model_contexts": {},
+    # A folder of songs (mp3): when the bear in the window dances, a random one
+    # plays from its start. Empty: it dances in silence.
+    "dance_music": "",
 }
 SECOND_CONTEXT = 32768               # a model the tuner does not fit, unless model_contexts says
 # Files an agent may edit in a task or a practice: any project, not just Python.

@@ -815,7 +815,8 @@ class Dashboard:
         box.grid(row=0, column=1, sticky="nsew")
         self.bear = orthros_bear.Bear(
             den, stream=self.gpu, line=orthros_bear.mix(INK, PANEL, 0.2), fill=PANEL,
-            visible=lambda: self.tab == "operate" and den.winfo_ismapped())
+            visible=lambda: self.tab == "operate" and den.winfo_ismapped(),
+            music=orthros_bear.Music(lambda: ((self.d or {}).get("settings") or {}).get("dance_music")))
         # The box to type in and its buttons keep their place; the conversation takes the rest.
         self.chat_hint = label(box, "", SERVE, (BODY, 9), anchor="w")
         self.chat_hint.pack(side="bottom", fill="x", pady=(6, 0))

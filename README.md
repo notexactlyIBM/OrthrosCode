@@ -114,8 +114,11 @@ walks out from behind the chat box when you come to talk, watches you type,
 ponders while Orthros thinks, acts out the mood of each answer, and walks back
 behind the box after ten quiet minutes. About once a day a salmon swims along
 the GPU graph and it climbs up to catch and eat it; while you chat, only when
-you ask. Its lines glow more the busier the card is. Double-click the GPU picture
-for it full screen, on the monitor the window is on. The divider between the
+you ask. Ask it in wild chat and it dances for ten seconds (twerk, the gritty, the
+default dance, the scuba, the twist, the sprinkler, the coffee grinder, the
+thriller) or does a backflip. Its lines glow more the busier the card is.
+Double-click the GPU picture for it full screen, on the monitor the window is
+on. The divider between the
 window's two halves can be dragged, and stays where you leave it, as a share of
 the width, through new window sizes and restarts; neither half can be dragged
 or squeezed below a usable width. A and B's cards are on the window's

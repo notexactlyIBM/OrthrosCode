@@ -17,7 +17,9 @@ where it looks, what it is doing, any mood), and follows it on a spring, so noth
 pops.
 
 The model ends each chat answer with [mood: ...] and may cue moves with [do: ...]
-(orthros.py takes both off); the bear plays them.
+(orthros.py takes both off); the bear plays them. Among the moves are nine party
+pieces asked for by name (2026-11-03): eight dances of ten seconds each and a
+backflip.
 
 Light on purpose (2026-10-21): tkinter takes about 35 ms to draw the whole bear,
 so it runs at 15 frames a second only while it moves or you chat and at 5 while it
@@ -267,6 +269,9 @@ ANCHORS = {
     "hipL": ("spine", 168, 586, 125), "hipR": ("spine", 330, 586, 125),
     "upL": ("chest", 96, 210, 125), "upR": ("chest", 404, 210, 125),
     "top": ("head", 258, 10, 0), "nose": ("head", 256, 176, 121),
+    "shoulderL": ("chest", 128, 352, 30), "shoulderR": ("chest", 372, 352, 30),
+    "kneeL": ("shinL", 128, 772, 46), "kneeR": ("shinR", 347, 775, 46),
+    "tuckL": ("spine", 178, 770, 70), "tuckR": ("spine", 326, 770, 70),   # feet drawn up
 }
 LIGHT = norm((-0.45, -0.55, 0.7))
 
@@ -791,9 +796,142 @@ def greet(c):
     c.add("head.roll", -o * 7 * k), c.add("earL.pitch", 10 * k), c.add("earR.pitch", 10 * k)
 
 
+# ---- party pieces, asked for by name in the chat (2026-11-03). Each dance loops for
+# DANCE seconds to its own beat; the springs that smooth every other move are told to
+# keep up (c.quick), or a beat would blur into a wobble.
+
+DANCE = 10.0
+TAU = 2 * math.pi
+
+
+def twerk(c):
+    k, b = c.env(0.6, 0.8), c.t * 2.2
+    pop = max(0.0, math.sin(b * TAU))
+    c.quick("root.y", 16), c.quick("root.pitch", 16)
+    c.add("root.y", (46 + pop * 14) * k), c.add("root.z", -24 * k)      # low, hips back
+    c.add("root.pitch", pop * 12 * k), c.add("root.roll", math.sin(b * math.pi) * 5 * k)
+    c.add("spine.pitch", 40 * k), c.add("chest.pitch", -8 * k)         # bent forward
+    c.add("head.pitch", -24 * k), c.add("neck.pitch", -10 * k)          # looking up at you
+    c.arm("L", "kneeL", (0, -6, 0), k, 10), c.arm("R", "kneeR", (0, -6, 0), k, 10)
+    c.jaw(0.3 * k), c.mute("look", k)
+
+
+def gritty(c):
+    k, b = c.env(0.5, 0.8), c.t * 2.4
+    hop, sway_ = abs(math.sin(b * math.pi)), math.sin(b * math.pi / 2)
+    c.quick("root.y", 18), c.quick("root.x", 9), c.quick("root.yaw", 9)
+    c.add("root.y", (10 - hop * 22) * k), c.add("root.x", sway_ * 40 * k)   # the feet follow
+    c.add("root.yaw", sway_ * 22 * k), c.add("spine.pitch", 12 * k), c.add("head.pitch", 8 * k)
+    swing = math.sin(b * math.pi) * 45
+    c.arm("L", "chestL", (-60 + swing, -30, 70), k, 14), c.arm("R", "chestR", (60 + swing, -30, 70), k, 14)
+    c.add("earL.pitch", 12 * k), c.add("earR.pitch", 12 * k)
+
+
+def default_dance(c):
+    k, b = c.env(0.5, 0.8), c.t * 2.0
+    pump, up = abs(math.sin(b * math.pi)), "L" if int(b // 2) % 2 == 0 else "R"
+    c.quick("root.y", 14), c.quick("root.x", 7)
+    for s in "LR":
+        o = -1 if s == "L" else 1
+        if s == up:
+            c.arm(s, "up" + s, (-o * 45, -40 - pump * 50, 40), k, 14)     # pumping overhead
+        else:
+            c.arm(s, "hip" + s, (o * 10, 0, 10), k, 10)
+    c.add("root.x", (-22 if up == "L" else 22) * k), c.add("root.y", -pump * 8 * k)
+    c.add("root.roll", math.sin(b * math.pi) * 6 * k), c.add("head.roll", -math.sin(b * math.pi) * 9 * k)
+    c.add("head.pitch", -4 * k), c.add("earL.pitch", 10 * k), c.add("earR.pitch", 10 * k)
+
+
+def scuba(c):
+    k, s, o, b = c.env(0.7, 0.9), c.side, c.out, c.t * 1.6
+    other, oo = ("R", 1) if s == "L" else ("L", -1)
+    c.quick("root.y", 10)
+    c.arm(s, "muzzle" + s, (-o * 14, -10, 10), k, 8)                      # nose held
+    c.arm(other, "up" + other, (oo * (15 + math.sin(b * TAU) * 30), 10 + math.cos(b * TAU) * 30, 30), k, 9)
+    c.add("root.y", (20 + math.sin(b * math.pi) * 16) * k)                 # sinking, bobbing
+    c.add("root.roll", math.sin(b * math.pi) * 7 * k), c.add("spine.roll", math.sin(b * math.pi) * 4 * k)
+    c.add("head.roll", -o * 12 * k), c.add("head.pitch", 10 * k)
+    c.face("blink", 0.5 * k), c.mute("look", k)
+
+
+def twist(c):
+    k, b = c.env(0.5, 0.8), c.t * 2.6
+    tw, dip = math.sin(b * math.pi), 0.5 - 0.5 * math.cos(c.t / DANCE * TAU)
+    c.quick("root.yaw", 18), c.quick("root.y", 12)
+    c.add("root.yaw", tw * 32 * k), c.add("head.yaw", -tw * 20 * k)       # the face stays on you
+    c.add("spine.roll", tw * 3 * k), c.add("root.y", (dip * 55 + abs(tw) * 6) * k)   # down, and up
+    c.arm("L", "chestL", (-55 - tw * 30, 0, 60), k, 14), c.arm("R", "chestR", (55 - tw * 30, 0, 60), k, 14)
+    c.add("earL.pitch", 8 * k), c.add("earR.pitch", 8 * k)
+
+
+def sprinkler(c):
+    k, s, o = c.env(0.5, 0.8), c.side, c.out
+    other = "R" if s == "L" else "L"
+    cyc = (c.t * 0.5) % 1                                              # a two-second cycle
+    a = math.floor(cyc / 0.14) / 5 if cyc < 0.7 else 1 - (cyc - 0.7) / 0.3   # five jerks, one sweep back
+    ang = math.radians(40 + 95 * a)                                     # out to the side, round to the front
+    c.arm(other, "crown" + other, (0, 40, -45), k, 9)                   # a paw behind the head
+    c.arm(s, "shoulder" + s, (o * 165 * math.cos(ang), 10, 165 * math.sin(ang)), k, 16)
+    c.add("head.yaw", o * (30 - 60 * a) * k), c.add("root.yaw", o * (10 - 25 * a) * k)
+    c.add("root.y", 8 * k), c.mute("look", k)
+
+
+def coffee_grinder(c):
+    k, s, o = c.env(0.8, 1.0), c.side, c.out
+    other, oo = ("R", 1) if s == "L" else ("L", -1)
+    c.quick("root.y", 10)
+    c.add("root.y", 78 * k), c.add("root.x", o * 12 * k), c.add("root.roll", o * 14 * k)
+    c.add("spine.pitch", 20 * k), c.add("head.pitch", -10 * k)
+    c.arm(s, (ART_MID + o * 215, ART_FEET - 12, 40), None, k, 12)      # a paw on the ground
+    c.arm(other, "up" + other, (oo * 20, -20, 30), k, 9)                # the other up, for balance
+    ang = c.t * 1.1 * TAU
+    c.leg(other, (ART_MID + 150 * math.cos(ang), ART_FEET - 85, 150 * math.sin(ang)), None, k)   # the sole on the floor
+    c.mute("look", k)
+
+
+FLIP = (0.9, 1.1, 0.6)             # the backflip: crouch, in the air, land (seconds)
+
+
+def backflip(c):
+    crouch, air, land = FLIP
+    t, k = c.t, c.env(0.3, 0.8)
+    c.quick("root.y", 30), c.quick("root.z", 30), c.quick("root.pitch", 40)
+    u = clamp((t - crouch) / air, 0, 1)
+    turn = -360 * u                                                     # backwards, head first
+    th = math.radians(turn)
+    jump = -230 * math.sin(u * math.pi)
+    # it turns about its middle, 200 px above the hips the pose turns about
+    c.add("root.pitch", turn), c.add("root.y", jump + 200 * (math.cos(th) - 1))
+    c.add("root.z", -200 * math.sin(th))
+    down = c.window(0, crouch, 0.4) + c.window(crouch + air, crouch + air + land, 0.2)
+    c.add("root.y", 48 * down), c.add("spine.pitch", 18 * down)
+    for s, o in (("L", -1), ("R", 1)):
+        c.arm(s, "hip" + s, (o * 12, 20, -50), down, 20)                 # arms swung back
+        c.arm(s, "up" + s, (o * 10, -60, 20), c.window(crouch + air * 0.4, c.stop_at, 0.3), 20)
+        c.leg(s, "tuck" + s, None, c.window(crouch - 0.05, crouch + air, 0.25))
+    c.mute("look", k)
+
+
+DANCES = ("twerk", "gritty", "default_dance", "scuba", "twist", "sprinkler", "coffee_grinder",
+          "thriller")
+
+
+def thriller(c):
+    k, b = c.env(0.6, 0.9), c.t * 2.0
+    sw, shrug = math.sin(b * math.pi / 2), abs(math.sin(b * math.pi))
+    c.quick("root.x", 7), c.quick("root.y", 12)
+    c.add("root.x", sw * 35 * k), c.add("root.yaw", sw * 15 * k), c.add("root.y", -shrug * 6 * k)
+    c.add("head.roll", -sw * 14 * k), c.add("head.yaw", sw * 10 * k), c.add("chest.roll", sw * 4 * k)
+    for s, o in (("L", -1), ("R", 1)):
+        c.arm(s, "shoulder" + s, (o * 20 + sw * 35, 30, 170), k, 14)     # the claws, dangling
+    c.jaw(0.35 * k), c.face("blink", 0.3 * k)
+
+
 ACTIONS = {"scratch_face": (3.6, scratch_face), "sniff": (4.0, sniff), "stretch": (5.0, stretch),
-           "ponder": (5.5, ponder), "sway": (4.4, sway), "nod": (1.4, nod), "greet": (2.8, greet)}
-CUES = set(ACTIONS) | {"fish"}          # what [do: ...] may ask for: a move, or a salmon
+           "ponder": (5.5, ponder), "sway": (4.4, sway), "nod": (1.4, nod), "greet": (2.8, greet),
+           "backflip": (sum(FLIP) + 1.2, backflip)}
+ACTIONS.update({name: (DANCE, globals()[name]) for name in DANCES})
+CUES = set(ACTIONS) | {"fish", "dance"}   # what [do: ...] may ask for: a move, a salmon, any dance
 
 
 # ---- how it feels: (seconds, the sign over its head, the move)
@@ -883,6 +1021,7 @@ MOOD = {"happy": (2.8, "♥", happy), "laugh": (3.2, "ha!", laugh), "excited": (
         "proud": (3.2, "★", proud), "sleepy": (4.8, "z", stretch), "confused": (3.4, "?", confused),
         "encouraging": (3.0, "✓", encouraging), "calm": (1.8, "", calm)}
 SLOW = ("sad",)
+TURNS = {"root.yaw", "root.pitch", "root.roll"}   # angles: 360 is 0 again (the backflip)
 OMEGA = {"root": 5, "spine": 4.5, "chest": 5, "neck": 6, "head": 7, "ear": 15, "jaw": 12,
          "blink": 32, "twitch": 30, "breathe": 5}
 
@@ -915,6 +1054,12 @@ class Clip:
     def mute(self, what, k):
         self.frame.mutes[what] = max(self.frame.mutes.get(what, 0), k)
 
+    def quick(self, key, omega):
+        self.frame.omegas[key] = max(self.frame.omegas.get(key, 0), omega)
+
+    def leg(self, s, goal, off, w):
+        self.frame.legs[s].append((goal, off, w))
+
     def face(self, k, v):
         f = self.frame.face
         f[k] = min(f[k], v) if v < 0 else max(f[k], v)
@@ -928,7 +1073,7 @@ class Frame:
 
     def __init__(self):
         self.T, self.mutes, self.omegas = {}, {}, {}
-        self.arms = {"L": [], "R": []}
+        self.arms, self.legs = {"L": [], "R": []}, {"L": [], "R": []}
         self.face = {"blink": 0, "twitch": 0}
         self.jaw = 0
         self.look = None
@@ -1049,7 +1194,8 @@ class Bear:
     after DEN_QUIET seconds without a word. Now and then, while nobody is chatting, a
     salmon swims along the bottom of the GPU picture and the bear climbs up out of the
     chat card to catch it, eats it, and goes back. While you chat it goes fishing only
-    when asked (fish(), from a [do: ...] cue or your own words).
+    when asked (fish(), from a [do: ...] cue or your own words). Asked by name, it does
+    one of DANCES for DANCE seconds, or a backflip.
 
     The window calls summon() on any sign of you, heard(), typing(), thinking() and
     answered(), and sets energy (how busy the card is, 0 to 1) each frame of the picture."""
@@ -1121,7 +1267,7 @@ class Bear:
         self.summon()
         self.answered_at = self.clock()
         self.look["until"] = 0
-        acts = list(acts or ())
+        acts = [random.choice(DANCES) if a == "dance" else a for a in acts or ()]
         self.then_fish = self.then_fish or "fish" in acts
         mood = mood if mood in MOOD else None
         act = next((a for a in acts if a in ACTIONS), None)
@@ -1466,7 +1612,10 @@ class Bear:
         keys = set(fr.T) | {k for k in self.val if "." in k and not k.endswith("@")} | {"breathe"}
         for key in keys:
             omega = fr.omegas.get(key) or omega_of(key) * (0.6 if self.mood and self.mood.name in SLOW else 1)
-            v = self.spring(key, fr.T.get(key, 0), dt, omega)
+            want = fr.T.get(key, 0)
+            if key in TURNS and abs(want - self.val.get(key, want)) > 180:
+                self.val[key] += 360 * round((want - self.val[key]) / 360)   # a whole turn done: not undone
+            v = self.spring(key, want, dt, omega)
             if key == "breathe":
                 pose["breathe"] = v
                 continue
@@ -1509,6 +1658,9 @@ class Bear:
             rest = self.rig.rest("foot" + s)
             pose["leg" + s] = lerp3((rest[0] + ft["x"], rest[1] - lift, rest[2]), ground["leg" + s],
                                     ease(down))
+            for g, off, w in fr.legs[s]:                    # a move sending the foot somewhere
+                g = add(self.rig.anchor(g), off or (0, 0, 0)) if isinstance(g, str) else g
+                pose["leg" + s] = lerp3(pose["leg" + s], g, clamp(w, 0, 1))
         # paws: hanging, or wherever a move reaches, or on the ground
         for s in "LR":
             goal, omega = self.rig.anchor("rest" + s), 9

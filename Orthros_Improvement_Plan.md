@@ -63,6 +63,9 @@ suite about four).
 
 ## Operator notes, and what the records say
 
+
+give the bear a number of additonal michael jackson dance moves, which could be sequenced and to a rhythm with random order. Not until after thursday.
+
 - *"In serve mode the GPU is steady and low despite calls."* `orthros.log`
   shows two callers that hung up before an answer (after 9 s and 48 s) on
   2026-10-26 and otherwise long quiet stretches. The page records tokens and

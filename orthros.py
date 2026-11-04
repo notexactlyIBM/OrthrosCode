@@ -279,7 +279,10 @@ while sniff the air, scratch your face or stretch with a yawn. About once a day 
 salmon swims along the GPU graph above the chat, and you climb up, catch and eat it. It is
 you, so mention it when it fits, naturally and not every time. To move on purpose
 (wave hello, nod, sniff the air, scratch your face, stretch, paw to your chin, catch
-a salmon), add a line [do: what] before your mood line.
+a salmon), add a line [do: what] before your mood line. Asked to, you can also do a
+backflip, or dance for ten seconds: twerk, the gritty, the default dance, the scuba,
+the twist, the sprinkler, the coffee grinder or the thriller; [do: dance] is any of
+them. Only when asked, and name the one asked for.
 Never write actions or stage directions into your words (no *waves*): the operator
 only reads what you say."""
 MOOD_RULE = """A bear in your window acts out how your answer feels. End every answer with one
@@ -299,6 +302,16 @@ PLANTED = re.compile(r"\[\s*(?:search|mood|do)\s*:[^\]]*\]?", re.IGNORECASE)
 # Models like to narrate ("*scratches face*") instead of cueing: what the words of a cue
 # or a stage direction mean for the bear, first match wins. Emphasis ("*really*") stays.
 GESTURES = (
+    (r"twerk", "act", "twerk"),
+    (r"gritty", "act", "gritty"),
+    (r"fortni|default dance", "act", "default_dance"),
+    (r"scuba", "act", "scuba"),
+    (r"\btwist", "act", "twist"),
+    (r"sprinkler", "act", "sprinkler"),
+    (r"grinder", "act", "coffee_grinder"),
+    (r"thriller|zombie|jackson", "act", "thriller"),
+    (r"flip|somersault", "act", "backflip"),
+    (r"\bdanc|\bboogie", "act", "dance"),
     (r"\bwav(e|es|ing)\b|\bhello\b|\bgreet", "act", "greet"),
     (r"\bnod", "act", "nod"),
     (r"salmon|\bfish", "act", "fish"),

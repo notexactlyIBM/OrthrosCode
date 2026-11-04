@@ -206,6 +206,41 @@ class BearTest(unittest.TestCase):
         run(self.bear, ob.ACTIONS["sniff"][0] + 0.2, self.t)
         self.assertEqual(self.bear.mood.name, "happy")
 
+    def test_every_dance_plays_ten_seconds_inside_its_den(self):
+        self.come()
+        for name in ob.DANCES:
+            self.bear.answered("happy", [name])
+            self.assertEqual((self.bear.action.name, self.bear.action.dur), (name, ob.DANCE))
+            t0 = self.t
+            while self.bear.action and self.bear.action.name == name:
+                self.t = run(self.bear, 1 / ob.FPS, self.t)
+                xs = [p[0] for p in self.bear.rig.out]
+                self.assertGreater(min(xs), -75, name), self.assertLess(max(xs), ob.ART_W + 75, name)
+                self.assertLess(max(p[1] for p in self.bear.rig.out), ob.ART_FEET + 50, name)
+            self.assertAlmostEqual(self.t - t0, ob.DANCE, delta=0.2, msg=name)
+            self.t = run(self.bear, ob.MOOD["happy"][0] + 0.5, self.t)
+            self.assertIsNone(self.bear.mood, name)
+
+    def test_any_dance_is_one_of_them(self):
+        self.come()
+        self.bear.answered("happy", ["dance"])
+        self.assertIn(self.bear.action.name, ob.DANCES)
+
+    def test_a_backflip_goes_over_and_lands_upright(self):
+        self.come()
+        self.bear.answered("proud", ["backflip"])
+        lowest = 1e9
+        while self.bear.action:
+            self.t = run(self.bear, 1 / ob.FPS, self.t)
+            head = self.bear.rig.joint("head")
+            lowest = min(lowest, self.bear.rig.joint("root")[1] - head[1])
+            self.assertGreater(head[1], -20)                  # never out of the den's top
+            self.assertLess(head[1], ob.ART_FEET)             # nor under its floor
+        self.assertLess(lowest, -150)                         # head under the hips, mid-flip
+        self.t = run(self.bear, 1.5, self.t)
+        self.assertLess(abs(self.bear.val["root.pitch"]), 3)  # upright, not spinning back
+        self.assertLess(self.bear.rig.joint("head")[1], 300)
+
     def test_asked_for_a_salmon_it_climbs_up_eats_it_and_comes_back(self):
         self.come()
         self.bear.answered("happy", ["fish"])
@@ -293,6 +328,12 @@ class CueTest(unittest.TestCase):
             "*waves* Hello there, I *really* mean it.\n[do: catch a salmon]\n[mood: happy]")
         self.assertEqual(text, "Hello there, I *really* mean it.")
         self.assertEqual((mood, acts), ("happy", ["fish", "greet"]))
+
+    def test_the_dances_are_asked_for_by_name(self):
+        for words, act in (("the thriller", "thriller"), ("Fortnite default dance", "default_dance"),
+                           ("a backflip", "backflip"), ("the coffee grinder", "coffee_grinder"),
+                           ("twerk", "twerk"), ("dance", "dance")):
+            self.assertEqual(orthros.bear_cues("Go. [do: %s] [mood: happy]" % words)[2], [act], words)
 
     def test_a_stage_direction_can_carry_the_mood(self):
         self.assertEqual(orthros.bear_cues("*chuckles* Fair point."), ("Fair point.", "laugh", []))

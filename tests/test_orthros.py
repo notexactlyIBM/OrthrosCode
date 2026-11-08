@@ -171,10 +171,25 @@ class TestJudging(Sandbox):
             ledger.record(self.root, agent="A", at=150, kept=1, **blank)
             ledger.record(self.root, agent="A", at=160, kept=0,
                           **dict(blank, verdict="reject"))
+            # The loop's own verdict on a test round: not the reviewer's.
+            ledger.record(self.root, agent="A", at=165, kept=0, **dict(
+                blank, verdict="reject",
+                reason="test round: the new test passes before any change"))
             ledger.record(self.root, agent="B", at=170, kept=1, **blank)   # the twin's
         self.o.field_report(self.result("A", started=100))
         report = orthros.read_text(os.path.join(self.o.folders["A"], "FIELD_REPORT.md"))
-        self.assertIn("Where the rounds went: kept 1, rejected by reviewer 1.", report)
+        self.assertIn("Where the rounds went: kept 1, rejected by reviewer 1, "
+                      "test rounds sent back 1.", report)
+
+    def test_field_report_quotes_why_test_rounds_were_sent_back(self):
+        started = time.mktime((2026, 11, 7, 10, 0, 0, 0, 0, -1))
+        folder = self.o.folders["B"]
+        self.write(folder, orthros.LOOP_LOG,
+                   "== 2026-11-07 10:00 ==\n10:05:00  Test round sent back: the new test passes "
+                   "before any change, so it does not test the item\n")
+        self.o.field_report(self.result("A", started=started, folder=folder))
+        report = orthros.read_text(os.path.join(self.o.folders["A"], "FIELD_REPORT.md"))
+        self.assertIn("Test round sent back: the new test passes before any change", report)
 
     def test_field_report_counts_the_loops_words_not_the_models(self):
         started = time.mktime((2026, 9, 29, 5, 56, 0, 0, 0, -1))
@@ -259,6 +274,16 @@ class TestDoctor(Sandbox):
         self.assertEqual(orthros.doctor(self.root, out=lines.append), 1)
         self.assertTrue(any(l.startswith("FAIL  B: no agent") for l in lines))
 
+    def test_settings_nothing_reads_are_named(self):
+        orthros.write_json(os.path.join(self.root, "orthros.json"),
+                           dict(orthros.DEFAULTS, serve_queue=2, install_requirements=False))
+        lines = []
+        orthros.doctor(self.root, out=lines.append)
+        stray = [l for l in lines if "settings nothing reads" in l]
+        self.assertEqual(len(stray), 1)
+        self.assertTrue(stray[0].startswith("WARN"))
+        self.assertIn("install_requirements, serve_queue", stray[0])
+
 
 class TestPreflight(Sandbox):
     def test_the_tests_get_nothing_of_the_harness(self):
@@ -291,6 +316,29 @@ class TestPreflight(Sandbox):
         self.assertEqual(len(problems), 1)
         self.assertIn("test_sum", problems[0])
 
+    def test_the_suite_runs_once_per_version_of_the_code(self):
+        folder, ran = self.o.folders["A"], []
+        real = orthros.check_agent
+
+        def spy(folder_, python, quick=False, seconds=600, suite=True):
+            ran.append(suite)
+            return real(folder_, python, quick, seconds, suite)
+        with mock.patch.object(orthros, "check_agent", spy):
+            self.assertEqual(self.o.preflight("A"), [])
+            self.assertEqual(self.o.preflight("A"), [])          # the same code: imports only
+            self.assertTrue(self.o.suite_skipped)
+            self.write(folder, "orthros_tasks.md", TASKS + "- [ ] more\n")   # notes are not code
+            self.assertEqual(self.o.preflight("A"), [])
+            self.write(folder, "agent.py", "def f():\n    return 2\n")       # code is
+            self.assertEqual(self.o.preflight("A"), [])
+            self.assertFalse(self.o.suite_skipped)
+            self.write(folder, "test_broken.py",
+                       "import unittest\n\n\nclass T(unittest.TestCase):\n"
+                       "    def test_sum(self):\n        self.assertEqual(1 + 1, 3)\n")
+            self.assertEqual(len(self.o.preflight("A")), 1)
+            self.assertEqual(len(self.o.preflight("A")), 1)      # a failure is never remembered
+        self.assertEqual(ran, [True, False, False, True, True, True])
+
     def test_failed_tests_are_read_in_either_pythons_words(self):
         out = ("FAIL: test_x (test_m.T)\nERROR: test_y (test_m.T.test_y)\n"
                "ERROR: setUpClass (test_m.U)\nERROR: test_gone (unittest.loader._FailedTest)\n")
@@ -310,6 +358,14 @@ class TestSurrender(Sandbox):
     def test_an_ordinary_pause_is_quiet(self):
         self.o.pause("Paused after the session, as asked.")
         self.assertFalse(os.path.exists(os.path.join(self.root, orthros.ALERT_FILE)))
+
+    def test_state_that_cannot_be_saved_is_said_once(self):
+        with mock.patch.object(orthros, "write_json", return_value=False):
+            self.o.save()
+            self.o.save()
+        self.assertEqual(sum("could not write .orthros-state.json" in e for e in self.events), 1)
+        self.o.save()
+        self.assertEqual(sum("works again" in e for e in self.events), 1)
 
     def test_machine_failures_are_retried_with_backoff_then_surrendered(self):
         self.o.settings["env_retry_minutes"] = [2, 5]
@@ -382,6 +438,26 @@ class TestModes(Sandbox):
         self.assertIn("# What better means",
                       orthros.read_text(os.path.join(self.o.folders["B"], "RALPH_PROMPT.md")))
 
+    def test_a_task_can_start_from_a_plain_folder_of_files(self):
+        source = os.path.join(self.root, "papers")
+        os.makedirs(os.path.join(source, "raw"))
+        self.write(source, "a.csv", "x,y\n1,2\n")
+        self.write(os.path.join(source, "raw"), "b.txt", "notes\n")
+        made = self.o.new_task("csv clean", "Normalise every CSV here and write a summary.",
+                               source=source)
+        self.assertEqual(made.get("key"), "csv-clean", made)
+        folder = os.path.join(self.root, "tasks", "csv-clean")
+        self.assertTrue(os.path.isfile(os.path.join(folder, "a.csv")))
+        self.assertTrue(os.path.isfile(os.path.join(folder, "raw", "b.txt")))
+        self.assertTrue(os.path.isdir(os.path.join(folder, ".git")))
+        self.assertEqual(sorted(os.listdir(source)), ["a.csv", "raw"])       # untouched
+        task = next(t for t in orthros.work.list_tasks(self.root) if t["key"] == "csv-clean")
+        self.assertEqual((task["source"], task["branch"]), (source, ""))
+        with mock.patch.object(orthros.work, "COPY_LIMIT_MB", 0):
+            said = self.o.new_task("big", "Process every file in this folder.", source=source)
+        self.assertIn("MB", said["error"])
+        self.assertFalse(os.path.exists(os.path.join(self.root, "tasks", "big")))
+
     def test_direction_for_the_task(self):
         self.o.new_task("demo", "Build a small demo of something useful.")
         self.o.set_mode("task", "demo")
@@ -394,14 +470,14 @@ class TestChat(Sandbox):
     def test_the_model_answers_from_the_records(self):
         self.o.service.ready = True                      # a model is up, as in serve mode
         with mock.patch.object(orthros.service, "ask", return_value="All quiet.") as ask:
-            self.assertEqual(self.o.chat("how is it going?"), "All quiet.")
+            self.assertEqual(self.o.chat("how is it going?")[0], "All quiet.")
         messages = ask.call_args[0][2]
         self.assertIn("A has had 0 turns", messages[0]["content"])
         self.assertEqual(messages[-1], {"role": "user", "content": "how is it going?"})
 
     def test_with_no_model_to_be_had_the_records_answer_and_say_why(self):
         self.o.state["paused"] = False                   # between turns: nothing loaded
-        reply = self.o.chat("how is it going?")
+        reply = self.o.chat("how is it going?")[0]
         self.assertTrue(reply.startswith("(The model is between turns"), reply)
         self.assertIn("A has had 0 turns", reply)
 
@@ -416,7 +492,7 @@ class TestChat(Sandbox):
 
     def test_direction_waits_while_a_turn_uses_the_list(self):
         self.o.state["running"] = {"agent": "A", "started": 0, "minutes": 5}
-        reply = self.o.chat("cache research answers", kind="direct", target="B")
+        reply = self.o.chat("cache research answers", kind="direct", target="B")[0]
         self.assertIn("Queued", reply)
         self.assertNotIn("cache research", self.notes("B"))
         self.o.state["running"] = None

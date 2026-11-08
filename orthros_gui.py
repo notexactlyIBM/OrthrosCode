@@ -689,8 +689,9 @@ class Dashboard:
                                   relief="flat", font=(BODY, 10), wrap="word")
         self.task_brief.pack(fill="x")
         label(form, "Folder to work on -- empty for a new one under tasks\\. An existing folder "
-                    "must be a git repository; the agents work on a copy of it on a branch of "
-                    "their own, and nothing in it changes until you merge.",
+                    "is never changed: a git repository is worked on as a copy on a branch of "
+                    "its own (merge it to take the work); any other folder is copied into the "
+                    "task folder, and the results are there.",
               DIM, (BODY, 9), justify="left", wraplength=600).pack(anchor="w", pady=(8, 2))
         folder_row = tk.Frame(form, bg=PANEL)
         folder_row.pack(fill="x")
@@ -723,6 +724,8 @@ class Dashboard:
             r.grid(row=i // 3, column=i % 3, sticky="w", pady=(0, 10))
             stats.columnconfigure(i % 3, weight=1, uniform="stat")
             self.readouts[key] = r
+        self.svc_span = label(pane, "", DIM, (BODY, 9), anchor="w")
+        self.svc_span.pack(fill="x", pady=(0, 4))
 
         # The connect details and the tools line keep their place; the list takes what is left.
         box = tk.Frame(pane, bg=PANEL)
@@ -1099,6 +1102,7 @@ class Dashboard:
         for name, card in self.cards.items():
             card.render(d)
         self.render_chat(d.get("chat") or [], d.get("directions") or 0)
+        self.bear.noticed(d.get("events") or [])
         self.render_diag(d)
 
     def render_controls(self, d):
@@ -1272,6 +1276,9 @@ class Dashboard:
             r.set(fmt_n(value) if key == "tokens" else value,
                   WARN if key == "gave_up" and value else BAD if key in ("failed", "denied")
                   and value else INK)
+        self.svc_span.config(text="The last 24 hours%s." % (
+            " · the model was answering %d%% of the last hour" % round(s["busy"] * 100)
+            if s.get("busy") else ""))
         recent = (s.get("recent") or [])[:10]
         shown = json.dumps([recent, sorted(self.open_reqs)])
         if shown != self.shown.get("reqs"):
@@ -1287,9 +1294,15 @@ class Dashboard:
                     opened = at in self.open_reqs
                     cls = "ok" if r["result"] == "answered" else "no" if \
                         r["result"].startswith("turned") else "bad"
-                    res = ("ANSWERED · %s TOK · %ss" % (fmt_n(r["tokens"]).upper(),
-                                                              r["seconds"])
-                           if r["result"] == "answered" else r["result"].upper())
+                    if r["result"] == "answered":
+                        res = "ANSWERED · %s TOK · %ss%s%s" % (
+                            fmt_n(r["tokens"]).upper(), r["seconds"],
+                            " · %d TOK/S" % r["speed"] if r.get("speed") else "",
+                            " · WAITED %ds" % round(r["waited"]) if (r.get("waited") or 0) >= 1
+                            else "")
+                    else:
+                        res = r["result"].upper() + (
+                            " ×%d" % r["count"] if (r.get("count") or 1) > 1 else "")
                     t.insert("end", hhmm(r["at"]) + "   ", ("time", mark))
                     t.insert("end", (r.get("tag") or "…") + "   ", ("tag", mark))
                     t.insert("end", res + "\n", (cls, mark))
@@ -1599,7 +1612,7 @@ class Dashboard:
             self.render_mode(self.d)
 
     def browse(self):
-        folder = filedialog.askdirectory(parent=self.root, title="A git repository to work on")
+        folder = filedialog.askdirectory(parent=self.root, title="A folder to work on")
         if folder:
             self.task_folder.delete(0, "end")
             self.task_folder.insert(0, os.path.normpath(folder))

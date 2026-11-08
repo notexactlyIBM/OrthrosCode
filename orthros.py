@@ -109,6 +109,7 @@ DEFAULTS = {
     # they must send (made on first run), how many turns a tool gets before it
     # is given up, and how long one run of it may take.
     "serve_port": 8777,
+    "serve_host": "",            # the address to listen on; empty = every address of this machine
     "serve_key": "",
     "tool_turns": 4,
     "tool_seconds": 120,
@@ -153,13 +154,17 @@ MEMORY_FILES = ("orthros_tasks.md", "PLAN.md", "PROGRESS.md", "PROGRESS.old.md",
                 "ROLLBACK.md", "GISTS.md")
 FIELD_REPORT = "FIELD_REPORT.md"
 # One row per round from both agents (agent/ralph_ledger.py). Read here with
-# its own query, not by importing the agents' code, which they rewrite.
-LEDGER = "ledger.sqlite"
+# its own query, not by importing the agents' code, which they rewrite. A test
+# round the loop threw out (its test passed before any change, or it changed
+# code) is its own outcome: by 2026-11-07 that was 110 of 180 "rejected by
+# reviewer" rounds, and the twin, reading the report, went looking at the reviewer.
+LEDGER = work.LEDGER
 ROUND_OUTCOMES = """SELECT CASE
          WHEN symptom != '' THEN 'lost: ' || symptom
          WHEN failed > 0 AND applied = 0 THEN 'edit did not apply'
          WHEN broken != '' THEN 'broke a check'
          WHEN caught != '' THEN 'caught by a check'
+         WHEN verdict = 'reject' AND reason LIKE 'test round:%' THEN 'test rounds sent back'
          WHEN verdict = 'reject' THEN 'rejected by reviewer'
          WHEN kept = 1 THEN 'kept'
          ELSE 'no change'
@@ -423,22 +428,7 @@ def clock(ts=None):
     return time.strftime("%H:%M", time.localtime(ts or now()))
 
 
-def read_json(path, default=None):
-    try:
-        with open(path, encoding="utf-8") as handle:
-            return json.load(handle)
-    except (OSError, ValueError):
-        return default
-
-
-def write_json(path, data):
-    tmp = path + ".tmp"
-    try:
-        with open(tmp, "w", encoding="utf-8") as handle:
-            json.dump(data, handle, indent=1)
-        os.replace(tmp, path)
-    except OSError:
-        pass
+read_json, write_json = work.read_json, work.write_json
 
 
 def read_text(path):
@@ -482,15 +472,6 @@ def loop_text(folder, started):
 _k32 = ctypes.windll.kernel32 if os.name == "nt" else None
 
 
-class MEMORYSTATUSEX(ctypes.Structure):
-    _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
-                ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
-                ("ullTotalPageFile", ctypes.c_ulonglong),
-                ("ullAvailPageFile", ctypes.c_ulonglong),
-                ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
-                ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
-
-
 def memory():
     """(free commit MiB, free RAM MiB, % in use), or None off Windows.
 
@@ -498,11 +479,8 @@ def memory():
     allocations against, and llama.cpp's "bad allocation" is what a refusal
     looks like from inside the engine.
     """
-    if _k32 is None:
-        return None
-    status = MEMORYSTATUSEX()
-    status.dwLength = ctypes.sizeof(status)
-    if not _k32.GlobalMemoryStatusEx(ctypes.byref(status)):
+    status = work.memory_status()
+    if status is None:
         return None
     return (int(status.ullAvailPageFile / 1048576), int(status.ullAvailPhys / 1048576),
             int(status.dwMemoryLoad))
@@ -768,9 +746,10 @@ def rerun_ids(output):
     return ids
 
 
-def check_agent(folder, python, quick=False, seconds=600):
+def check_agent(folder, python, quick=False, seconds=600, suite=True):
     """Does an agent's code import and pass its own tests? Returns (problems,
-    flaky, seconds taken); no problems means fit to run.
+    flaky, seconds taken); no problems means fit to run. `suite` False runs the
+    import check alone: for code the suite has already passed on.
 
     Tests that fail are run once more, on their own. Those that pass then are
     flaky -- timing on a loaded machine, or leaning on what another test left
@@ -795,7 +774,8 @@ def check_agent(folder, python, quick=False, seconds=600):
         if code:
             return verdict("modules do not import: "
                            + " | ".join(out.strip().splitlines()[-4:]))
-        if not any(f.startswith("test_") and f.endswith(".py") for f in os.listdir(folder)):
+        if not suite or not any(f.startswith("test_") and f.endswith(".py")
+                                for f in os.listdir(folder)):
             return verdict()
         code, out = run(["-m", "unittest", "discover", "-s", ".", "-p", "test_*.py", "-q"],
                         seconds)
@@ -889,12 +869,23 @@ class Orthros:
         self.serve_failures = 0              # loads of the model to serve, failed in a row
         self.chat_at = 0.0                   # when the chat box last used the model
         self.leftovers = []                  # housekeeping's last findings, for the page
+        self.checked = {}                    # agent -> (code version, its Python) the suite passed on
+        self.suite_skipped = False           # did the last preflight run the imports alone?
+        self.save_failed = False             # is the state file unwritable right now?
 
     # ---------------------------------------------------------------- state
 
     def save(self):
         with self.lock:
-            write_json(self.state_path, self.state)
+            ok = write_json(self.state_path, self.state)
+            failed, self.save_failed = self.save_failed, not ok
+        # Said once each way. A full disk loses the judgement of every turn, and
+        # until 2026-11-07 it lost them without a word.
+        if not ok and not failed:
+            self.event("could not write %s -- a full disk? Nothing decided from here on is "
+                       "being kept" % os.path.basename(self.state_path), "bad")
+        elif ok and failed:
+            self.event("writing %s works again" % os.path.basename(self.state_path))
 
     def event(self, text, kind="info"):
         with self.lock:
@@ -1087,7 +1078,8 @@ class Orthros:
         if not reason:
             return
         current = self.configured()
-        why = self.tuner.look(self.find_lms("A"), current.get("LC_MODEL_KEY", ""), current)
+        why = self.tuner.look(self.find_lms("A"), current.get("LC_MODEL_KEY", ""), current,
+                              card=card if card and card[1] else None)
         look = self.tuner.data["look"]
         self.event("looked at the hardware (%s): %s, %d GB of video memory, %d GB of memory%s"
                    % (reason, look.get("gpu") or "no NVIDIA card found",
@@ -1301,16 +1293,7 @@ class Orthros:
         self.event("model released; the card is free", "handover")
 
     def find_lms(self, name):
-        configured = self.agent_env(name).get("LC_LMS_PATH", "")
-        tail = os.path.join("resources", "app", ".webpack", "lms.exe")
-        candidates = [configured, os.path.expandvars(r"%USERPROFILE%\.lmstudio\bin\lms.exe"),
-                      os.path.expandvars(os.path.join(r"%LOCALAPPDATA%\Programs\LM Studio", tail)),
-                      os.path.expandvars(os.path.join(r"%ProgramFiles%\LM Studio", tail))]
-        candidates += [os.path.join("%s:\\" % d, "LM Studio", tail) for d in "CDEFGH"]
-        for path in candidates:
-            if path and os.path.isfile(path):
-                return path
-        return shutil.which("lms")
+        return work.find_lms(self.agent_env(name).get("LC_LMS_PATH", ""))
 
     # ---------------------------------------------------------------- preflight and reports
 
@@ -1322,8 +1305,28 @@ class Orthros:
         check, so an agent cannot switch it off by editing itself -- though
         the tests it runs are the agent's. A flaky test goes to the top of the
         list its twin works from, to be fixed like anything else.
+
+        The suite runs once per version of the code. On the same code it last
+        passed on, with the same Python, only the import check runs (seconds).
+        Until 2026-11-07 every turn ran the whole suite -- minutes -- and a
+        held-out scoring ran it eight times on one unchanged version. Any
+        change to the code is a new version, a rollback or a carry-over
+        included; the notes are not code; a restart forgets what passed.
         """
-        problems, flaky, _ = check_agent(self.folders[name], self.python_for(name))
+        folder, python = self.folders[name], self.python_for(name)
+        sha = commit_all(folder, "Orthros: %s before its pre-launch check" % name)
+        try:
+            python_at = os.path.getmtime(python)
+        except OSError:
+            python_at = 0
+        passed = self.checked.get(name)
+        same = bool(passed) and passed[1] == python_at and self.same_code(name, passed[0], sha)
+        problems, flaky, _ = check_agent(folder, python, suite=not same)
+        self.suite_skipped = same and not problems
+        if problems:
+            self.checked.pop(name, None)
+        elif not same:
+            self.checked[name] = (sha, python_at)
         if flaky:
             self.event("%s has flaky tests -- they failed in the suite and passed on their "
                        "own: %s" % (name, ", ".join(flaky)[:200]), "bad")
@@ -1395,7 +1398,9 @@ class Orthros:
                            % (name, "; ".join(problems)), error=True)
                 return False
             problems = self.preflight(name)
-        self.event("%s passed its pre-launch checks" % name)
+        self.event("%s passed its pre-launch checks%s" % (
+            name, " (the code its tests passed on before: imports only)" if self.suite_skipped
+            else ""))
         return True
 
     def field_report(self, result):
@@ -1470,6 +1475,10 @@ class Orthros:
                 lines.append("Typical speed: %.0f tok/sec." % sorted(rates)[len(rates) // 2])
         reasons = re.findall(r"Reviewer rejected it: (.+)", loop)[-3:]
         lines += ["Rejected: %s" % r.strip()[:160] for r in reasons]
+        # The loop's own verdicts on test rounds: the test passed before any change,
+        # or the round changed code. Not the reviewer's, and the usual loss.
+        lines += ["Test round sent back: %s" % r.strip()[:160]
+                  for r in re.findall(r"Test round sent back: (.+)", loop)[-2:]]
         errors = re.findall(r"LocalCoder hit an unexpected error: (.+)", loop)[-2:]
         lines += ["Error: %s" % e.strip()[:160] for e in errors]
         record = self.coding_record(name)
@@ -2423,12 +2432,17 @@ class Orthros:
         with self.lock:
             if not self.state["paused"]:
                 return "already running"
+        # Commits both agents' trees: seconds, during which every poll of the
+        # page would wait on the lock. Nothing runs while paused, so it is safe here.
+        self.prepare_folders()
+        with self.lock:
+            if not self.state["paused"]:
+                return "already running"
             if minutes:
                 self.settings["session_minutes"] = max(5, min(480, int(minutes)))
                 write_json(self.settings_path, self.settings)
             if first in NAMES:
                 self.state["next"] = first
-            self.prepare_folders()
             self.state["paused"] = False
             self.state["alert"] = None
             self.backoff_until = 0
@@ -2486,17 +2500,20 @@ class Orthros:
             tick += 1
             time.sleep(2 if self.gpu else 30)
 
+    def latest_log(self, agent):
+        """The running turn's log when it is this agent's, else its newest in logs\\, or ''."""
+        running = self.state.get("running") or {}
+        if running.get("agent") == agent and running.get("log"):
+            return running["log"]
+        try:
+            names = sorted(f for f in os.listdir(self.logs) if f.endswith("-%s.log" % agent))
+        except OSError:
+            return ""
+        return os.path.join(self.logs, names[-1]) if names else ""
+
     def tail_log(self, agent, name, offset):
         """New raw output of an agent's newest turn log, for the page's terminal."""
-        running = self.state.get("running") or {}
-        path = running.get("log") if running.get("agent") == agent else ""
-        if not path:
-            try:
-                names = sorted(f for f in os.listdir(self.logs)
-                               if f.endswith("-%s.log" % agent))
-            except OSError:
-                names = []
-            path = os.path.join(self.logs, names[-1]) if names else ""
+        path = self.latest_log(agent)
         if not path or not os.path.isfile(path):
             return {"file": "", "offset": 0, "text": "", "reset": True}
         size = os.path.getsize(path)
@@ -2508,7 +2525,7 @@ class Orthros:
         if reset and start and "\n" in text:
             text = text[text.index("\n") + 1:]      # started mid-file: begin on a whole line
         return {"file": os.path.basename(path), "offset": offset, "text": text,
-                "reset": reset, "live": running.get("agent") == agent}
+                "reset": reset, "live": (self.state.get("running") or {}).get("agent") == agent}
 
     # ---------------------------------------------------------------- modes
 
@@ -2543,7 +2560,9 @@ class Orthros:
     # ---------------------------------------------------------------- the operator's chat
 
     def chat(self, text, kind="ask", target="both"):
-        """One message from the page's chat box. Returns the reply.
+        """One message from the page's chat box. Returns (reply, mood, acts): the bear's
+        cues from the answer, for the window. (2026-11-07: they were left on self, and
+        two chats at once -- the window's and a browser's -- took each other's.)
 
         `ask`: a question about how things stand, answered in a few plain
         sentences from Orthros's own records -- which are exact, and need no
@@ -2557,18 +2576,15 @@ class Orthros:
         `wild`: anything at all, answered by the same model thinking first (see
         WILD_BRIEF). Its exchanges are marked, and an `ask` is not sent them, so
         an off-topic talk never steers an answer about the work.
-
-        The bear's cues in an answer (its mood, any moves) are left in self.mood
-        and self.acts for the window.
         """
         text = " ".join(str(text or "").split())[:4000 if kind == "wild" else 600]
-        self.mood, self.acts = "", []
+        mood, acts = "", []
         if not text:
-            return "Say something first."
+            return "Say something first.", mood, acts
         if kind == "direct":
             names = (target,) if target in NAMES + ("task",) else NAMES
             if target == "task" and not self.direction_folder("task"):
-                return "There is no task chosen. Pick or create one first."
+                return "There is no task chosen. Pick or create one first.", mood, acts
             with self.lock:
                 for n in names:
                     self.state["directions"].append({"agent": n, "text": text, "at": now()})
@@ -2582,13 +2598,13 @@ class Orthros:
                          "so it goes in, at the top, as soon as that turn ends." % where)
             self.event("operator direction for %s: %s" % (where, text[:80]), "start")
         else:
-            reply, self.mood, self.acts = bear_cues(self.answer(text, wild=kind == "wild"))
+            reply, mood, acts = bear_cues(self.answer(text, wild=kind == "wild"))
         mark = ["wild"] if kind == "wild" else []
         with self.lock:
             self.state["chat"] = (self.state["chat"] + [[now(), "you", text] + mark,
                                                         [now(), "orthros", reply] + mark])[-40:]
             self.save()
-        return reply
+        return reply, mood, acts
 
     def clear_chat(self):
         """Forget the conversation: the page's log, and what the model is reminded of."""
@@ -3029,12 +3045,7 @@ def serve(orthros, port):
             elif url.path == "/api/folders":
                 self.send(200, work.folders(q.get("path", "")))
             elif url.path == "/api/log":
-                running = orthros.state.get("running") or {}
-                path = running.get("log") if running.get("agent") == q.get("agent") else ""
-                if not path:
-                    names = sorted(f for f in os.listdir(orthros.logs)
-                                   if f.endswith("-%s.log" % q.get("agent", "")))
-                    path = os.path.join(orthros.logs, names[-1]) if names else ""
+                path = orthros.latest_log(q.get("agent", ""))
                 self.send(200, "\n".join(tail(path, 300)) if path else "(no log yet)",
                           "text/plain")
             else:
@@ -3071,9 +3082,9 @@ def serve(orthros, port):
                     orthros.clear_chat()
                     self.send(200, {"result": "ok", "chat": []})
                 elif url.path == "/api/chat":
-                    reply = orthros.chat(body.get("text"), body.get("kind") or "ask",
-                                         body.get("target") or "both")
-                    self.send(200, {"reply": reply, "mood": orthros.mood, "acts": orthros.acts,
+                    reply, mood, acts = orthros.chat(body.get("text"), body.get("kind") or "ask",
+                                                     body.get("target") or "both")
+                    self.send(200, {"reply": reply, "mood": mood, "acts": acts,
                                     "chat": orthros.state["chat"][-20:]})
                 elif url.path == "/api/settings":
                     if "session_minutes" in body:
@@ -3447,14 +3458,18 @@ def doctor(root, out=print):
     say("OK" if len(work.eval_exercises()) >= 8 else "FAIL",
         "%d held-out exercises, %d to practise on" % (len(work.eval_exercises()),
                                                      len(work.exercises())))
-    settings = dict(DEFAULTS, **(read_json(os.path.join(root, "orthros.json"), {}) or {}))
+    written = read_json(os.path.join(root, "orthros.json"), {}) or {}
+    settings = dict(DEFAULTS, **written)
     say("OK", "proof by score %s (every %s good turns, %s exercises at %s min); practice every %s"
         % ("on" if settings.get("prove_by_score") else "OFF", settings.get("eval_every"),
            settings.get("eval_count"), settings.get("eval_minutes"),
            settings.get("practice_every")))
-    lms = shutil.which("lms") or next((p for p in (
-        os.path.expandvars(r"%USERPROFILE%\.lmstudio\bin\lms.exe"),) if os.path.isfile(p)), "")
-    say("OK" if lms else "WARN", "LM Studio's lms: %s" % (lms or "not found on PATH"))
+    stray = sorted(k for k in written if k not in DEFAULTS)
+    if stray:
+        say("WARN", "orthros.json has settings nothing reads, left by an older version -- "
+                    "delete them: %s" % ", ".join(stray))
+    lms = work.find_lms()                # the same search a turn makes
+    say("OK" if lms else "WARN", "LM Studio's lms: %s" % (lms or "not found"))
     behind = agents_behind(root)
     if behind:
         say("WARN", "A and B were built from an older agent\\: %s since, the newest \"%s\" -- "

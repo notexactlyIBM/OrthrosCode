@@ -133,6 +133,15 @@ class TestTuner(unittest.TestCase):
         self.assertIn("LC_RALPH_ITER_TIMEOUT", self.tuner.data["trial"])
         self.assertTrue(any("window leaves a reply" in w for w in why))
 
+    def test_a_look_takes_the_card_reading_it_is_given(self):
+        # Orthros reads the card in-process every two seconds; the look need not start
+        # nvidia-smi for the same number (2026-11-07)
+        with mock.patch.object(tune, "gpu") as gpu, \
+                mock.patch.object(tune, "model_facts", return_value=(0, 0)):
+            look = tune.probe("", "qwen", card=("Big Card", 49152))
+        gpu.assert_not_called()
+        self.assertEqual((look["gpu"], look["vram_mb"]), ("Big Card", 49152))
+
     def test_settings_survive_a_restart(self):
         self.tuner.data["good"] = {"LC_CONTEXT": 98304}
         self.tuner.save()

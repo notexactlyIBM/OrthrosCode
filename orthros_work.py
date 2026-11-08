@@ -13,6 +13,8 @@ Standard library only, like orthros.py.
 """
 
 import contextlib
+import ctypes
+import json
 import os
 import re
 import shutil
@@ -25,6 +27,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 EXERCISES = os.path.join(HERE, "exercises")
 EVALS = os.path.join(HERE, "evals")     # held out: scoring versions, never practice
 KEEP_PRACTICE = 6            # practice folders kept per agent, newest first
+# One SQLite file at the root: a row per round from both agents (their
+# agent/ralph_ledger.py writes it) and, in serve mode, a row per request.
+LEDGER = "ledger.sqlite"
+# A folder to work on that is not a git repository is copied whole into the
+# task folder. Past this size, say so rather than fill the disk.
+COPY_LIMIT_MB = 512
+SKIP_COPY = ("__pycache__", "*.pyc", ".localcoder*", ".aider*", "venv", "node_modules")
 
 TASK_PROMPT = """# How to work
 
@@ -95,6 +104,24 @@ def slug(text):
     return re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")[:40] or "task"
 
 
+def find_lms(configured=""):
+    """LM Studio's lms.exe: the configured path (LC_LMS_PATH), the usual places, then PATH.
+
+    One list for every caller -- a turn, --doctor, SETUP.bat -- so what one
+    finds the others find. Until 2026-11-07 --doctor looked in two places and
+    could say "not found" for an lms that every turn found.
+    """
+    tail = os.path.join("resources", "app", ".webpack", "lms.exe")
+    candidates = [configured, os.path.expandvars(r"%USERPROFILE%\.lmstudio\bin\lms.exe"),
+                  os.path.expandvars(os.path.join(r"%LOCALAPPDATA%\Programs\LM Studio", tail)),
+                  os.path.expandvars(os.path.join(r"%ProgramFiles%\LM Studio", tail))]
+    candidates += [os.path.join("%s:\\" % d, "LM Studio", tail) for d in "CDEFGH"]
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    return shutil.which("lms")
+
+
 def git(folder, *args):
     try:
         proc = subprocess.run(["git", "-C", folder, "-c", "user.name=Orthros",
@@ -109,6 +136,71 @@ def git(folder, *args):
 def write(path, body):
     with open(path, "w", encoding="utf-8") as handle:
         handle.write(body)
+
+
+def read_json(path, default=None):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, ValueError):
+        return default
+
+
+def write_json(path, data):
+    """True once written; False when the disk would not take it -- for the caller to say."""
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=1)
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        return False
+
+
+class MEMORYSTATUSEX(ctypes.Structure):
+    _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+
+def memory_status():
+    """Windows's memory figures (a MEMORYSTATUSEX), or None off Windows or when it will
+    not answer. One reading for the referee's checks and the tuner's look."""
+    if os.name != "nt":
+        return None
+    status = MEMORYSTATUSEX()
+    status.dwLength = ctypes.sizeof(status)
+    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+        return None
+    return status
+
+
+_MEMO = {}
+
+
+def memo(key, paths, compute):
+    """compute() again only once one of `paths` has changed (its mtime or size), else the
+    value from last time. The page and the window each poll every two seconds, and every
+    poll read every task's and tool's files to list them (2026-11-07)."""
+    stamp = tuple(_stamp(p) for p in paths)
+    hit = _MEMO.get(key)
+    if hit and hit[0] == stamp:
+        return hit[1]
+    value = compute()
+    _MEMO[key] = (stamp, value)
+    return value
+
+
+def _stamp(path):
+    try:
+        st = os.stat(path)
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
 
 
 def read(path):
@@ -200,21 +292,53 @@ def git_out(folder, *args, data=None):
         return False, str(exc)
 
 
-SOURCE_LINE = re.compile(r"^Works on a copy of (.+), on the branch (\S+)\.", re.M)
+SOURCE_LINE = re.compile(r"^Works on a copy of (.+?)(?:, on the branch (\S+)|, copied here)\.", re.M)
+
+
+def folder_mb(path):
+    """Megabytes of files under `path`, skipping what a copy skips."""
+    total = 0
+    for root_, dirs, files in os.walk(path):
+        dirs[:] = [d for d in dirs if d not in SKIP_COPY]
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(root_, name))
+            except OSError:
+                pass
+    return total / 1048576.0
+
+
+def copy_in(source, folder):
+    """A folder that is not a git repository -- files to process, say -- is copied
+    whole into the task folder, which becomes a repository of its own: the agents
+    work there, the results are there, and nothing in the source changes. Returns
+    (note, error)."""
+    size = folder_mb(source)
+    if size > COPY_LIMIT_MB:
+        return "", ("%s holds %d MB; a folder that is not a git repository is copied whole, "
+                    "and that stops at %d MB. Run  git init  there and it is worked on as a "
+                    "worktree instead, whatever its size." % (source, size, COPY_LIMIT_MB))
+    try:
+        shutil.copytree(source, folder, ignore=shutil.ignore_patterns(*SKIP_COPY))
+    except (OSError, shutil.Error) as exc:
+        wipe(folder)
+        return "", "Could not copy %s: %s" % (source, str(exc)[-200:])
+    return ("\nWorks on a copy of %s, copied here. Nothing in %s changes: the results are in "
+            "this folder.\n" % (source, source)), ""
 
 
 def attach(source, folder, key):
-    """Work on an existing git repository without touching it: a worktree of it in
-    `folder`, on a branch of its own, starting from the repository as it stands --
-    uncommitted changes included. Its owner takes the work by merging the branch;
-    a rollback here can never reach their files. Returns (note, error)."""
+    """Work on an existing folder without touching it. A git repository: a worktree
+    of it in `folder`, on a branch of its own, starting from the repository as it
+    stands -- uncommitted changes included; its owner takes the work by merging
+    the branch. Any other folder: a copy (copy_in). A rollback here can never
+    reach their files either way. Returns (note, error)."""
     source = os.path.abspath(os.path.expandvars(source.strip().strip('"')))
     if not os.path.isdir(source):
         return "", "There is no folder %s." % source
     ok, top = git_out(source, "rev-parse", "--show-toplevel")
     if not ok:
-        return "", ("%s is not a git repository. Run  git init  there first: git is how "
-                    "every change the agents make can be undone." % source)
+        return copy_in(source, folder)
     top, branch = os.path.normpath(top), "orthros/" + key
     ok, out = git_out(top, "worktree", "add", "-b", branch, folder, "HEAD")
     if not ok:
@@ -290,20 +414,24 @@ def list_tasks(root, tool=False):
         folder = os.path.join(base, key)
         if not os.path.isdir(folder):
             continue
-        brief = read(os.path.join(folder, "TASK.md"))
-        title = (brief.splitlines() or ["# " + key])[0]
-        notes = read(os.path.join(folder, "orthros_tasks.md"))
-        source = SOURCE_LINE.search(brief)
-        out.append({"key": key, "name": title.lstrip("# ").strip() or key,
-                    "folder": folder, "source": source.group(1) if source else "",
-                    "branch": source.group(2) if source else "",
-                    "open": len(re.findall(r"^\s*[-*]\s*\[ \]", notes, re.M)),
-                    "done": len(re.findall(r"^\s*[-*]\s*\[[xX]\]", notes, re.M))
-                    + len(re.findall(r"^\s*[-*]\s*\[[xX]\]",
-                                     read(os.path.join(folder, "DONE.md")), re.M)),
-                    "parked": len(re.findall(r"^\s*[-*]\s*\[!\]", notes, re.M)),
-                    "made": os.path.getmtime(folder)})
+        files = [os.path.join(folder, f) for f in ("TASK.md", "orthros_tasks.md", "DONE.md")]
+        out.append(dict(memo(("task", folder), [folder] + files,
+                             lambda: task_entry(key, folder, files))))
     return sorted(out, key=lambda t: -t["made"])
+
+
+def task_entry(key, folder, files):
+    brief, notes, done = (read(f) for f in files)
+    title = (brief.splitlines() or ["# " + key])[0]
+    source = SOURCE_LINE.search(brief)
+    return {"key": key, "name": title.lstrip("# ").strip() or key,
+            "folder": folder, "source": source.group(1) if source else "",
+            "branch": (source.group(2) or "") if source else "",
+            "open": len(re.findall(r"^\s*[-*]\s*\[ \]", notes, re.M)),
+            "done": len(re.findall(r"^\s*[-*]\s*\[[xX]\]", notes, re.M))
+            + len(re.findall(r"^\s*[-*]\s*\[[xX]\]", done, re.M)),
+            "parked": len(re.findall(r"^\s*[-*]\s*\[!\]", notes, re.M)),
+            "made": os.path.getmtime(folder)}
 
 
 # ---------------------------------------------------------------- practice

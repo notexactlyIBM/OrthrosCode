@@ -112,7 +112,10 @@ the chat box:
 In the window, Orthros the bear lives in the left third of the chat card. It
 walks out from behind the chat box when you come to talk, watches you type,
 ponders while Orthros thinks, acts out the mood of each answer, and walks back
-behind the box after ten quiet minutes. About once a day a salmon swims along
+behind the box after ten quiet minutes. While it is out it also acts out what
+Orthros does: a wave as a turn or serving starts, proud when work is kept, a
+sniff at a handover, sad or surprised at a failure -- at most once a minute, and
+never while you are typing. About once a day a salmon swims along
 the GPU graph and it climbs up to catch and eat it; while you chat, only when
 you ask. Ask it in wild chat and it dances for ten seconds (twerk, the gritty, the
 default dance, the scuba, the twist, the sprinkler, the coffee grinder, the
@@ -127,10 +130,11 @@ Diagnostics tab.
 
 For **Work on a task**, describe what to build; the agents break it into small
 checkable jobs. It gets a new folder under `tasks\`, or pick an existing one
-with **Browse...**: that must be a git repository, and the agents work on a
-copy of it on a branch of their own (`orthros/<name>`), starting from the
-folder as it is, uncommitted changes included. Nothing in your folder changes
-until you merge that branch.
+with **Browse...**. A git repository is worked on as a copy on a branch of its
+own (`orthros/<name>`), starting from the folder as it is, uncommitted changes
+included; nothing in your folder changes until you merge that branch. Any
+other folder -- files to process, say -- is copied into the task folder (up to
+512 MB) and the results are there; your folder is not touched.
 
 **Diagnostics** is for looking inside: the model's raw output (collapsed until
 opened), recent events, the time and tokens each agent has had, the machine
@@ -202,18 +206,22 @@ or no connection within a few seconds, as when this machine is off -- as "use
 the next provider", and try again later.
 
 The page lists the latest requests -- when, from where, a few words the model
-writes on what each one asked, and how it went -- and counts the answered, the
-callers that gave up (the model is slower than a paid one: worth watching),
-the failed, the turned away and those with a wrong key. The connection details
-are under **Connect another machine**.
+writes on what each one asked, and how it went: tokens, seconds, tokens a
+second, and how long it waited for the model behind others -- and counts the
+last day's answered, callers that gave up (the model is slower than a paid one:
+worth watching), failed, turned away and wrong key, with the share of the last
+hour the model spent answering. All of it is kept in `ledger.sqlite`, so a
+restart forgets nothing. The connection details are under **Connect another
+machine**.
 
 Windows' firewall lets other machines in only with a rule -- it may not even
 ask. Once, on this machine, in an administrator terminal:
 
     netsh advfirewall firewall add rule name="Orthros serve" dir=in action=allow protocol=TCP localport=8777 profile=private
 
-Settings: `serve_port`, `tool_turns` (turns before a tool is given up) and
-`tool_seconds` (the longest one run of a tool may take).
+Settings: `serve_port`, `serve_host` (empty: every address of this machine),
+`tool_turns` (turns before a tool is given up) and `tool_seconds` (the longest
+one run of a tool may take).
 
 ## Settings
 
@@ -227,11 +235,19 @@ Settings: `serve_port`, `tool_turns` (turns before a tool is given up) and
 | `eval_every` | 4 | good turns between scorings of an agent |
 | `eval_count`, `eval_minutes` | 8, 8 | exercises per scoring and minutes each (about 90 minutes in all) |
 | `pause_after_idle` | 4 | stop after this many turns in a row that kept nothing |
+| `min_free_mb`, `critical_free_mb` | 4096, 1536 | memory (RAM plus page file) that must be free to start a turn, and below which a turn is stopped early |
+| `keep_logs` | 300 | turn logs kept in `logs\`, newest first |
 | `auto_tune` | true | fit context size and timeouts to the machine from what each turn measures |
+| `serve_port`, `serve_host` | 8777, "" | serve mode's port, and the address to listen on (empty: every address) |
+| `tool_turns`, `tool_seconds` | 4, 120 | turns before a tool asked for over MCP is given up, and the longest one run of it may take |
 | `serve_model` | "" | the model that answers the network's plain requests; empty = the agents' own |
 | `lift_model` | "" | the model a task switches to while **AGARIC LIFT** (the task pane's switch) is on |
+| `evolve_lift_model`, `agaric_lift_evolve` | "", false | the same for evolving turns: the model, and whether the switch is on |
 | `model_contexts` | {} | context for a model other than the agents', which the tuner does not fit (else 32,768) |
 | `dance_music` | "" | a folder of mp3s; when the bear dances, a random one plays from its start |
+
+`ORTHROS.bat --doctor` warns about any setting in `orthros.json` that nothing
+reads any more.
 
 One model does each job, and the card holds one at a time. The agents' own
 model -- `LC_MODEL_KEY` in their `config.cmd` -- always evolves them and always

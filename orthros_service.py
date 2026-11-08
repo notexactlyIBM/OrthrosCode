@@ -28,6 +28,14 @@ name and sends every request to that, whatever model the client names -- so
 nothing a client asks for can make LM Studio load a second model onto a card
 that already holds one.
 
+Every request is a row in ledger.sqlite (the `requests` table, beside the
+agents' rounds): when, from where, what it asked, how long it waited for the
+model, how long the answer took, and its tokens. The page's counts are the
+last day's, and its list the newest rows, both read from there -- so a restart
+forgets nothing. Until 2026-11-07 the list lived in memory, Orthros restarted
+most days, and nothing said whether a quiet card meant few requests or slow
+answers.
+
 Standard library only, like orthros.py.
 """
 
@@ -40,6 +48,7 @@ import os
 import re
 import select
 import socket
+import sqlite3
 import subprocess
 import threading
 import time
@@ -49,6 +58,22 @@ import orthros_work as work
 
 IDENTIFIER = "orthros-serve"         # the served model's name inside LM Studio
 RECORD = ".orthros-tool.json"        # a tool's build record, kept in its own folder
+LEDGER = work.LEDGER                 # the requests table lives beside the agents' rounds
+REQUESTS = ("CREATE TABLE IF NOT EXISTS requests (id INTEGER PRIMARY KEY, at REAL, count INTEGER, "
+            "who TEXT, user TEXT, ask TEXT, full TEXT, tag TEXT, result TEXT, waited REAL, "
+            "seconds REAL, tokens_in INTEGER, tokens_out INTEGER)")
+# The last day's counts, and the seconds the model spent answering in the last hour.
+TOTALS = """SELECT SUM(result = 'answered'), SUM(result LIKE 'caller gave up%'),
+       SUM(result LIKE 'failed%'),
+       SUM(CASE WHEN result LIKE 'turned away%' THEN count ELSE 0 END),
+       SUM(CASE WHEN result LIKE 'turned back%' THEN count ELSE 0 END),
+       SUM(tokens_in + tokens_out), SUM(CASE WHEN at > ? THEN seconds ELSE 0 END)
+FROM requests WHERE at > ?"""
+ROW = ("id", "at", "count", "who", "user", "ask", "full", "tag", "result", "waited", "seconds",
+       "tokens_in", "tokens_out")
+RECENT = 25                          # requests kept for the page
+KEEP_DAYS = 30                       # requests kept in the ledger
+REPEAT = 60                          # a refusal repeated by one machine within this is one row
 MCP_VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25")
 MAX_BODY = 32 * 1024 * 1024          # bytes of one request
 TOOL_OUTPUT = 100000                 # characters of a tool's answer sent back
@@ -201,6 +226,27 @@ def ask(upstream, model, messages, max_tokens=700, timeout=180, effort="low", te
         return ""
 
 
+def usage_in(data):
+    """(prompt tokens, completion tokens) from an answer's `usage`, or None."""
+    try:
+        usage = json.loads(data).get("usage") or {}
+        if usage.get("prompt_tokens") is None and usage.get("completion_tokens") is None:
+            total = int(usage.get("total_tokens") or 0)
+            return (total, 0) if total else None
+        return int(usage.get("prompt_tokens") or 0), int(usage.get("completion_tokens") or 0)
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+def guess_tokens(body):
+    """About how many tokens a request's messages are, for a stream that reports no
+    usage: four characters to a token, near enough for the page's totals."""
+    try:
+        return len(json.dumps(body.get("messages") or body.get("prompt") or "")) // 4
+    except (TypeError, ValueError):
+        return 0
+
+
 def record(folder):
     try:
         with open(os.path.join(folder, RECORD), encoding="utf-8") as handle:
@@ -255,13 +301,15 @@ class Service:
         self.upstream = ("127.0.0.1", 1234)
         self.model = ""
         self.waiting = 0                 # inference requests in flight
-        self.served = self.refused = self.tokens = 0
-        self.denied = 0                  # requests with a wrong or missing key
-        self.gave_up = self.failed = 0   # callers that stopped waiting; requests nothing could save
-        self.turn = threading.Semaphore(1)   # the model's turns: as many at once as it has slots
+        self.turn = threading.Semaphore(1)   # the model's turns: one at a time, like the card
         self.gave_up_at = 0.0
         self.turned_back_at = {}         # machine -> when its last one was logged
-        self.recent = collections.deque(maxlen=25)   # what was asked, and how it went
+        # Every request is a row in the ledger; the newest are kept here for the
+        # page, and read back on start so a restart forgets nothing.
+        self.ledger = os.path.join(orthros.root, LEDGER)
+        self.recent = collections.deque(maxlen=RECENT)
+        self._totals = (0.0, {})
+        self.remember()
         self.tagger = None               # labels them, once there is one to label
         self.checked = 0.0
         self.recheck = False             # a request failed upstream: is the model still there?
@@ -426,18 +474,71 @@ class Service:
         return (self.urls() or ["http://127.0.0.1:%d" % self.port()])[0]
 
     def view(self):
-        """For the page."""
-        return {"open": bool(self.server), "ready": self.ready and not self.why,
-                "why": self.why if self.server else "", "error": self.listen_error,
-                "urls": self.urls(), "key": self.o.settings.get("serve_key", ""),
-                "model": self.model, "served": self.served, "refused": self.refused,
-                "tokens": self.tokens, "denied": self.denied, "gave_up": self.gave_up,
-                "failed": self.failed, "in_hand": self.waiting,
-                "recent": [{k: v for k, v in r.items() if k != "text"}
-                           for r in list(self.recent)[::-1][:12]],
-                "catalog": self.catalog(),
-                "tools": [{k: t[k] for k in ("key", "state", "tests", "turns", "open", "done",
-                                             "parked")} for t in self.tools()]}
+        """For the page: the last day's counts and the newest requests, from the ledger."""
+        built = self.tools()
+        shown = {"open": bool(self.server), "ready": self.ready and not self.why,
+                 "why": self.why if self.server else "", "error": self.listen_error,
+                 "urls": self.urls(), "key": self.o.settings.get("serve_key", ""),
+                 "model": self.model, "in_hand": self.waiting,
+                 "recent": [self.shown(r) for r in list(self.recent)[::-1][:12]],
+                 "catalog": self.catalog(built),
+                 "tools": [{k: t[k] for k in ("key", "state", "tests", "turns", "open", "done",
+                                              "parked")} for t in built]}
+        shown.update(self.totals())
+        return shown
+
+    @staticmethod
+    def shown(r):
+        """One request as the page lists it: its tokens in all, and the answer's speed."""
+        out = {k: v for k, v in r.items() if k not in ("text", "id")}
+        out["tokens"] = (r.get("tokens_in") or 0) + (r.get("tokens_out") or 0)
+        out["speed"] = round((r.get("tokens_out") or 0) / r["seconds"]) \
+            if r.get("seconds") and r.get("tokens_out") else 0
+        return out
+
+    # ------------------------------------------------------------ the record
+
+    def sql(self, statement, args=(), rows=False):
+        """One statement on the requests table: its rows, or the new row's id. None
+        when the ledger cannot be used -- never an exception: the record must not
+        be what stops serving."""
+        try:
+            db = sqlite3.connect(self.ledger, timeout=10)
+            try:
+                with db:
+                    db.execute(REQUESTS)
+                    cur = db.execute(statement, args)
+                    return cur.fetchall() if rows else cur.lastrowid
+            finally:
+                db.close()           # `with db` commits but does not close; Windows keeps the lock
+        except (sqlite3.Error, OSError):
+            return None
+
+    def remember(self):
+        """The newest requests back from the ledger, and the old ones out of it."""
+        self.sql("DELETE FROM requests WHERE at < ?", (now() - KEEP_DAYS * 86400,))
+        found = self.sql("SELECT %s FROM requests ORDER BY id DESC LIMIT ?" % ", ".join(ROW),
+                         (RECENT,), rows=True) or []
+        for row in reversed(found):
+            r = dict(zip(ROW, row))
+            r["from"] = r.pop("who")
+            r["text"] = "" if r["tag"] else (r["full"] or "")[:1500]   # still to be labelled
+            self.recent.append(r)
+
+    def totals(self):
+        """The last day's counts: answered, gave up, failed, turned away, wrong key,
+        tokens -- and the share of the last hour the model spent answering. Read
+        again after a request, else at most every 30 s."""
+        at, value = self._totals
+        if value and now() - at < 30:
+            return value
+        found = (self.sql(TOTALS, (now() - 3600, now() - 86400), rows=True) or [()])[0]
+        found = [v or 0 for v in found] + [0] * 7
+        value = {"served": found[0], "gave_up": found[1], "failed": found[2],
+                 "refused": found[3], "denied": found[4], "tokens": found[5],
+                 "busy": round(min(1.0, found[6] / 3600.0), 2)}
+        self._totals = (now(), value)
+        return value
 
     def handler(self):
         service = self
@@ -466,7 +567,7 @@ class Service:
         path = urllib.parse.urlparse(req.path).path.rstrip("/") or "/"
         header = req.headers.get("Authorization")
         if not self.authorized(header):
-            self.turned_back(req.client_address[0], header)
+            self.turned_back(req.client_address[0], header, "%s %s" % (method, path))
             return send(req, 401, error("send the key Orthros's page shows: Authorization: "
                                         "Bearer <key>", "unauthorized"))
         try:
@@ -488,6 +589,8 @@ class Service:
                 return self.mcp(req, method, raw)
             if path == "/v1/models" and method == "GET":
                 if not self.ready or self.why:
+                    self.note(req.client_address[0], "", "GET /v1/models",
+                              "turned away: " + (self.why or "not serving"))
                     return self.unavailable(req)
                 return send(req, 200, {"object": "list", "data": [
                     {"id": self.model, "object": "model", "owned_by": "orthros"}]})
@@ -497,9 +600,10 @@ class Service:
         except Exception as exc:         # a bug here must not take the listener down
             send(req, 500, error("Orthros: %s" % exc, "server_error"))
 
-    def turned_back(self, who, header):
-        """Count a request without the right key, and say in the log where it came
-        from and what was wrong with it -- once a minute per machine."""
+    def turned_back(self, who, header, what):
+        """Record a request without the right key -- where it came from, what it
+        tried, what was wrong with it -- and say so in the log once a minute per
+        machine."""
         scheme, _, token = (header or "").partition(" ")
         token, key = token.strip(), self.o.settings.get("serve_key") or ""
         why = ("it sent no key" if not header else
@@ -508,23 +612,42 @@ class Service:
                "its key is a different one (%d characters, the right one has %d)"
                % (len(token), len(key)))
         with self.lock:
-            self.denied += 1
             quiet = now() - self.turned_back_at.get(who, 0) < 60
             if not quiet:
                 self.turned_back_at[who] = now()
         if not quiet:
             self.o.event("turned back a request from %s: %s" % (who, why), "bad")
+        self.note(who, "", what, "turned back: " + why)
 
-    def note(self, who, user, what, result, tokens=0, seconds=0.0):
-        """One line of the page's list of recent requests. `what` is the line shown, or
-        (that line, the request's text: shown whole when the line is opened, and the
-        tagger labels its start)."""
+    def note(self, who, user, what, result, tokens=(0, 0), seconds=0.0, waited=0.0):
+        """One request, as it went, into the ledger and the page's list. `what` is the
+        line shown, or (that line, the request's text: shown whole when the line is
+        opened, and the tagger labels its start). `seconds` is the answer's own time;
+        `waited`, the wait for the model before it. A refusal repeated from one
+        machine within a minute is one row, counted up: a misconfigured client
+        retrying is one line, not a page of them."""
         line, text = what if isinstance(what, tuple) else (what, "")
         with self.lock:
-            self.recent.append({"at": now(), "from": who, "user": str(user or "")[:60],
-                                "ask": line, "full": text, "text": text[:1500],
-                                "tag": "" if text else line,
-                                "result": result, "tokens": tokens, "seconds": round(seconds, 1)})
+            last = self.recent[-1] if self.recent else None
+            if result.startswith("turned") and last and last["result"] == result \
+                    and last["from"] == who and now() - last["at"] < REPEAT:
+                last["count"], last["at"] = (last.get("count") or 1) + 1, now()
+                self.sql("UPDATE requests SET count = ?, at = ? WHERE id = ?",
+                         (last["count"], last["at"], last.get("id")))
+                self._totals = (0.0, {})
+                return
+            row = {"at": now(), "count": 1, "from": who, "user": str(user or "")[:60],
+                   "ask": line, "full": text, "tag": "" if text else line, "result": result,
+                   "waited": round(waited, 1), "seconds": round(seconds, 1),
+                   "tokens_in": int(tokens[0] or 0), "tokens_out": int(tokens[1] or 0),
+                   "text": text[:1500]}
+            row["id"] = self.sql(
+                "INSERT INTO requests (%s) VALUES (%s)" % (", ".join(ROW[1:]),
+                                                           ", ".join("?" * len(ROW[1:]))),
+                (row["at"], 1, who, row["user"], line, text, row["tag"], result,
+                 row["waited"], row["seconds"], row["tokens_in"], row["tokens_out"]))
+            self.recent.append(row)
+            self._totals = (0.0, {})
         if text and not self.tagger:
             self.tagger = threading.Thread(target=self.tag_loop, daemon=True)
             self.tagger.start()
@@ -545,10 +668,9 @@ class Service:
             label = (label.strip().splitlines() or [""])[0].strip(" \"'.*")[:80]
             with self.lock:
                 todo["tag"], todo["text"] = label or "-", ""
+            self.sql("UPDATE requests SET tag = ? WHERE id = ?", (todo["tag"], todo.get("id")))
 
     def unavailable(self, req, why=None, retry=None):
-        with self.lock:
-            self.refused += 1
         send(req, 503, error(why or self.why or "not serving yet"),
              {"Retry-After": str(retry or self.retry)})
 
@@ -577,13 +699,14 @@ class Service:
                          daemon=True).start()
         with self.lock:
             self.waiting += 1
-        outcome, why, used = "failed", "", 0
+        outcome, why, used, went = "failed", "", (0, 0), 0.0
         try:
             for attempt in (1, 2):
                 turn = self.take_turn(gone)
                 if turn != "go":
                     outcome, why = turn, self.why
                     break
+                went = now()                  # its turn: the wait is over
                 try:
                     outcome, why, used = self.forward(req, path, body, gone, upstream)
                 finally:
@@ -600,27 +723,26 @@ class Service:
             done.set()
             with self.lock:
                 self.waiting -= 1
-        seconds = now() - begun
+        seconds = now() - begun                     # the caller's whole wait
+        waited, answering = (went - begun, now() - went) if went else (seconds, 0.0)
         if outcome == "answered":
-            with self.lock:
-                self.served += 1
-                self.tokens += used
-            return self.note(who, user, what, "answered", used, seconds)
+            return self.note(who, user, what, "answered", used, answering, waited)
         if outcome == "gone":
             with self.lock:
-                self.gave_up += 1
                 loud, self.gave_up_at = now() - self.gave_up_at > 60, now()
             if loud:
-                self.o.event("a caller from %s stopped waiting after %d s -- it needs a longer "
-                             "timeout, or Orthros is too slow for it" % (who, seconds), "bad")
-            return self.note(who, user, what, "caller gave up after %d s" % seconds, 0, seconds)
+                self.o.event("a caller from %s stopped waiting after %d s%s -- it needs a longer "
+                             "timeout, or Orthros is too slow for it" % (
+                                 who, seconds, ", %d s of it in the queue" % waited
+                                 if waited >= 1 else ""), "bad")
+            return self.note(who, user, what, "caller gave up after %d s" % seconds, (0, 0),
+                             answering, waited)
         if outcome == "refused":
             self.note(who, user, what, "turned away: " + (why or "not serving"))
             return self.unavailable(req)
-        with self.lock:
-            self.failed += 1           # "rejected": LM Studio refused it, and the caller heard why
+        # "rejected": LM Studio refused it, and the caller heard why
         self.o.event("a request from %s failed for good: %s" % (who, why), "bad")
-        self.note(who, user, what, "failed: " + why, 0, seconds)
+        self.note(who, user, what, "failed: " + why, (0, 0), answering, waited)
         if outcome == "broken":           # nothing reached the caller yet: say why
             send(req, 502, error("the model failed twice: %s" % why, "server_error"))
 
@@ -664,8 +786,10 @@ class Service:
                 time.sleep(1)
 
     def forward(self, req, path, body, gone, upstream):
-        """One try at LM Studio: (outcome, why, tokens). 'broken' means it failed before
-        anything reached the caller, so it may be tried again."""
+        """One try at LM Studio: (outcome, why, (prompt tokens, answer tokens)). 'broken'
+        means it failed before anything reached the caller, so it may be tried again.
+        A whole answer says its usage; a stream usually does not, so its chunks are
+        counted -- one is about one token -- and its prompt is estimated."""
         conn = http.client.HTTPConnection(*self.upstream, timeout=3600)
         upstream["conn"] = conn
         started = False
@@ -681,10 +805,10 @@ class Service:
                                        reason, re.I)
                 if status >= 500 or gone_model:
                     self.recheck = True
-                    return "broken", "HTTP %d: %s" % (status, reason), 0
+                    return "broken", "HTTP %d: %s" % (status, reason), (0, 0)
                 # About this request alone -- too long for the window, say: the caller hears it.
                 sent = send(req, status, data)
-                return ("rejected" if sent else "gone"), "HTTP %d: %s" % (status, reason), 0
+                return ("rejected" if sent else "gone"), "HTTP %d: %s" % (status, reason), (0, 0)
             if "text/event-stream" in kind:
                 try:
                     req.send_response(status)
@@ -693,30 +817,32 @@ class Service:
                     req.end_headers()
                     started = True
                 except OSError:
-                    return "gone", "", 0
+                    return "gone", "", (0, 0)
+                got, usage = 0, None
                 for line in resp:
                     try:
                         req.wfile.write(line)
                         if not line.strip():
                             req.wfile.flush()
                     except OSError:
-                        return "gone", "", 0
-                return "answered", "", 0
+                        return "gone", "", (0, got)
+                    if line.startswith(b"data:"):
+                        if b'"content"' in line:
+                            got += 1
+                        if b'"usage"' in line:
+                            usage = usage_in(line[5:]) or usage
+                return "answered", "", usage or (guess_tokens(body), got)
             data = resp.read()
             if gone.is_set() or not send(req, status, data):
-                return "gone", "", 0
-            try:
-                used = int((json.loads(data).get("usage") or {}).get("total_tokens") or 0)
-            except (ValueError, AttributeError, TypeError):
-                used = 0
-            return "answered", "", used
+                return "gone", "", (0, 0)
+            return "answered", "", usage_in(data) or (0, 0)
         except (OSError, http.client.HTTPException, ValueError, AttributeError) as exc:
             if gone.is_set():
-                return "gone", "", 0
+                return "gone", "", (0, 0)
             self.recheck = True
             if started:                   # the model stopped mid-answer: nothing to retry
-                return "failed", "the model stopped mid-answer (%s)" % exc, 0
-            return "broken", "the model did not answer (%s)" % exc, 0
+                return "failed", "the model stopped mid-answer (%s)" % exc, (0, 0)
+            return "broken", "the model did not answer (%s)" % exc, (0, 0)
         finally:
             conn.close()
 
@@ -803,15 +929,18 @@ class Service:
         limit = self.turn_limit()
         out = []
         for t in work.list_tasks(self.o.root, tool=True):
-            rec = record(t["folder"])
+            folder = t["folder"]
+            rec, brief = work.memo(
+                ("tool", folder), (os.path.join(folder, RECORD), os.path.join(folder, "TASK.md")),
+                lambda: (record(folder), " ".join(work.read(os.path.join(folder, "TASK.md"))
+                                                  .split("\n", 1)[-1].split())))
             tests = list(rec.get("tests") or [0, 0])
             passing = bool(tests[1]) and tests[0] == tests[1] and \
-                os.path.isfile(os.path.join(t["folder"], "tool.py"))
-            busy = self.building(t["folder"])
+                os.path.isfile(os.path.join(folder, "tool.py"))
+            busy = self.building(folder)
             wanted = bool(rec) and not rec.get("done") and rec.get("turns", 0) < limit
-            brief = work.read(os.path.join(t["folder"], "TASK.md")).split("\n", 1)[-1].strip()
             t.update(tests=tests, turns=rec.get("turns", 0), asked=rec.get("asked", 0),
-                     wanted=wanted, brief=" ".join(brief.split()), callable=passing and not busy,
+                     wanted=wanted, brief=brief, callable=passing and not busy,
                      state="building" if busy else "queued" if wanted else
                      "ready" if passing else "given up")
             out.append(t)
@@ -934,17 +1063,19 @@ class Service:
         text = "\n".join((proc.stdout or "").splitlines()[:400])
         return text_result(text or (proc.stderr or "no documentation found"), not text)
 
-    def catalog(self):
+    def catalog(self, built=None):
         """Every tool there is, for the page: what the network can call -- built in, and
-        built on request -- and what the agents use inside their own turns (read from
-        their code, which they grow)."""
-        body = work.read(os.path.join(self.o.folders["A"], "ralph_tools.py"))
+        built on request (`built`, from tools()) -- and what the agents use inside their
+        own turns (read from their code, which they grow)."""
+        code = os.path.join(self.o.folders["A"], "ralph_tools.py")
+        agents = work.memo(("agent_tools", code), (code,), lambda: [
+            {"name": word.rstrip(":"), "what": " ".join(line.split(None, 1)[1:])}
+            for word, line in re.findall(r'\(\s*"([A-Z]+:)",\s*"(.+?)"\)', work.read(code))])
         return {"network": [{"name": t["name"], "what": t["description"].split(". ")[0]}
                             for t in BUILT_IN],
                 "built": [{"name": t["key"], "what": t["brief"][:160], "state": t["state"]}
-                          for t in self.tools()],
-                "agents": [{"name": word.rstrip(":"), "what": " ".join(line.split(None, 1)[1:])}
-                           for word, line in re.findall(r'\(\s*"([A-Z]+:)",\s*"(.+?)"\)', body)]}
+                          for t in (self.tools() if built is None else built)],
+                "agents": agents}
 
     def run_tool(self, tool, text):
         """Run a tool once on `text`, inside the limits the model's code always runs in."""

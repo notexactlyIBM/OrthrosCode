@@ -452,7 +452,7 @@ dialog .line { justify-content: flex-end; }
             <div class="line">
               <input id="taskFolder" placeholder="Folder to work on -- empty for a new one under tasks\">
               <button type="button" id="browseBtn">Browse&hellip;</button>
-              <span class="tip left" tabindex="0" data-tip="An existing folder must be a git repository. The agents work on a copy of it on a branch of its own (orthros/name), starting from the folder as it is, uncommitted changes included. Nothing in the folder itself changes: merge the branch to take the work.">?</span>
+              <span class="tip left" tabindex="0" data-tip="An existing folder is never changed. A git repository: the agents work on a copy of it on a branch of its own (orthros/name), starting from the folder as it is, uncommitted changes included; merge the branch to take the work. Any other folder -- files to process, say -- is copied into the task folder (up to 512 MB), and the results are there.">?</span>
             </div>
             <div class="picker" id="picker" hidden>
               <div class="line"><button class="small" id="pickUp" type="button">&uarr; Up</button>
@@ -474,6 +474,7 @@ dialog .line { justify-content: flex-end; }
             <span id="svcDeniedTile"><b id="svcDenied">0</b>wrong key</span>
             <span><b id="svcTokens">0</b>tokens</span>
           </div>
+          <div class="msgline" id="svcSpan" style="margin-top:10px"></div>
           <div class="reqs" id="svcRecent"></div>
           <div class="tools" id="svcTools"></div>
           <details class="help">
@@ -881,17 +882,20 @@ function renderService(d) {
   $("#svcRefused").textContent = s.refused || 0;
   $("#svcDenied").textContent = s.denied || 0;
   $("#svcDeniedTile").classList.toggle("bad", !!s.denied);
-  $("#svcDeniedTile").title = s.denied ? "Requests with a wrong or missing key: Recent, under Diagnostics, says where they came from and why." : "";
+  $("#svcDeniedTile").title = s.denied ? "Requests with a wrong or missing key: the list below says where they came from and what was wrong." : "";
   $("#svcTokens").textContent = fmtN(s.tokens);
   $("#svcGaveUp").textContent = s.gave_up || 0;
   $("#svcGaveUpTile").classList.toggle("warn", !!s.gave_up);
   $("#svcFailed").textContent = s.failed || 0;
   $("#svcFailedTile").classList.toggle("bad", !!s.failed);
+  $("#svcSpan").textContent = "The last 24 hours" + (s.busy ? ` \u00b7 the model was answering ${Math.round(s.busy * 100)}% of the last hour` : "") + ".";
   // Rebuilt only when something changed, so an opened line stays open and text
   // being selected stays selected; an opened line shows the whole request.
   const html = (s.recent || []).slice(0, 8).map((r) => {
     const cls = r.result === "answered" ? "ok" : r.result.startsWith("turned") ? "no" : "bad";
-    const res = r.result === "answered" ? `answered \u00b7 ${fmtN(r.tokens)} tok \u00b7 ${r.seconds}s` : esc(r.result);
+    const res = r.result === "answered"
+      ? `answered \u00b7 ${fmtN(r.tokens)} tok \u00b7 ${r.seconds}s${r.speed ? ` \u00b7 ${r.speed} tok/s` : ""}${r.waited >= 1 ? ` \u00b7 waited ${Math.round(r.waited)}s` : ""}`
+      : esc(r.result) + (r.count > 1 ? ` \u00d7${r.count}` : "");
     const open = openReqs.has(String(r.at));
     return `<div class="req${open ? " open" : ""}" data-at="${r.at}"><time>${hhmm(r.at)}</time>` +
       `<div class="what" title="${open ? "Click to fold" : "Click to read it all"}">` +

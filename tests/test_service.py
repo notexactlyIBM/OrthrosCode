@@ -84,6 +84,14 @@ class Served(unittest.TestCase):
     def call(self, tool, **arguments):
         return self.rpc("tools/call", {"name": tool, "arguments": arguments})["result"]
 
+    def settle(self):
+        """Wait for the request just answered to be recorded: it is noted after the
+        answer goes out, and a busy machine lets the caller read first."""
+        before = len(self.svc.recent)
+        deadline = time.time() + 10
+        while len(self.svc.recent) == before and time.time() < deadline:
+            time.sleep(0.05)
+
     def ready_tool(self, key="shout", code=SHOUT):
         """A tool whose tests passed at its last build turn."""
         key, problem = work.create_task(self.root, key, "Print the input in capitals.", tool=True)
@@ -106,6 +114,9 @@ class TestKey(Served):
             self.assertEqual(status, 401)
         self.assertEqual(self.request("GET", "/health")[0], 200)
         self.assertEqual(self.svc.view()["denied"], 2)
+        turned = [r for r in self.svc.recent if r["result"].startswith("turned back")]
+        self.assertEqual([r["ask"] for r in turned], ["GET /health", "GET /health"])
+        self.assertIn("it sent no key", turned[0]["result"])
 
 
 class TestInference(Served):
@@ -117,11 +128,12 @@ class TestInference(Served):
         answer = json.loads(raw)["choices"][0]["message"]["content"]
         self.assertEqual(answer, "(simulated %s) hello" % service.IDENTIFIER)
         # counted just after the answer goes out: a busy machine lets the caller read first
-        deadline = time.time() + 10
-        while not self.svc.served and time.time() < deadline:
-            time.sleep(0.05)
-        self.assertEqual(self.svc.served, 1)
-        self.assertGreater(self.svc.tokens, 0)
+        self.settle()
+        self.assertEqual(self.svc.view()["served"], 1)
+        self.assertGreater(self.svc.view()["tokens"], 0)
+        last = self.svc.recent[-1]
+        self.assertEqual((last["result"], last["tokens_in"] > 0, last["tokens_out"] > 0),
+                         ("answered", True, True))
 
     def test_a_stream_is_passed_on_as_it_comes(self):
         self.serve()
@@ -131,6 +143,33 @@ class TestInference(Served):
         self.assertIn("text/event-stream", headers["content-type"])
         self.assertIn(b'"two "', raw)
         self.assertTrue(raw.rstrip().endswith(b"data: [DONE]"))
+        # A stream says no usage: its chunks are counted, its prompt estimated.
+        self.settle()
+        last = self.svc.recent[-1]
+        self.assertEqual(last["result"], "answered")
+        self.assertEqual(last["tokens_out"], 4)              # "(simulated orthros-serve) one two"
+        self.assertGreater(last["tokens_in"], 0)
+        self.assertGreater(self.svc.view()["tokens"], 4)
+
+    def test_the_record_outlives_a_restart(self):
+        self.serve()
+        self.request("POST", "/v1/chat/completions", {"messages": [{"role": "user",
+                                                                     "content": "hello"}]})
+        self.settle()
+        again = service.Service(self.o)                       # as after a restart
+        self.assertEqual(again.recent[-1]["result"], "answered")
+        self.assertEqual(again.recent[-1]["ask"], "hello")
+        self.assertEqual((again.view()["served"], again.view()["tokens"] > 0), (1, True))
+
+    def test_a_refusal_repeated_from_one_machine_is_one_line_counted_up(self):
+        self.serve()
+        self.svc.refuse("A is building the tool shout", 900)
+        for _ in range(3):
+            self.assertEqual(self.request("POST", "/v1/chat/completions", {"messages": []})[0],
+                             503)
+        self.assertEqual(self.svc.view()["refused"], 3)
+        turned = [r for r in self.svc.recent if r["result"].startswith("turned away")]
+        self.assertEqual([r["count"] for r in turned], [3])
 
     def test_models_lists_only_the_served_one(self):
         self.serve()
@@ -158,13 +197,13 @@ class TestInference(Served):
             with self.assertRaises(OSError):     # it waits: the caller times out first
                 conn.getresponse()
             conn.close()
-            deadline = time.time() + 10
-            while not self.svc.gave_up and time.time() < deadline:
-                time.sleep(0.2)
+            self.settle()
         finally:
             self.svc.turn.release()
-        self.assertEqual((self.svc.gave_up, self.svc.refused), (1, 0))
+        view = self.svc.view()
+        self.assertEqual((view["gave_up"], view["refused"]), (1, 0))
         self.assertTrue(self.svc.recent[-1]["result"].startswith("caller gave up after"))
+        self.assertGreaterEqual(self.svc.recent[-1]["waited"], 1)     # the wait is recorded
 
     def test_the_port_is_open_only_while_listening(self):
         self.serve()

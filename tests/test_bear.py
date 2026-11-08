@@ -127,6 +127,33 @@ class RigTest(unittest.TestCase):
         rig.set_pose({})                          # facing you, every polygon is whole again
         self.assertFalse([k for k, _, _, _ in rig.shapes((100, 300, 0.36)) if isinstance(k, tuple)])
 
+    def test_on_all_fours_its_back_humps_behind_the_shoulders(self):
+        # 2026-11-07: level from the hips to the neck, it read as a dog
+        rig = ob.Rig()
+        pose = {"root": {"yaw": 90}}
+        for key, v in ob.FOURS.items():
+            part, axis = key.split(".")
+            pose.setdefault(part, {})[axis] = v
+        rig.set_pose(pose)
+
+        def top(lo, hi):                      # the highest point of the body's back (y down)
+            return min(p[1] for p, v in zip(rig.out, rig.verts)
+                       if v["part"] == "body" and lo <= v["y"] <= hi)
+        hips, hump, neck = top(600, 660), top(420, 500), top(255, 330)
+        self.assertLess(hump, hips - 60)
+        self.assertLess(hump, neck - 15)
+
+    def test_no_face_is_drawn_in_the_den_colour(self):
+        # 2026-11-07: a face turned from the light was 3% off the den's colour, and side-on
+        # the muzzle's flank read as a hollow
+        bear = ob.Bear(Canvas(300, 320), stream=Canvas(900, 300))
+        den = [int(bear.fill[i:i + 2], 16) for i in (1, 3, 5)]
+        for yaw in (90, -90, 0):
+            bear.rig.set_pose({"root": {"yaw": yaw}})
+            for _, _, _, lit in bear.rig.shapes((150, 300, 0.3)):
+                fill = [int(bear.colours(lit)[0][i:i + 2], 16) for i in (1, 3, 5)]
+                self.assertGreaterEqual(min(abs(a - b) for a, b in zip(fill, den)), 10, yaw)
+
     def test_a_paw_takes_only_itself_when_it_lifts(self):
         # 2026-10-21: the right paw took two bits of the thigh showing between its claws
         between = [f for f in ob.FACES if set(f) in ({301, 302, 303}, {303, 305, 306, 307})]
@@ -356,6 +383,34 @@ class BearTest(unittest.TestCase):
         paws = sorted(self.bear.rig.project(self.bear.rig.joint("paw" + s), self.bear.o)[0] for s in "LR")
         self.assertGreater(paws[1] - paws[0], fish.size * 0.25)   # apart, along it
 
+    def test_it_acts_out_what_orthros_does_but_not_its_history(self):
+        self.come()
+        self.t = run(self.bear, 10, self.t)             # the greeting is over
+        history = [[self.t - 100, "A is up and working", "good"]]
+        self.bear.noticed(history)                      # the first list it sees: a replay
+        self.assertIsNone(self.bear.mood)
+        kept = [[self.t, "A kept its work", "good"]] + history
+        self.bear.noticed(kept)
+        self.assertEqual(self.bear.mood.name, "proud")
+        self.t = run(self.bear, ob.MOOD["proud"][0] + 1, self.t)
+        self.bear.noticed(kept)                         # the same list again
+        self.assertIsNone(self.bear.mood)
+        self.bear.noticed([[self.t, "B failed to start", "bad"]] + kept)    # within the minute
+        self.assertIsNone(self.bear.mood)
+        self.t = run(self.bear, ob.NOTICE_EVERY, self.t)
+        self.bear.noticed([[self.t, "B failed its pre-launch checks", "bad"]] + kept)
+        self.assertIn(self.bear.mood.name, ("sad", "surprised"))
+
+    def test_hidden_or_in_a_chat_it_lets_events_pass(self):
+        self.bear.noticed([[self.t - 1, "serving", "start"]])
+        self.bear.noticed([[self.t, "A is up and working", "good"]])    # behind the box
+        self.assertIsNone(self.bear.mood)
+        self.come()
+        self.t = run(self.bear, 10, self.t)
+        self.bear.typing()
+        self.bear.noticed([[self.t, "A kept its work", "good"]])        # you are typing
+        self.assertIsNone(self.bear.mood)
+
     def test_a_busy_card_lights_its_lines(self):
         self.come()
         lines = lambda: {kw["outline"] for kw in self.polygons()}
@@ -420,8 +475,8 @@ class WildTest(Sandbox):
 
     def test_wild_is_the_same_model_thinking_hard_with_its_own_brief(self):
         with mock.patch.object(orthros.service, "ask", return_value="Sure! [mood: excited]") as ask:
-            self.assertEqual(self.o.chat("tell me about bears", kind="wild"), "Sure!")
-        self.assertEqual(self.o.mood, "excited")
+            self.assertEqual(self.o.chat("tell me about bears", kind="wild")[:2],
+                             ("Sure!", "excited"))
         args, kw = ask.call_args
         self.assertEqual(args[1], orthros.service.IDENTIFIER)
         self.assertIn("WILD MODE", args[2][0]["content"])
@@ -443,7 +498,7 @@ class WildTest(Sandbox):
                  "isError": False}
         with mock.patch.object(orthros.service, "ask", side_effect=lambda *a, **k: next(replies)) as ask, \
                 mock.patch.object(self.o.service, "research", return_value=found) as research:
-            reply = self.o.chat("how fast are bears?", kind="wild")
+            reply = self.o.chat("how fast are bears?", kind="wild")[0]
         research.assert_called_once_with({"question": "bear facts"})
         self.assertEqual(reply, "Grizzlies run fast.")
         results = ask.call_args[0][2][-1]["content"]
@@ -456,7 +511,8 @@ class WildTest(Sandbox):
         failed = {"content": [{"type": "text", "text": "No answer: timed out"}], "isError": True}
         with mock.patch.object(orthros.service, "ask", side_effect=lambda *a, **k: next(replies)) as ask, \
                 mock.patch.object(self.o.service, "research", return_value=failed):
-            self.assertEqual(self.o.chat("how fast are bears?", kind="wild"), "From memory: fast.")
+            self.assertEqual(self.o.chat("how fast are bears?", kind="wild")[0],
+                             "From memory: fast.")
         self.assertIn("didn't work", ask.call_args[0][2][-1]["content"])
 
 

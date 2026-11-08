@@ -1,6 +1,7 @@
 """Orthros the bear: a low-poly grizzly living in the left third of the chat card in
 Orthros's window. It walks out from behind the chat box when you come to talk,
-watches you type, ponders while Orthros thinks, acts out the mood of each answer,
+watches you type, ponders while Orthros thinks, acts out the mood of each answer
+and what Orthros does meanwhile (a wave as a turn starts, proud when work is kept),
 and walks back behind the box when the chat goes quiet. Now and then a salmon swims
 along the bottom of the GPU picture, and it climbs up to catch and eat it. Its
 lines glow faintly, more the busier the card is. (It had sparks along its lines
@@ -56,7 +57,7 @@ DEPTH = {"body": 0.55, "head": 0.6, "muzzle": 72, "arm": 30, "leg": 34, "armMid"
 # walls (2026-10-21: the outline lay on the middle plane, so side-on, or on all fours,
 # the bear was a paper cut-out -- the drawing has too few points inside its outline
 # for a bulge alone to give it a body)
-WALL = {"body": 74, "head": 44, "leg": 26, "arm": 22, "ear": 5}
+WALL = {"body": 74, "head": 44, "neck": 58, "leg": 26, "arm": 22, "ear": 5}
 F = 2600                           # the camera's distance (far: a gentle perspective)
 CAM = (ART_MID, 560)               # what the camera looks at
 VIEWER = 2200                      # where the person at the screen is, in front of the bear
@@ -279,6 +280,9 @@ ANCHORS = {
     "tuckL": ("spine", 178, 770, 70), "tuckR": ("spine", 326, 770, 70),   # feet drawn up
 }
 LIGHT = norm((-0.45, -0.55, 0.7))
+# 2026-11-07: a face turned from the light was 3% off the den's colour, and side-on the
+# muzzle's flank read as a hollow (every face was there: measured by painting them all)
+AMBIENT = 0.3
 
 
 def seen_height(canvas):
@@ -419,18 +423,21 @@ class Rig:
                   "legL": (J("thighL"), J("shinL"), J("footL"), TIPS["footL"]),
                   "legR": (J("thighR"), J("shinR"), J("footR"), TIPS["footR"])}
 
-        def wall(y, part):
+        def wall(x, y, part):
             """How thick the piece is at its outline (the head widening into the neck,
-            the body narrowing into the legs)."""
+            the neck into the shoulders, the body narrowing into the legs)."""
             if part in ("armL", "armR"):
                 return WALL["arm"]
             if part in ("earL", "earR"):
                 return WALL["ear"]
             if part == "head":
-                return WALL["head"] + (WALL["body"] - WALL["head"]) * smooth(150, 262, y)
+                return WALL["head"] + (WALL["neck"] - WALL["head"]) * smooth(150, 262, y)
             if part in ("legL", "legR"):
                 return WALL["leg"] + (WALL["body"] - WALL["leg"]) * (1 - smooth(700, 760, y))
-            return WALL["body"]
+            # (2026-11-07: as thick at the neck as at the shoulders, the head's base stood
+            # up off its back on all fours like a mane)
+            neck = (1 - smooth(252, 340, y)) * (1 - smooth(60, 110, abs(x - 262)))
+            return WALL["body"] + (WALL["neck"] - WALL["body"]) * neck
 
         def depth(x, y, part, front=True):
             """How far a point stands out from its piece's middle plane; the front has the
@@ -469,7 +476,7 @@ class Rig:
                          next((p for p in parts if p.startswith("ear")), None) or
                          ("legL" if "legL" in parts else "legR" if "legR" in parts else "body"))
             mid = DEPTH["armMid"] if v["part"].startswith("arm") else 0
-            out = lambda front: sum(wall(v["y"], p) + (0 if i in rim else depth(v["x"], v["y"], p, front))
+            out = lambda front: sum(wall(v["x"], v["y"], p) + (0 if i in rim else depth(v["x"], v["y"], p, front))
                                     for p in parts) / len(parts)
             v["z"], v["zback"] = mid + out(True), mid - out(False)
             v["w"] = self.weights(v)
@@ -735,7 +742,7 @@ class Rig:
             z = sum(self.out[i][2] for i in vs) / m + f["bias"]
             p, q, r = self.out[vs[0]], self.out[vs[1]], self.out[vs[2]]
             nrm = norm(cross(sub(q, p), sub(r, p)))
-            lit = max(0, dot(nrm if nrm[2] >= 0 else mulv(nrm, -1), LIGHT))
+            lit = AMBIENT + (1 - AMBIENT) * max(0, dot(nrm if nrm[2] >= 0 else mulv(nrm, -1), LIGHT))
             for k, piece in enumerate(pieces):
                 key = n if piece is vs else (n, k)
                 order.append((z, key, n, [c for i in piece for c in screen[i]], lit))
@@ -1096,6 +1103,16 @@ WALK = 170                         # how fast it walks, drawing px a second
 STRIDE = 140                       # how far it goes in one cycle of its four paws
 # a bear's walk: left hind, left fore, right hind, right fore, a quarter apart
 PAWS = (("legL", 0.0), ("armL", 0.25), ("legR", 0.5), ("armR", 0.75))
+# On all fours: the back rises from the hips to a hump at the chest joint, just behind the
+# shoulders, and dips to the neck; the head comes up level. (2026-11-07: level from hips
+# to neck, it read as a dog.) Degrees, and drawing px for root.
+FOURS = {"spine.pitch": 56, "chest.pitch": 40, "neck.pitch": -62, "head.pitch": -26,
+         "root.y": 84, "root.z": -30, "earL.pitch": -6, "earR.pitch": -6}
+# What it makes of Orthros's events, by kind: a wave as a turn or serving starts, proud
+# when work was kept, sad or surprised at a failure, a sniff at a handover.
+NOTICE = {"start": ("greet",), "good": ("proud",), "bad": ("sad", "surprised"),
+          "handover": ("sniff",)}
+NOTICE_EVERY = 60                  # seconds: at most one such move a minute
 
 
 def gait(u):
@@ -1280,7 +1297,8 @@ class Bear:
     waits up to SONG_WAIT seconds for its song to start, so the two start together.
 
     The window calls summon() on any sign of you, heard(), typing(), thinking() and
-    answered(), and sets energy (how busy the card is, 0 to 1) each frame of the picture."""
+    answered(), noticed() with Orthros's events on each poll, and sets energy (how busy
+    the card is, 0 to 1) each frame of the picture."""
 
     def __init__(self, den, stream=None, line="#e8f1ff", fill="#0d1524", visible=None,
                  music=None):
@@ -1300,6 +1318,7 @@ class Bear:
         self.salmon, self.fish_x, self.then_fish, self.fish_side = None, 0.0, False, "L"
         now = self.clock()
         self.active_at = -1e9
+        self.seen_event, self.noticed_at = None, -1e9
         self.next_salmon = now + random.uniform(*SALMON_EVERY)
         self.reset()
         self.job = None
@@ -1362,6 +1381,30 @@ class Bear:
             self.feel(mood)
         elif not self.then_fish:
             self.start("nod")
+
+    def noticed(self, events):
+        """What Orthros has been doing: the window's list of events, newest first, each
+        [when, text, kind]. One move (NOTICE) for the newest new event it has one for,
+        at most once a minute, and only while it is out and nobody is talking: the idle
+        fidgets stay as calm as they are. The first list it sees is history (a restart
+        replays it), so nothing for that, nor for anything older than the last list."""
+        newest = max((e[0] for e in events), default=None)
+        if newest is None:
+            return
+        fresh = [e for e in events if e[0] > self.seen_event] if self.seen_event is not None else []
+        self.seen_event = newest
+        now = self.clock()
+        if (not fresh or self.where != "here" or self.action or self.mood or self.thinking_on
+                or now - self.noticed_at < NOTICE_EVERY or now - self.typed_at < 5
+                or now - self.heard_at < 4):
+            return
+        for e in sorted(fresh, key=lambda e: -e[0]):
+            moves = NOTICE.get(e[2] if len(e) > 2 else "")
+            if moves:
+                self.noticed_at = now
+                move = random.choice(moves)
+                (self.feel if move in MOOD else self.start)(move)
+                return
 
     def fish(self):
         """Up out of the chat card to the GPU picture, to catch a salmon."""
@@ -1648,14 +1691,13 @@ class Bear:
         self.scene(fr, now, dt)
         if self.where == "away":
             return
-        # posture: down on all fours, the back level and towards you, the head up and ahead
+        # posture: down on all fours (FOURS), the head up and ahead
         down = self.spring("fours", self.fours_want, dt, 2.4)
         if down > 0.001:
             beat = math.sin(self.gait * math.pi * 4)          # twice a cycle, a paw lands
-            fr.add("spine.pitch", 70 * down), fr.add("chest.pitch", 6 * down)
-            fr.add("root.y", (72 - 4 * abs(beat)) * down), fr.add("root.z", -30 * down)
-            fr.add("neck.pitch", -42 * down), fr.add("head.pitch", -26 * down)
-            fr.add("earL.pitch", -6 * down), fr.add("earR.pitch", -6 * down)
+            for key, v in FOURS.items():
+                fr.add(key, v * down)
+            fr.add("root.y", -4 * abs(beat) * down)
             fr.add("spine.roll", math.sin(self.gait * math.pi * 2) * 3 * down)
             fr.add("head.roll", -math.sin(self.gait * math.pi * 2) * 2 * down)
         # Standing, it stands still: no breathing, swaying or drifting head. Without

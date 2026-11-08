@@ -25,33 +25,19 @@ and nothing is calibrated to one window size. (2026-09-29: a reply ceiling
 chosen for 32,768 tokens was still cutting replies off at 49,152.)
 """
 
-import ctypes
 import json
 import os
 import re
 import subprocess
 import time
 
+from orthros_work import memory_status, read_json, write_json
+
 HARDWARE_FILE = "hardware.json"
 REPROBE_FLAG = ".orthros-reprobe"        # SETUP.bat leaves this; the next start looks again
 RESERVE_MB = 3072          # VRAM left free after loading: decode needs room to allocate
 CONTEXT_STEPS = (16384, 24576, 32768, 49152, 65536, 98304, 131072, 196608, 262144)
 OUT_OF_MEMORY = ("bad allocation", "out of memory", "failed to allocate", "cudaMalloc failed")
-
-
-def read_json(path, default):
-    try:
-        with open(path, encoding="utf-8") as handle:
-            return json.load(handle)
-    except (OSError, ValueError):
-        return default
-
-
-def write_json(path, data):
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as handle:
-        json.dump(data, handle, indent=1)
-    os.replace(tmp, path)
 
 
 # ---------------------------------------------------------------- looking
@@ -70,19 +56,8 @@ def gpu():
 
 def ram_mb():
     if os.name == "nt":
-        class Status(ctypes.Structure):
-            _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
-                        ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
-                        ("ullTotalPageFile", ctypes.c_ulonglong),
-                        ("ullAvailPageFile", ctypes.c_ulonglong),
-                        ("ullTotalVirtual", ctypes.c_ulonglong),
-                        ("ullAvailVirtual", ctypes.c_ulonglong),
-                        ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
-        status = Status()
-        status.dwLength = ctypes.sizeof(status)
-        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
-            return int(status.ullTotalPhys // 1048576)
-        return 0
+        status = memory_status()
+        return int(status.ullTotalPhys // 1048576) if status else 0
     try:
         return int(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") // 1048576)
     except (ValueError, OSError, AttributeError):
@@ -110,8 +85,10 @@ def model_facts(lms, model_key):
     return 0, 0
 
 
-def probe(lms="", model_key=""):
-    name, vram = gpu()
+def probe(lms="", model_key="", card=None):
+    """What the machine is: `card` is (name, total MiB) when the caller already has the
+    card's reading (Orthros reads it in-process every two seconds), else nvidia-smi once."""
+    name, vram = card or gpu()
     size, longest = model_facts(lms, model_key)
     return {"when": time.time(), "gpu": name, "vram_mb": vram, "ram_mb": ram_mb(),
             "cpus": os.cpu_count() or 0, "model": model_key, "model_mb": size,
@@ -242,10 +219,7 @@ class Tuner:
         self.data.setdefault("look", {})
 
     def save(self):
-        try:
-            write_json(self.path, self.data)
-        except OSError:
-            pass
+        write_json(self.path, self.data)
 
     def due(self, card=None):
         """Is there a reason to look? `card` is (name, total MiB) from telemetry."""
@@ -257,13 +231,13 @@ class Tuner:
                 return "the card changed (%s, %d MB)" % card
         return ""
 
-    def look(self, lms, model_key, current, seen=None):
+    def look(self, lms, model_key, current, seen=None, card=None):
         """Look at the machine and put fitting settings on trial. Returns reasons.
 
         Planned from the last turn's readings too, so a look re-fits the
         window and everything sized from it, not only the card's name.
         """
-        self.data["look"] = probe(lms, model_key)
+        self.data["look"] = probe(lms, model_key, card)
         try:
             os.remove(self.flag)
         except OSError:

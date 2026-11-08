@@ -22,7 +22,7 @@ import shutil
 import subprocess
 import sys
 
-from orthros_work import BETTER
+from orthros_work import BETTER, find_lms
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE = os.path.join(ROOT, "agent")
@@ -470,17 +470,6 @@ def make_agent(x):
             "match, shared-venv's install was cut short -- delete it and run this again."
             % (x, version_of(venv) or "?", version_of(SHARED) or "?"))
     return ok
-
-
-def find_lms():
-    tail = os.path.join("resources", "app", ".webpack", "lms.exe")
-    for path in [os.path.expandvars(r"%USERPROFILE%\.lmstudio\bin\lms.exe"),
-                 os.path.expandvars(os.path.join(r"%LOCALAPPDATA%\Programs\LM Studio", tail)),
-                 os.path.expandvars(os.path.join(r"%ProgramFiles%\LM Studio", tail))] + \
-            [os.path.join("%s:\\" % d, "LM Studio", tail) for d in "CDEFGH"]:
-        if os.path.isfile(path):
-            return path
-    return shutil.which("lms")
 
 
 def main():

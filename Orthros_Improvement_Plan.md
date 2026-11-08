@@ -27,11 +27,11 @@ minutes each, the whole suite about six).
   `agent\test_ralph_testfirst.py` covers the new path.
 
 ### Judge the bear's walk in the window
-- 2026-11-07 gave it a hump (`FOURS` in `orthros_bear.py`) and a neck thinner
-  than its shoulders (`WALL["neck"]`), set from renders, not from the window.
-  Walk it in and out a few times (come to the chat card, leave it ten
-  minutes) and adjust those numbers if the hump is too much or the head sits
-  wrong. No test can judge this.
+- 2026-11-07's hump read as an arch in the window. 2026-11-08 flattened the
+  back and dropped the head to a walking bear's line (`FOURS` in
+  `orthros_bear.py`, set from renders against a photo). Walk it in and out a
+  few times (come to the chat card, leave it ten minutes) and adjust those
+  numbers if the head sits wrong. No test can judge this.
 
 ### S11. Serve mode's turn count follows `LC_PARALLEL`
 - `orthros_service.py` (`turn`, `engine_up`): size the semaphore from

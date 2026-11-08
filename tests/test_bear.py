@@ -127,8 +127,10 @@ class RigTest(unittest.TestCase):
         rig.set_pose({})                          # facing you, every polygon is whole again
         self.assertFalse([k for k, _, _, _ in rig.shapes((100, 300, 0.36)) if isinstance(k, tuple)])
 
-    def test_on_all_fours_its_back_humps_behind_the_shoulders(self):
-        # 2026-11-07: level from the hips to the neck, it read as a dog
+    def test_on_all_fours_its_back_is_level_and_its_head_low(self):
+        # 2026-11-07: level from the hips to the neck with the head up, it read as a dog;
+        # 2026-11-08: a hump of 115 px at the chest and the head up on a vertical neck read
+        # as an arch. A bear's back is level with a few px of shoulder, the head below it.
         rig = ob.Rig()
         pose = {"root": {"yaw": 90}}
         for key, v in ob.FOURS.items():
@@ -140,8 +142,11 @@ class RigTest(unittest.TestCase):
             return min(p[1] for p, v in zip(rig.out, rig.verts)
                        if v["part"] == "body" and lo <= v["y"] <= hi)
         hips, hump, neck = top(600, 660), top(420, 500), top(255, 330)
-        self.assertLess(hump, hips - 60)
-        self.assertLess(hump, neck - 15)
+        self.assertLess(hump, hips - 15)                  # shoulders a little above the hips
+        self.assertGreater(hump, hips - 60)               # but a line, not an arch
+        self.assertLess(hump, neck)                       # dipping to the neck
+        head_top = min(p[1] for p, v in zip(rig.out, rig.verts) if v["part"] == "head")
+        self.assertGreater(head_top, hump - 100)          # the head carried low, not up
 
     def test_no_face_is_drawn_in_the_den_colour(self):
         # 2026-11-07: a face turned from the light was 3% off the den's colour, and side-on

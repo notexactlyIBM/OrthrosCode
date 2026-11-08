@@ -1103,10 +1103,12 @@ WALK = 170                         # how fast it walks, drawing px a second
 STRIDE = 140                       # how far it goes in one cycle of its four paws
 # a bear's walk: left hind, left fore, right hind, right fore, a quarter apart
 PAWS = (("legL", 0.0), ("armL", 0.25), ("legR", 0.5), ("armR", 0.75))
-# On all fours: the back rises from the hips to a hump at the chest joint, just behind the
-# shoulders, and dips to the neck; the head comes up level. (2026-11-07: level from hips
-# to neck, it read as a dog.) Degrees, and drawing px for root.
-FOURS = {"spine.pitch": 56, "chest.pitch": 40, "neck.pitch": -62, "head.pitch": -26,
+# On all fours: the back is nearly level, a little higher at the shoulders than the hips,
+# and the head is carried low and ahead, looking at the ground a few steps on, the way a
+# bear walks. (2026-11-07: level from hips to neck with the head up, it read as a dog;
+# 2026-11-08: bent into a hump at the chest with the head up on a vertical neck, it read as
+# an arch. The hump is a few px, not a bend.) Degrees, and drawing px for root.
+FOURS = {"spine.pitch": 80, "chest.pitch": 14, "neck.pitch": 8, "head.pitch": -56,
          "root.y": 84, "root.z": -30, "earL.pitch": -6, "earR.pitch": -6}
 # What it makes of Orthros's events, by kind: a wave as a turn or serving starts, proud
 # when work was kept, sad or surprised at a failure, a sniff at a handover.

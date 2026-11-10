@@ -1220,6 +1220,7 @@ class Music:
 
     KINDS = (".mp3", ".wav", ".wma")
     ALIAS = "orthros_dance"
+    VOLUME = 300                   # of MCI's 1000: a dance is company, not a party (2026-11-09)
 
     def __init__(self, folder, mci=None):
         self.folder = folder if callable(folder) else (lambda: folder)
@@ -1263,6 +1264,7 @@ class Music:
                     random.shuffle(songs)
                     for song in songs[:3]:                  # one that will not open: the next
                         if self.mci('open "%s" type mpegvideo alias %s' % (song, self.ALIAS)):
+                            self.mci("setaudio %s volume to %d" % (self.ALIAS, self.VOLUME))
                             if self.mci("play %s from 0" % self.ALIAS):
                                 break
                             self.mci("close " + self.ALIAS)
@@ -1273,12 +1275,13 @@ class Music:
                     ready.set()
 
     def fade(self, seconds=1.0):
-        """Down to nothing over `seconds`, then closed (nothing open: nothing done)."""
+        """From VOLUME down to nothing over `seconds`, then closed (nothing open:
+        nothing done)."""
         if not self.mci:
             return
         steps = int(seconds * 10)
         for k in range(steps, 0, -1):
-            if not self.mci("setaudio %s volume to %d" % (self.ALIAS, 1000 * k // (steps + 1))):
+            if not self.mci("setaudio %s volume to %d" % (self.ALIAS, self.VOLUME * k // (steps + 1))):
                 break
             time.sleep(0.1)
         self.mci("stop " + self.ALIAS)

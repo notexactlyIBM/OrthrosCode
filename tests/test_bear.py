@@ -191,7 +191,8 @@ class MusicTest(unittest.TestCase):
         opened = [c for c in self.said if c.startswith("open")]
         self.assertEqual(len(opened), 1)
         self.assertRegex(opened[0], r"(one\.mp3|two\.MP3)\" type mpegvideo")
-        self.assertIn("play orthros_dance from 0", self.said)
+        played = self.said.index("play orthros_dance from 0")
+        self.assertEqual(self.said[played - 1], "setaudio orthros_dance volume to 300")
         self.said.clear()
         with mock.patch.object(ob.time, "sleep"):
             music.stop()

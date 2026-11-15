@@ -1568,9 +1568,15 @@ class Dashboard:
             return True
         if mode == d["mode"] and (mode != "task" or task is None or task == d.get("task")):
             return True
-        doing = "working on the task %s" % d.get("task") if d["mode"] == "task" else \
+        doing = 'working on the task "%s"' % d.get("task") if d["mode"] == "task" else \
             MODES[d["mode"]].lower()
-        to = "working on the task %s" % task if mode == "task" else MODES[mode].lower()
+        # The Work on a task tile goes back to the last task chosen. Its bare name
+        # read as nonsense ("Switch to working on the task chill?", 2026-11-15):
+        # quoted, and said where it came from.
+        to = MODES[mode].lower() if mode != "task" else (
+            'work on the task "%s"%s' % (task, ", the last one chosen (another can be picked "
+                                               "from the Task list)" if task == d.get("task")
+                                         else ""))
         run = d.get("running")
         if run:
             left = max(0, run["minutes"] * 60 - ((d.get("live") or {}).get("elapsed") or 0))

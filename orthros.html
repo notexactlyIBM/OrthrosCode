@@ -921,13 +921,15 @@ function confirmBox(title, body, yes, no) {
 }
 
 // What Orthros is doing, in words, and what switching away from it would mean.
-function doing(d) { return d.mode === "task" ? `working on the task ${d.task}` : (MODES[d.mode] || "").toLowerCase(); }
+function doing(d) { return d.mode === "task" ? `working on the task "${d.task}"` : (MODES[d.mode] || "").toLowerCase(); }
 async function changeAllowed(mode, task) {
   const d = lastState;
   const busy = d && (d.paused === false || !!d.running);
   const other = d && (mode !== d.mode || (mode === "task" && task !== undefined && task !== d.task));
   if (!busy || !other) return true;
-  const to = mode === "task" ? `working on the task ${task}` : MODES[mode].toLowerCase();
+  // The Work on a task tile goes back to the last task chosen: quoted, and said so.
+  const to = mode !== "task" ? MODES[mode].toLowerCase() : `work on the task "${task}"` +
+    (task === d.task ? ", the last one chosen (another can be picked from the Task list)" : "");
   let then;
   if (d.running) {
     const left = Math.max(0, d.running.minutes * 60 - ((d.live || {}).elapsed || 0));

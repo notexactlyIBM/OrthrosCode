@@ -463,6 +463,8 @@ class Dashboard:
                       "diag": tk.Frame(self.root, bg=BG, padx=20, pady=14)}
         self.build_operate(self.pages["operate"])
         self.build_diag(self.pages["diag"])
+        self.build_agents()
+        self.place_agents("diag")
         self.show_tab("operate")
 
     def show_tab(self, key):
@@ -610,24 +612,63 @@ class Dashboard:
         except OSError:
             pass
 
-    def build_agents(self, page):
-        """A and B, side by side: on the Diagnostics tab."""
-        agents = tk.Frame(page, bg=BG)
-        heading(agents, "The agents").pack(anchor="w", pady=(0, 8))
-        row = tk.Frame(agents, bg=BG)
-        row.pack(fill="x")
-        row.columnconfigure(0, weight=1, uniform="agent")
-        row.columnconfigure(2, weight=1, uniform="agent")
+    def build_agents(self):
+        """A and B: one pair of cards, shown in one of two slots (place_agents).
+
+        A child of the window itself, so that it can be packed into a slot on
+        either tab -- Tk lets a widget be packed only inside its parent or the
+        parent's descendants.
+        """
+        self.agents = tk.Frame(self.root, bg=BG)
+        self.agents_head = heading(self.agents, "The agents")
+        self.agents_row = tk.Frame(self.agents, bg=BG)
+        self.agents_row.pack(fill="x")
         self.cards = {}
-        for i, (name, color) in enumerate((("A", A_C), ("B", B_C))):
-            card = AgentCard(row, name, color, self)
-            card.grid(row=0, column=i * 2, sticky="nsew")
-            self.cards[name] = card
-        self.swap = label(row, "⇆", FAINT, (BODY, 18), bg=BG)
-        self.swap.grid(row=0, column=1, padx=10)
-        return agents
+        for name, color in (("A", A_C), ("B", B_C)):
+            self.cards[name] = AgentCard(self.agents_row, name, color, self)
+        self.swap = label(self.agents_row, "⇆", FAINT, (BODY, 18), bg=BG)
+        self.agents_at = None
+
+    def place_agents(self, where):
+        """A and B on Operate while Evolve is picked -- it is their work, and the
+        Diagnostics tab is one click away from it -- one above the other, as
+        the half is narrow. In any other mode, side by side on Diagnostics."""
+        if where == self.agents_at:
+            return
+        self.agents_at = where
+        row, on_ops = self.agents_row, where == "operate"
+        bg = PANEL if on_ops else BG
+        for widget in (self.agents, row, self.swap):
+            widget.config(bg=bg)
+        self.agents.pack_forget()
+        self.agents_head.pack_forget()
+        for widget in list(self.cards.values()) + [self.swap]:
+            widget.grid_forget()
+        for column in (0, 1, 2):
+            row.columnconfigure(column, weight=0, uniform="")
+        if on_ops:
+            row.columnconfigure(0, weight=1)
+            for i, name in enumerate(("A", "B")):
+                self.cards[name].grid(row=i, column=0, sticky="nsew", pady=(0, 8))
+            self.agents.pack(in_=self.agents_slot["operate"], fill="x")
+            # Emptied, a frame keeps the size it had: hidden, or Diagnostics
+            # starts with a band of nothing where the cards were.
+            self.agents_slot["diag"].grid_remove()
+        else:
+            self.agents_slot["diag"].grid()
+            self.agents_head.pack(anchor="w", pady=(0, 8), before=row)
+            row.columnconfigure(0, weight=1, uniform="agent")
+            row.columnconfigure(2, weight=1, uniform="agent")
+            self.cards["A"].grid(row=0, column=0, sticky="nsew")
+            self.swap.grid(row=0, column=1, padx=10)
+            self.cards["B"].grid(row=0, column=2, sticky="nsew")
+            self.agents.pack(in_=self.agents_slot["diag"], fill="x", pady=(0, 14))
+        self.agents.lift()          # made before the tabs' pages, so behind them until raised
 
     def build_self_pane(self, pane):
+        self.agents_slot = getattr(self, "agents_slot", {})
+        self.agents_slot["operate"] = tk.Frame(pane, bg=PANEL)     # A and B: place_agents
+        self.agents_slot["operate"].pack(fill="x")
         row = tk.Frame(pane, bg=PANEL)
         row.pack(fill="x")
         lift = button(row, "AGARIC LIFT", lambda: self.toggle_lift("self"),
@@ -874,7 +915,9 @@ class Dashboard:
         page.columnconfigure(0, weight=1, uniform="d")
         page.columnconfigure(1, weight=1, uniform="d")
         page.rowconfigure(2, weight=1)
-        self.build_agents(page).grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 14))
+        self.agents_slot = getattr(self, "agents_slot", {})
+        self.agents_slot["diag"] = tk.Frame(page, bg=BG)           # A and B: place_agents
+        self.agents_slot["diag"].grid(row=0, column=0, columnspan=2, sticky="ew")
 
         hk = panel(page)
         hk.grid(row=1, column=0, sticky="nsew", padx=(0, 7))
@@ -1156,6 +1199,7 @@ class Dashboard:
                 self.panes[mode].pack(fill="x")
                 self.turn_feed.pack(fill="both", expand=True)
             self.pane_shown = mode
+            self.place_agents("operate" if mode == "self" else "diag")
         self.render_feed(d)
         run = d.get("running")
         run_mode = None if not run else "self" if run.get("kind") != "task" else \

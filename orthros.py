@@ -96,8 +96,9 @@ DEFAULTS = {
     # `eval_count` held-out exercises in evals\, `eval_minutes` each, and is
     # compared exercise by exercise with the last version that passed. Until
     # it passes, the changes in it do not reach the twin; if it does worse,
-    # it goes back to that version. 8 exercises at 8 minutes is about an
-    # hour and a half with model loads, every 4 good turns.
+    # it goes back to that version. `eval_minutes` is the most an exercise
+    # gets: it ends when its list is done, in about half that, so eight take
+    # some 40 minutes with model loads, every 4 good turns.
     "prove_by_score": True,
     "eval_every": 4,
     "eval_count": 8,
@@ -141,6 +142,7 @@ GUARD_DIR = os.path.join(HERE, "orthros_guard")
 # of a machine doing nothing.
 ALERT_FILE = "ORTHROS-NEEDS-YOU.txt"
 LOG_CAP = 20 * 1024 * 1024           # orthros.log is rotated past this
+LAST_GOOD_EVERY = 3600               # seconds between copies of the state file kept beside it
 GUARD_REFUSED = "Orthros guard: prompt too big"
 
 # The task list, plan and ledger an agent keeps about the one it works on.
@@ -402,6 +404,14 @@ STOP_FILE = ".localcoder-stop"
 MANAGED_MARKER = ".localcoder-managed"
 LAUNCHED = {"ready", "planning", "researching", "working", "checking", "reviewing",
             "engine down", "finished", "locating", "summarising"}
+# What the loop is doing when its list has run dry: looking for more work. On
+# the twin's code that is the point. On an exercise it is waste: on 2026-11-15
+# a held-out exercise's three items were done in three or four minutes, and the
+# rest of its eight went to work the loop made up (a `__hash__` nobody asked
+# for). A scoring of eight took 70 minutes, more than half of it on that, and
+# the hidden tests score only what the exercise asked for.
+LOOKING_FOR_WORK = {"summarising", "planning"}
+EXERCISE_KINDS = ("practice", "eval")
 
 CREATE_NO_WINDOW = 0x08000000
 CREATE_NEW_PROCESS_GROUP = 0x00000200
@@ -724,6 +734,32 @@ def score_totals(scores):
             sum(t for _, t in scores.values()))
 
 
+def cost_words(cost, before=None):
+    """What a scoring took, in words, beside the version before it. '' if not measured.
+
+    `cost` and `before` are {exercise: [seconds, rounds, tokens]}. The hidden
+    tests stopped telling versions apart once both passed nearly all of them
+    (58 of 58 against 57 of 58 on 2026-11-15), and what better means was
+    always fewer rounds and less time for the same result: so the work is
+    counted too, on the exercises both versions were timed on. Said, and read
+    by the twin; it does not decide whether a version is kept -- eight runs
+    of a model that samples are too few to roll a version back over time.
+    """
+    def total(costs, names):
+        rows = [costs[e] for e in names]
+        return "%d min, %d rounds and %s tokens" % (
+            round(sum(r[0] for r in rows) / 60.0), sum(r[1] for r in rows),
+            "{:,}".format(sum(r[2] for r in rows)))
+    if not cost:
+        return ""
+    both = sorted(e for e in cost if e in (before or {}))
+    if not both:
+        return "it took %s" % total(cost, sorted(cost))
+    return "%s took %s (the version before it: %s)" % (
+        "it" if len(both) == len(cost) else "the %d exercises both were timed on" % len(both),
+        total(cost, both), total(before, both))
+
+
 # --------------------------------------------------------------------------
 # the check: one, for the pre-launch check and --doctor alike
 # --------------------------------------------------------------------------
@@ -817,14 +853,25 @@ class Orthros:
         self.lock = threading.RLock()
         self.wake = threading.Event()
         self.settings = dict(DEFAULTS)
-        self.settings.update(read_json(self.settings_path, {}) or {})
+        given = read_json(self.settings_path)
+        if not isinstance(given, dict) and os.path.isfile(self.settings_path):
+            # Read as "no settings", a comma missed while editing it by hand put
+            # the defaults and a new serve key in its place, without a word: every
+            # machine that calls this one locked out, and the settings gone.
+            raise SystemExit("%s is not valid JSON, so Orthros has not started and has changed "
+                             "nothing. Mend it -- a missing comma or quote, usually -- or delete "
+                             "it to start again from the defaults (that makes a new serve key)."
+                             % self.settings_path)
+        self.settings.update(given or {})
         if not self.settings.get("serve_key"):
             # What other machines must send in serve mode: its tools run code here.
             self.settings["serve_key"] = secrets.token_urlsafe(24)
             write_json(self.settings_path, self.settings)
         if not os.path.isfile(self.settings_path):
             write_json(self.settings_path, self.settings)
-        self.state = read_json(self.state_path) or {}
+        self.last_good_path = os.path.join(root, ".orthros-state.last-good.json")
+        self.kept_at = 0.0                   # when save() last refreshed that copy
+        self.state, recovered = self.read_state()
         self.state.setdefault("agents", {})
         for n in NAMES:
             a = self.state["agents"].setdefault(n, {})
@@ -872,13 +919,48 @@ class Orthros:
         self.checked = {}                    # agent -> (code version, its Python) the suite passed on
         self.suite_skipped = False           # did the last preflight run the imports alone?
         self.save_failed = False             # is the state file unwritable right now?
+        if recovered:
+            self.event(recovered, "bad")
 
     # ---------------------------------------------------------------- state
+
+    def read_state(self):
+        """(the state, what to say about it). The state file as it is -- or, when
+        it is there and cannot be read, the copy save() keeps beside it, with the
+        unreadable file set aside rather than written over.
+
+        Until 2026-11-15 an unreadable state file was read as no state at all,
+        and the first save put an empty one in its place: every score, proven
+        version and turn count gone, without a word.
+        """
+        state = read_json(self.state_path)
+        if isinstance(state, dict):
+            return state, ""
+        if not os.path.isfile(self.state_path):
+            return {}, ""
+        name = os.path.basename(self.state_path)
+        aside = "%s.unreadable-%s.json" % (self.state_path[:-len(".json")],
+                                           time.strftime("%Y%m%d-%H%M%S"))
+        try:
+            os.replace(self.state_path, aside)
+            said = "%s could not be read; it is set aside as %s" % (name, os.path.basename(aside))
+        except OSError:
+            said = "%s could not be read" % name
+        kept = read_json(self.last_good_path)
+        if isinstance(kept, dict) and kept:
+            return kept, "%s. Carrying on from the copy kept on %s" % (
+                said, time.strftime("%Y-%m-%d at %H:%M",
+                                    time.localtime(os.path.getmtime(self.last_good_path))))
+        return {}, "%s, and there is no copy of it. Orthros's records start again" % said
 
     def save(self):
         with self.lock:
             ok = write_json(self.state_path, self.state)
             failed, self.save_failed = self.save_failed, not ok
+            if ok and now() - self.kept_at > LAST_GOOD_EVERY:
+                # A copy an hour old at most, for read_state to fall back on.
+                self.kept_at = now()
+                write_json(self.last_good_path, self.state)
         # Said once each way. A full disk loses the judgement of every turn, and
         # until 2026-11-07 it lost them without a word.
         if not ok and not failed:
@@ -1190,6 +1272,12 @@ class Orthros:
                     self.event("%s is up and working" % name, "good")
                 launched = True
             elapsed = (now() - started) * speed / 60.0
+            if launched and not stop_sent and self.is_mine(st, running) \
+                    and self.list_is_done(work_["kind"], st, peer):
+                self.request_stop(peer)
+                stop_sent = True
+                self.event("%s worked through the exercise's list in %d of its %d minutes; "
+                           "asked it to stop there" % (name, int(elapsed), minutes))
             if not launched and elapsed > self.settings["launch_minutes"]:
                 self.event("%s did not reach its first round in %d minutes"
                            % (name, self.settings["launch_minutes"]), "bad")
@@ -1251,6 +1339,20 @@ class Orthros:
             self.save()
         self.proc = None
         return result
+
+    @staticmethod
+    def list_is_done(kind, status, folder):
+        """Has an exercise's own list been worked through, so its turn can end?
+
+        Only for a practice or a scoring, only once a round has run, and only
+        when the loop itself says it is looking for more work -- not while a
+        round is being reviewed, when a tick may yet be undone. Told by the
+        phases the loop reports: should the agents rename them, this is never
+        true and the exercise runs to its time, as it did before.
+        """
+        return (kind in EXERCISE_KINDS and (status.get("rounds") or 0) >= 1
+                and status.get("phase") in LOOKING_FOR_WORK
+                and not OPEN_ITEM.findall(read_text(notes_file(folder))))
 
     def request_stop(self, folder):
         try:
@@ -1980,6 +2082,10 @@ class Orthros:
         exercise = result.get("exercise") or ev["todo"][0]
         score = result.get("score") or [0, 0]
         ev["scores"][exercise] = [int(score[0]), int(score[1])]
+        if result.get("seconds"):
+            ev.setdefault("cost", {})[exercise] = [int(result["seconds"]),
+                                                   int(result.get("rounds") or 0),
+                                                   int(result.get("tokens") or 0)]
         ev["todo"] = [e for e in ev["todo"] if e != exercise]
         self.event("%s scored %d of %d on held-out exercise %d of %d"
                    % (name, score[0], score[1], len(ev["scores"]),
@@ -2016,8 +2122,12 @@ class Orthros:
             theirs = "the version before it: %d of %d, %d of %d hidden tests" % (
                 p_full, p_count, p_passed, p_total)
         verdict = "baseline" if not parent else "kept" if not_worse else "rolled back"
+        cost = ev.get("cost") or {}
+        took = cost_words(cost, me["scored"].get(ev["parent"], {}).get("cost"))
+        work_done = (" Working them, %s." % took) if took else ""
         me["scored"][ev["sha"]] = {"scores": ev["scores"], "parent": ev["parent"], "at": now(),
-                                   "verdict": verdict, "wins": wins, "losses": losses}
+                                   "verdict": verdict, "wins": wins, "losses": losses,
+                                   "cost": cost}
         if len(me["scored"]) > 40:
             for old in sorted(me["scored"], key=lambda s: me["scored"][s]["at"])[:-40]:
                 if old != me["scored_good"]:
@@ -2028,27 +2138,27 @@ class Orthros:
             self.prove(name, ev["sha"])        # it ran every exercise: it works
             self.carry_over(name, me["proven_pending"] + me["pending"])
             me["proven_pending"], me["pending"] = [], []
-            self.event("%s's first held-out score: %s. Later versions are held to it."
-                       % (name, mine), "good")
+            self.event("%s's first held-out score: %s. Later versions are held to it.%s"
+                       % (name, mine, work_done), "good")
             self.field_note(name, "**Held-out score** of this version: %s. The first score; "
-                            "later versions must not do worse." % mine)
+                            "later versions must not do worse.%s" % (mine, work_done))
         elif not_worse:
             me["scored_good"] = ev["sha"]
             self.prove(name, ev["sha"])
             ranges = me["proven_pending"] + me["pending"]
             me["proven_pending"], me["pending"] = [], []
             self.carry_over(name, ranges)
-            self.event("%s's version %s proven by score: %s (%s; %d better, %d worse)"
-                       % (name, short(ev["sha"]), mine, theirs, wins, losses), "good")
+            self.event("%s's version %s proven by score: %s (%s; %d better, %d worse).%s"
+                       % (name, short(ev["sha"]), mine, theirs, wins, losses, work_done), "good")
             self.field_note(name, "**Held-out score** of this version: %s -- %s. %d exercises "
                             "went better and %d worse, so the changes were kept and copied "
-                            "into %s." % (mine, theirs, wins, losses, PEER[name]))
+                            "into %s.%s" % (mine, theirs, wins, losses, PEER[name], work_done))
         else:
             why = ("its held-out score fell: %s -- %s; %d exercises went worse and only %d "
                    "better" % (mine, theirs, losses, wins))
             self.field_note(name, "**Held-out score** of this version: %s -- %s. That is worse, "
-                            "so it was rolled back to the version that scored better." % (
-                                mine, theirs))
+                            "so it was rolled back to the version that scored better.%s" % (
+                                mine, theirs, work_done))
             self.rollback_to_scored(name, why)
         self.save()
 
@@ -3370,6 +3480,12 @@ def fresh(root, ask=input, out=print):
         if os.path.isfile(path):
             base, ext = os.path.splitext(name)
             os.replace(path, os.path.join(root, "%s.before-fresh-%s%s" % (base, stamp, ext)))
+    try:
+        # The hourly copy of the old state: left, it is what an unreadable new
+        # state file would fall back to, and the old records would come back.
+        os.remove(os.path.join(root, ".orthros-state.last-good.json"))
+    except OSError:
+        pass
     out("Orthros's records start again (the old ones are kept as *.before-fresh-%s).\n"
         "Run  ORTHROS.bat --doctor , then ORTHROS.bat and press Start." % stamp)
     return 0
@@ -3464,6 +3580,11 @@ def doctor(root, out=print):
         % ("on" if settings.get("prove_by_score") else "OFF", settings.get("eval_every"),
            settings.get("eval_count"), settings.get("eval_minutes"),
            settings.get("practice_every")))
+    unused = len(work.eval_exercises()) - int(settings.get("eval_count") or 8)
+    if settings.get("prove_by_score") and unused > 0:
+        say("WARN", "%d of the %d held-out exercises are never scored: a scoring takes the "
+                    "first eval_count (%s) by name. Raise eval_count in orthros.json to use them"
+            % (unused, len(work.eval_exercises()), settings.get("eval_count")))
     stray = sorted(k for k in written if k not in DEFAULTS)
     if stray:
         say("WARN", "orthros.json has settings nothing reads, left by an older version -- "

@@ -15,7 +15,8 @@ import ralph_ledger
 import status
 from ralph_common import read_text, write_text, session_test
 from ralph_session import Session
-from ralph_testfirst import acceptance, test_file_for, test_is_broken, untick
+from ralph_testfirst import (about_a_test, acceptance, own_test, test_file_for, test_is_broken,
+                             untick)
 
 # A bug in the loop fails the test instead of being logged and survived: that
 # is how a crash in the refill hid behind a passing suite on 2026-09-26.
@@ -70,6 +71,27 @@ class TestAcceptance(unittest.TestCase):
         self.assertEqual(acceptance("In `double` (calc.py), return twice the number."), "")
         self.assertEqual(acceptance("In SKILLS.md, explain FIND:. Done when: it is there."), "")
         self.assertEqual(acceptance("Tidy things up. Done when: it is tidy."), "")
+
+    def test_an_item_about_a_test_gets_no_test_round(self):
+        # 2026-11-15: 47 test rounds in two weeks sent back for changing the
+        # test their item told them to change.
+        for item in ("In `TestCalc.test_double` (test_calc.py), assert the sign too. Done when: "
+                     "`python -m unittest test_calc.TestCalc.test_double` passes.",
+                     "In `fake_session` (`test_calc.py`), add `put_tests`. Done when: "
+                     "`fake_session().put_tests({})` returns None.",
+                     "In `test_double`, check zero as well. Done when: the test passes."):
+            self.assertTrue(about_a_test(item), item)
+            self.assertEqual(acceptance(item), "", item)
+        self.assertFalse(about_a_test(ITEM))
+        self.assertFalse(about_a_test("In `double` (calc.py), return twice. Done when: a test "
+                                      "in test_calc.py finds `double(2)` returns 4."))
+
+    def test_the_test_an_item_names_is_its_own(self):
+        item = ("In `double` (calc.py), return twice the number. Done when: `python -m unittest "
+                "test_calc.TestDouble.test_double` passes.")
+        self.assertTrue(own_test(item, "test_calc.TestDouble.test_double"))
+        self.assertFalse(own_test(item, "test_calc.TestDouble.test_double_zero"))
+        self.assertFalse(own_test(item, "test_old.TestOld.test_one"))
 
     def test_where_the_test_goes(self):
         self.assertEqual(test_file_for(ITEM, ["/w/calc.py"]), "test_calc.py")
@@ -172,11 +194,30 @@ class TestTestFirstLoop(unittest.TestCase):
         self.assertGreaterEqual(went.get("kept", 0), 1)
 
     def test_a_test_that_already_passes_is_sent_back(self):
-        self.run_session("passes", "right")
+        s = self.run_session("passes", "right")
         self.assertIn("passes before any change", self.log)
-        # After two, the item is coded without one, and no test file is left over.
+        # Once, not twice: the same question of the same code has the same answer.
+        self.assertEqual(self.log.count("Test round sent back"), 1)
+        # The code round is told, the item is coded, and no test file is left over.
+        self.assertIn("A TEST FOR THIS ITEM ALREADY PASSES", s.phase_note(ITEM, "code"))
+        self.assertIn("test_calc.TestDouble.test_double", s.phase_note(ITEM, "code"))
         self.assertIn("- [x] In `double`", read_text(self.notes))
         self.assertFalse(os.path.exists(os.path.join(self.ws, "test_calc.py")))
+
+    def test_the_test_the_item_names_may_be_written_again(self):
+        item = ("In `double` (calc.py), return twice the number. Done when: `python -m unittest "
+                "test_calc.TestDouble.test_double` passes.")
+        write_text(self.notes, "# Tasks\n\n- [ ] %s\n" % item)
+        write_text(os.path.join(self.ws, "test_calc.py"),
+                   "import unittest\n\n\nclass TestDouble(unittest.TestCase):\n"
+                   "    def test_double(self):\n        self.assertEqual(1, 1)\n")
+        self.git("add", "-A")
+        self.git("commit", "-qm", "a test that says nothing yet")
+        self.run_session("fails", "right")
+        self.assertNotIn("changed an existing test", self.log)
+        self.assertIn("Test written: test_calc.TestDouble.test_double", self.log)
+        self.assertIn("calc.double(2), 4", self.committed("test_calc.py"))
+        self.assertIn("def double", self.committed("calc.py"))
 
     def test_a_test_round_that_writes_code_is_undone(self):
         self.run_session("and_code", "nothing_useful")

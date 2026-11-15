@@ -104,6 +104,7 @@ class Session(SetupMixin, RefillMixin, OutcomeMixin, ReportMixin, SendMixin, Tes
         self.temperature = None   # the last one set, if it could be
         self.pending_tests = {}   # item -> the test a test round wrote for it (ralph_testfirst)
         self.test_misses = {}     # item -> test rounds sent back
+        self.passed_unchanged = {}  # item -> the tests written for it that passed before any change
         self.test_budgeted = set()  # items given one more round for their test round
         self.review_note = ""     # what execution settled, for the reviewer
         self.review_tag = ""      # cited / uncited / refuted: how a rejection stood

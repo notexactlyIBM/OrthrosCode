@@ -17,6 +17,9 @@ venv/
 *.before-fresh-*
 logs/
 .orthros-state.json
+# Its hourly copy, and one that could not be read, set aside.
+.orthros-state.last-good.json
+.orthros-state.unreadable-*
 .orthros-window.json
 orthros.json
 orthros.log

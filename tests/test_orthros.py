@@ -249,6 +249,76 @@ class TestRestart(Sandbox):
         self.assertEqual(again.state["next"], "B")
 
 
+class TestLostFiles(Sandbox):
+    """2026-11-15: a state or settings file that could not be read was read as
+    an empty one, and the next save wrote that over it."""
+
+    def test_an_unreadable_state_file_is_set_aside_and_the_copy_used(self):
+        self.o.agent("A")["sessions"] = 7
+        self.o.kept_at = 0
+        self.o.save()                            # an hour since the last copy: kept again
+        self.assertEqual(orthros.read_json(self.o.last_good_path)["agents"]["A"]["sessions"], 7)
+        self.write(self.root, ".orthros-state.json", "")       # what a power cut leaves
+        again = orthros.Orthros(self.root, simulate=True)
+        self.assertEqual(again.agent("A")["sessions"], 7)
+        self.assertIn("could not be read", again.state["events"][-1][1])
+        self.assertIn("Carrying on from the copy", again.state["events"][-1][1])
+        self.assertTrue([f for f in os.listdir(self.root) if ".unreadable-" in f])
+
+    def test_no_state_file_is_a_first_start_not_a_loss(self):
+        os.remove(self.o.state_path)
+        again = orthros.Orthros(self.root, simulate=True)
+        self.assertEqual(again.state["events"], [])
+        self.assertEqual(again.agent("A")["sessions"], 0)
+
+    def test_the_copy_is_not_written_on_every_save(self):
+        self.o.save()
+        self.o.agent("A")["sessions"] = 9
+        self.o.save()
+        self.assertNotEqual(orthros.read_json(self.o.last_good_path)["agents"]["A"]["sessions"], 9)
+
+    def test_settings_that_do_not_parse_stop_orthros_and_are_left_alone(self):
+        broken = '{"session_minutes": 40,\n "serve_key": "kept"\n "port": 8770}'
+        self.write(self.root, "orthros.json", broken)
+        with self.assertRaises(SystemExit) as stopped:
+            orthros.Orthros(self.root, simulate=True)
+        self.assertIn("not valid JSON", str(stopped.exception))
+        self.assertEqual(orthros.read_text(os.path.join(self.root, "orthros.json")), broken)
+
+
+class TestExerciseEnds(Sandbox):
+    """2026-11-15: an exercise done in four minutes ran its full eight, on work
+    the loop made up once its list was empty."""
+
+    def setUp(self):
+        super().setUp()
+        self.folder = self.o.folders["B"]
+        self.done = "# Practice\n\n## Tasks\n\n- [x] In `f`, return 2\n- [!] In `g`, return 3\n"
+        self.looking = {"rounds": 4, "phase": "planning"}
+
+    def test_an_exercise_whose_list_is_done_can_end(self):
+        self.write(self.folder, "orthros_tasks.md", self.done)
+        for kind in ("practice", "eval"):
+            self.assertTrue(self.o.list_is_done(kind, self.looking, self.folder))
+        self.assertTrue(self.o.list_is_done("eval", {"rounds": 1, "phase": "summarising"},
+                                            self.folder))
+
+    def test_work_on_the_twin_or_a_task_goes_on_looking(self):
+        self.write(self.folder, "orthros_tasks.md", self.done)
+        for kind in ("self", "task"):
+            self.assertFalse(self.o.list_is_done(kind, self.looking, self.folder))
+
+    def test_not_while_an_item_is_open_or_a_round_is_being_judged(self):
+        self.assertFalse(self.o.list_is_done("eval", self.looking, self.folder))   # two open
+        self.write(self.folder, "orthros_tasks.md", self.done)
+        # Ticked, but the review may yet send it back and open it again.
+        self.assertFalse(self.o.list_is_done("eval", {"rounds": 4, "phase": "reviewing"},
+                                             self.folder))
+        self.assertFalse(self.o.list_is_done("eval", {"rounds": 0, "phase": "planning"},
+                                             self.folder))
+        self.assertFalse(self.o.list_is_done("eval", {}, self.folder))
+
+
 class TestResume(Sandbox):
     def test_only_a_run_that_died_is_resumed(self):
         self.o.start()

@@ -13,18 +13,34 @@ minutes each, the whole suite about six).
 
 ## Open
 
-### The loop throws out test rounds whose test passes before any change
-- **Where:** `agent\ralph_testfirst.py` (and so `--fresh`).
-- **Why:** the ledger (912 rounds to 2026-11-07) showed 110 of 180 "rejected"
-  rounds were test rounds the loop itself sent back because the new test
-  passed on the unchanged code: a test of nothing. The field report now names
-  them (below), so the twin can see the loss; the fix is in the agent.
-- **Do:** when a test round's test passes before the change, have the loop
-  say so to the model once and ask for a test that fails first, instead of
-  ending the round; or skip straight to the change with the test kept as a
-  guard. Measure with the ledger: the share of test rounds sent back.
-- **Done when:** that share falls over a day of self mode, and
-  `agent\test_ralph_testfirst.py` covers the new path.
+### Measure the test rounds sent back, after the next `--fresh`
+- 2026-11-15 changed `agent\ralph_testfirst.py` (below). It reaches A and B
+  only through `--fresh`. In the 14 days before, 85 of 249 rounds on the
+  agents' own code were test rounds sent back (47 for changing the test their
+  item named, 38 for a test that passed unchanged), and 30 of 214 scoring
+  rounds. After a day of self mode on the new template, count again in
+  `ledger.sqlite` (`reason LIKE 'test round: the%'`): the first kind should be
+  near none, and no item should have two "passes before any change" in a row.
+
+### The held-out exam no longer tells versions apart
+- **Why:** 58 of 58 against 57 of 58 on 2026-11-15, and the same for weeks. The
+  gate still stops a broken version; it cannot show a better one. The work a
+  scoring took is now told beside the score, which gives the twin a direction,
+  but does not decide anything.
+- **Also:** a scoring takes the first `eval_count` exercises by name, so four of
+  the twelve (the last four by name) have never been scored. `--doctor` now
+  warns. With exercises ending when their list is done, `eval_count: 12` costs
+  about an hour, less than eight did before.
+- **Do, with the card free to try them:** add harder exercises (coarser items
+  the agent must split itself, more edge cases in the hidden tests), each tried
+  once by the current agents so that it is neither full marks nor hopeless.
+  Then choose each scoring's set by headroom: exercises the last passed version
+  did not fully pass first, a quarter of the set from ones never scored, the
+  rest those scored longest ago -- compared with the latest passed score of
+  each exercise rather than only the parent's. That is a change to the gate
+  itself, so it wants its own pass and tests.
+- **Done when:** a scoring's total is below full marks, and every exercise in
+  `evals\` has been scored within three scorings.
 
 ### Judge the bear's walk in the window
 - 2026-11-07's hump read as an arch in the window. 2026-11-08 flattened the
@@ -57,6 +73,24 @@ minutes each, the whole suite about six).
 - *More dance moves.* Eight dances and a backflip were added 2026-11-03; enough.
 
 ## Done
+
+**2026-11-15** (needs an Orthros restart; the `agent\` part needs `--fresh`)
+- A practice or a scoring ends when its own list is done. The ledger and the
+  turn logs showed a held-out exercise finished in three or four minutes and
+  the loop then inventing work on it until its eight ran out: over half of a
+  70-minute scoring. Orthros asks for the stop when the loop reports it is
+  looking for more work and no item is open (`list_is_done`).
+- The minutes, rounds and tokens a scoring took are kept with the score and
+  told in the field report beside the version before (`cost_words`). They do
+  not gate anything.
+- `orthros.json` that does not parse stops Orthros with a message; it used to
+  be replaced by the defaults and a new serve key. An unreadable state file is
+  set aside and the hourly copy used; it used to be read as no history.
+  `write_json` reaches the disk before the rename.
+- Test rounds (`agent\`): an item about a test gets no test round; a test the
+  item names may be written again; a test that passes on the unchanged code is
+  not asked for twice -- the code round is told and decides.
+- `--doctor` warns when `eval_count` leaves held-out exercises unscored.
 
 **2026-11-07, second pass** (needs an Orthros restart; `agent\requirements.txt`
 changed, so the next `--fresh` or SETUP picks that up)

@@ -19,6 +19,20 @@ The test is never committed on its own. A failing test in the history would
 mark the project broken for every round after it, and an item parked with its
 test unpassed would leave that test failing for good. It goes into the history
 with the change that makes it pass, or not at all.
+
+A test round is sent back when it proves nothing, and until 2026-11-15 it was
+then run again, the same way, on the same code. In the two weeks before, 85 of
+249 rounds on the agents' own code went to that, of two kinds:
+
+- The item was itself about a test ("In `test_x` (test_calc.py), assert ...").
+  The round did what the item said, which is to change an existing test, and
+  was sent back for it: 47 rounds, 14 of them on one item. Such an item gets no
+  test round (`acceptance`), and a test the item names is the item's to write
+  again (`own_test`).
+- The new test passed on the unchanged code. A second test round asks the same
+  question of the same code, and two times in three got the same answer. Now
+  there is no second one: the next round is a code round that is told, and
+  decides whether the item is already done or the test missed it.
 """
 
 import ast
@@ -40,6 +54,7 @@ CHECKABLE = re.compile(r"\b(returns?|raises?|prints?|equals?|is|are|==|tests?|pa
 CODE_NAME = re.compile(r"^[A-Za-z_][\w.]*(\(\))?$")
 PROSE = (".md", ".cmd", ".bat", ".html", ".txt", ".json", ".toml", ".cfg")
 FILE_NAMED = re.compile(r"\b([\w-]+\.py)\b")
+PASSES_UNCHANGED = "the new test passes before any change, so it does not test the item"
 NO_MODULE = re.compile(r"ModuleNotFoundError: No module named '([\w.]+)'")
 LAST_FRAME = re.compile(r'File "([^"]+)", line \d+')
 
@@ -77,6 +92,8 @@ def acceptance(task_text):
     if not match:
         return ""
     check = match.group(1).strip()
+    if about_a_test(task_text):
+        return ""
     # Something code-shaped to test: a .py file, or a name like `add` or
     # `Class.method`. An item about SKILLS.md or config.cmd has no test to write.
     names = NAMED.findall(task_text) + FILE_NAMED.findall(task_text)
@@ -85,6 +102,25 @@ def acceptance(task_text):
     if not code or not CHECKABLE.search(check):
         return ""
     return check
+
+
+def about_a_test(task_text):
+    """Is the item's work itself a test? Then there is no test to write first.
+
+    Every .py file it names is a test file, or the thing it starts with is a
+    test: "In `TestCalc.test_double` (test_calc.py), assert ...".
+    """
+    files = FILE_NAMED.findall(task_text or "")
+    if files:
+        return all(f.startswith("test_") for f in files)
+    subject = NAMED.findall(task_text or "")[:1]
+    return bool(subject) and subject[0].split(".")[-1].lower().startswith("test")
+
+
+def own_test(task_text, test_id):
+    """Does the item name this test? Then it is the item's to write, or write again."""
+    method = test_id.rsplit(".", 1)[-1]
+    return bool(re.search(r"(?<![\w])%s(?![\w])" % re.escape(method), task_text or ""))
 
 
 def test_file_for(task_text, source_files):
@@ -197,7 +233,22 @@ checks exactly this:
 - Import what it tests from the project; do not copy code into the test.
 - It must FAIL on the code as it stands now -- that is how we know it tests
   something. If what it tests does not exist yet, failing to import it is fine.
+- If the item names its test, that is the one to write -- or to write again,
+  if it is already there. Leave every other test exactly as it is.
 - Change no other file. Tick nothing. The loop runs the test after this round.
+"""
+
+ALREADY_PASSES = """# A TEST FOR THIS ITEM ALREADY PASSES
+
+A test written for this item's `Done when` ({tests}) passed on the code as it
+stands, before any change, so it was not kept. One of two things is true:
+
+- The item is already done: an earlier change covered it. Then change no
+  code. Tick the item, with one line saying which code already does it.
+- The test missed what the item asks for. Then do the item, and add a test
+  that fails without your change.
+
+Read the code the item names before deciding which.
 """
 
 CODE_ROUND = """# THIS ITEM HAS A TEST
@@ -305,6 +356,9 @@ class TestFirstMixin:
         pending = self.pending_tests.get(task)
         if pending and not pending["kept"]:
             return CODE_ROUND.format(tests=", ".join("`%s`" % t for t in pending["ids"]))
+        if self.passed_unchanged.get(task):
+            return ALREADY_PASSES.format(
+                tests=", ".join("`%s`" % t for t in self.passed_unchanged[task]))
         return ""
 
     def put_test_back(self, task):
@@ -370,6 +424,11 @@ class TestFirstMixin:
         # The tests already there are what every other change is held to. A
         # test round that edits one would carry the edit in with its own test.
         altered = sorted(t for t, source in ids_before.items() if ids_after.get(t) != source)
+        # Except the test the item itself names, written again: that one is the
+        # item's own, and is judged like a new one -- it must fail first.
+        own = [t for t in altered if t in ids_after and own_test(task, t)]
+        altered = [t for t in altered if t not in own]
+        new = sorted(new + own)
         why = ""
         if changed_code:
             why = "the test round changed code, not only a test"
@@ -388,7 +447,7 @@ class TestFirstMixin:
                 why = "the new test is broken (%s): %s -- %s" % (
                     unusable[0][0], unusable[0][1], last_words(unusable[0][2]))
             elif all(o == "passed" for _, o, _ in ran):
-                why = "the new test passes before any change, so it does not test the item"
+                why = PASSES_UNCHANGED
 
         # Out of the tree either way: kept aside on success, dropped on failure.
         self.put_tests({n: before for n, (before, _) in changed.items()})
@@ -397,6 +456,10 @@ class TestFirstMixin:
 
         if why:
             self.test_misses[task] = self.test_misses.get(task, 0) + 1
+            if why == PASSES_UNCHANGED:
+                # No second test round: the code round is told instead (phase_note).
+                self.test_misses[task] = max(self.test_misses[task], TEST_TRIES)
+                self.passed_unchanged[task] = new[:3]
             self.stalled += 1
             self.note("Test round sent back: %s" % why[:110])
             from ralph_tasks import remember_review

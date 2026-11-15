@@ -34,6 +34,18 @@ class TestCompare(unittest.TestCase):
     def test_totals(self):
         self.assertEqual(orthros.score_totals({"a": [5, 5], "b": [2, 4]}), (1, 2, 7, 9))
 
+    def test_what_a_scoring_took(self):
+        mine = {"a": [240, 5, 40000], "b": [300, 7, 60000]}
+        self.assertEqual(orthros.cost_words({}), "")
+        self.assertEqual(orthros.cost_words(mine), "it took 9 min, 12 rounds and 100,000 tokens")
+        self.assertEqual(orthros.cost_words(mine, {"a": [480, 9, 80000], "b": [480, 9, 90000]}),
+                         "it took 9 min, 12 rounds and 100,000 tokens (the version before it: "
+                         "16 min, 18 rounds and 170,000 tokens)")
+        # Only the exercises both were timed on are compared.
+        self.assertEqual(orthros.cost_words(mine, {"a": [480, 9, 80000]}),
+                         "the 1 exercises both were timed on took 4 min, 5 rounds and 40,000 "
+                         "tokens (the version before it: 8 min, 9 rounds and 80,000 tokens)")
+
 
 class TestProofByScore(Sandbox):
     def setUp(self):
@@ -156,6 +168,27 @@ class TestProofByScore(Sandbox):
         ev = self.o.maybe_start_eval("A")
         self.o.judge_eval(self.result("A", launched=False, exercise=ev["todo"][0]))
         self.assertNotIn("evaluating", self.o.state)
+
+    def test_the_work_a_scoring_took_is_told_beside_the_score(self):
+        # 2026-11-15: 58 of 58 against 57 of 58 -- the tests no longer told
+        # versions apart, and the report had nothing else to say.
+        def timed(ev, seconds):
+            for exercise in list(ev["todo"]):
+                self.o.judge_eval({"agent": "A", "launched": True, "exercise": exercise,
+                                   "score": [5, 5], "seconds": seconds, "rounds": 6,
+                                   "tokens": 50000})
+        self.o.judge(self.result("A", **GOOD_TURN))
+        timed(self.o.maybe_start_eval("A"), 300)
+        self.b_changes_a("def f():\n    return 4\n")
+        self.o.judge(self.result("A", **GOOD_TURN))
+        ev = self.o.maybe_start_eval("A")
+        timed(ev, 240)
+        self.assertEqual(self.o.agent("A")["scored"][ev["sha"]]["cost"][self.exercises[0]],
+                         [240, 6, 50000])
+        report = orthros.read_text(os.path.join(self.o.folders["A"], "FIELD_REPORT.md"))
+        self.assertIn("Working them, it took 16 min, 24 rounds and 200,000 tokens (the version "
+                      "before it: 20 min, 24 rounds and 200,000 tokens).", report)
+        self.assertEqual(self.b_code(), "def f():\n    return 4\n")     # kept, as before
 
     def test_an_agent_that_names_a_held_out_exercise_is_flagged(self):
         distinctive = [e for e in orthros.work.eval_exercises() if "_" in e]

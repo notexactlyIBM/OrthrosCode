@@ -147,11 +147,18 @@ def read_json(path, default=None):
 
 
 def write_json(path, data):
-    """True once written; False when the disk would not take it -- for the caller to say."""
+    """True once written; False when the disk would not take it -- for the caller to say.
+
+    On the disk before it takes the old file's place: a rename is atomic, but
+    after a power cut the new name can point at a file whose bytes never
+    arrived, and an empty state file reads as "no history".
+    """
     tmp = path + ".tmp"
     try:
         with open(tmp, "w", encoding="utf-8") as handle:
             json.dump(data, handle, indent=1)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(tmp, path)
         return True
     except OSError:
@@ -722,7 +729,9 @@ rounds per item, fewer changes sent back, more tests passing -- not only
 getting better at editing itself. FIELD_REPORT.md has the evidence: lines
 starting **Held-out score** say how a version did on exercises it never
 practises on, compared with the version before it -- a version that does
-worse is rolled back, and its changes never reach the twin. Lines starting
+worse is rolled back, and its changes never reach the twin -- and how many
+minutes, rounds and tokens the same exercises took: at the same score, less
+is better. Lines starting
 **Practice** are exercises scored by tests the agent never saw, and lines
 starting **Task** are real projects. A change is worth making when it moves
 those numbers. Improving the machinery that improves itself counts only when

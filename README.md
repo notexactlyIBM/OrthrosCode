@@ -52,7 +52,8 @@ Every step is a git commit you can read.
    it has never seen. Its changes are copied into its twin only if the score
    is no worse than the last version that passed (and not far below the best
    ever). If it is worse, it is rolled back, and the twin that made the change
-   is told the score.
+   is told the score -- and how many minutes, rounds and tokens the exercises
+   took, beside the version before: at the same score, less is better.
 
 That last step is what makes it self-improvement rather than drift. It is the
 same idea at the centre of the published self-improving coding agents (the
@@ -233,7 +234,7 @@ one run of a tool may take).
 | `practice_every` | 4 | one turn in this many is a practice exercise (0 = off) |
 | `prove_by_score` | true | changes spread only after a held-out score |
 | `eval_every` | 4 | good turns between scorings of an agent |
-| `eval_count`, `eval_minutes` | 8, 8 | exercises per scoring and minutes each (about 90 minutes in all) |
+| `eval_count`, `eval_minutes` | 8, 8 | exercises per scoring -- the first that many in `evals\`, by name -- and the most minutes each gets. An exercise ends when its list is done, so eight take about 40 minutes |
 | `pause_after_idle` | 4 | stop after this many turns in a row that kept nothing |
 | `min_free_mb`, `critical_free_mb` | 4096, 1536 | memory (RAM plus page file) that must be free to start a turn, and below which a turn is stopped early |
 | `keep_logs` | 300 | turn logs kept in `logs\`, newest first |
@@ -247,7 +248,9 @@ one run of a tool may take).
 | `dance_music` | "" | a folder of mp3s; when the bear dances, a random one plays from its start |
 
 `ORTHROS.bat --doctor` warns about any setting in `orthros.json` that nothing
-reads any more.
+reads any more, and about held-out exercises `eval_count` never reaches. If
+`orthros.json` is not valid JSON, Orthros says so and does not start, rather
+than put the defaults and a new serve key in its place.
 
 One model does each job, and the card holds one at a time. The agents' own
 model -- `LC_MODEL_KEY` in their `config.cmd` -- always evolves them and always
@@ -301,6 +304,9 @@ without room, and stops one early rather than be killed.
 - **Something left over** after a crash or a stop at the wrong moment -- a
   model still loaded, a turn that never ended. Diagnostics, Housekeeping,
   **Clean up**.
+- **"could not be read" at start.** A power cut can leave Orthros's state file
+  empty. It is set aside as `.orthros-state.unreadable-<stamp>.json` and
+  Orthros carries on from a copy it keeps, an hour old at most.
 - **Serving, but nothing arrives.** The firewall rule above; then the page's
   counts -- a wrong key shows there, and Recent says which machine sent it.
 
